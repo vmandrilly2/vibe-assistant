@@ -24,6 +24,7 @@ API_KEY = os.getenv("DEEPGRAM_API_KEY")
 DICTATION_TRIGGER_BUTTON = mouse.Button.middle # CHANGED: Use Middle Mouse Button
 COMMAND_TRIGGER_BUTTON = None # DISABLED temporarily until new trigger decided
 MIN_DURATION_SEC = 0.5 # Minimum recording duration to process
+SELECTED_LANGUAGE = "en-US" # Placeholder for language selection
 # TODO: Add placeholders for wake words, confirmation/cancel phrases etc. for future features
 
 # --- Logging Setup ---
@@ -39,7 +40,7 @@ current_mode = None # 'dictation' or 'command'
 kb_controller = keyboard.Controller()
 
 # --- State for Dictation Typing Simulation ---
-last_typed_transcript = "" # Store the last typed text to calculate backspaces
+last_typed_interim = "" # Store the last *interim* text typed
 
 # --- State for Command Mode ---
 current_command_transcript = "" # Store the transcript for command mode
@@ -60,46 +61,67 @@ def simulate_backspace(count):
         time.sleep(0.01) # Small delay between key presses
 
 def handle_dictation_interim(transcript):
-    """Handles interim dictation results by simulating typing/correction."""
-    global last_typed_transcript
-    # Only simulate if the transcript is not empty
-    if not transcript:
-        return 
+    """Handles interim dictation results with efficient typing simulation."""
+    global last_typed_interim
+    if not transcript or transcript == last_typed_interim:
+        return # Nothing to do if transcript is empty or unchanged
         
-    logging.debug(f"Interim Dictation: '{transcript}', Last typed: '{last_typed_transcript}'")
+    logging.debug(f"Interim Dict D T: '{transcript}', Last typed interim: '{last_typed_interim}'")
     
-    # Calculate backspaces needed ONLY if there was a previous interim result
-    backspaces_needed = len(last_typed_transcript) if last_typed_transcript else 0
+    # Find the length of the longest common prefix
+    common_prefix_len = 0
+    min_len = min(len(last_typed_interim), len(transcript))
+    while common_prefix_len < min_len and last_typed_interim[common_prefix_len] == transcript[common_prefix_len]:
+        common_prefix_len += 1
+        
+    # Calculate backspaces needed (characters to remove from the end of the old interim)
+    backspaces_needed = len(last_typed_interim) - common_prefix_len
     
+    # Calculate the new suffix to type
+    text_to_type = transcript[common_prefix_len:]
+    
+    logging.debug(f"Common Prefix Len: {common_prefix_len}, Backspaces: {backspaces_needed}, Type: '{text_to_type}'")
+
     if backspaces_needed > 0:
         simulate_backspace(backspaces_needed)
-    
-    simulate_typing(transcript)
-    last_typed_transcript = transcript # Store what was just typed
+        
+    if text_to_type:
+        simulate_typing(text_to_type)
+        
+    last_typed_interim = transcript # Update the last typed interim transcript
 
 def handle_dictation_final(final_transcript):
-    """Handles the final dictation transcript by correcting the last interim result 
-       and typing the final version followed by a space."""
-    global last_typed_transcript
-    # Only simulate if the final transcript is not empty
-    if not final_transcript:
-        # If the final is empty, but we typed an interim, clear the interim
-        if last_typed_transcript:
-            simulate_backspace(len(last_typed_transcript))
-            last_typed_transcript = "" 
-        return
-        
-    logging.info(f"Final Dictation: '{final_transcript}'")
+    """Handles the final dictation transcript, correcting the last interim result efficiently."""
+    global last_typed_interim
+    # Treat final transcript + space as the target text
+    target_text = final_transcript + ' ' if final_transcript else ''
+
+    if not target_text and not last_typed_interim:
+         return # Nothing to do
+             
+    logging.info(f"Final Dictation: '{final_transcript}' -> Target: '{target_text}', Last Interim: '{last_typed_interim}'")
     
-    # Calculate backspaces needed for the last interim result
-    backspaces_needed = len(last_typed_transcript) if last_typed_transcript else 0
+    # Find the length of the longest common prefix between last interim and target
+    common_prefix_len = 0
+    min_len = min(len(last_typed_interim), len(target_text))
+    while common_prefix_len < min_len and last_typed_interim[common_prefix_len] == target_text[common_prefix_len]:
+        common_prefix_len += 1
+        
+    # Calculate backspaces needed (characters to remove from the end of the old interim)
+    backspaces_needed = len(last_typed_interim) - common_prefix_len
+    
+    # Calculate the new suffix to type
+    text_to_type = target_text[common_prefix_len:]
+    
+    logging.debug(f"[Final] Common Prefix Len: {common_prefix_len}, Backspaces: {backspaces_needed}, Type: '{text_to_type}'")
 
     if backspaces_needed > 0:
         simulate_backspace(backspaces_needed)
-    
-    # Type the final transcript + a space
-    simulate_typing(final_transcript + ' ') 
-    last_typed_transcript = "" # Reset for next utterance
+        
+    if text_to_type:
+        simulate_typing(text_to_type)
+        
+    last_typed_interim = "" # Reset last interim typed *after* handling final result
 
     # --- Optional AI Correction Section (Placeholder) ---
     # This part remains a TODO, to be implemented if the setting is enabled
@@ -156,7 +178,6 @@ async def on_open(self, open, **kwargs):
     logging.info("Deepgram connection opened.")
 
 async def on_message(self, result, **kwargs):
-    global last_typed_transcript # Access global for dictation mode
     try:
         transcript = result.channel.alternatives[0].transcript
         if not transcript:
@@ -164,8 +185,7 @@ async def on_message(self, result, **kwargs):
 
         if current_mode == "dictation":
             if result.is_final:
-                # Update last_typed with the final part before calling handler
-                final_part = transcript # Assuming final result contains the full utterance part
+                final_part = transcript # Get the final utterance part
                 handle_dictation_final(final_part)
             else:
                 handle_dictation_interim(transcript)
@@ -185,11 +205,7 @@ async def on_speech_started(self, speech_started, **kwargs):
     logging.debug("Deepgram Speech Started")
 
 async def on_utterance_end(self, utterance_end, **kwargs):
-    global last_typed_transcript
     logging.debug("Deepgram Utterance Ended")
-    if current_mode == "dictation":
-        # Reset last typed transcript at utterance end for dictation
-        last_typed_transcript = "" 
 
 async def on_error(self, error, **kwargs):
     logging.error(f"Deepgram Handled Error: {error}")
@@ -307,9 +323,11 @@ async def main():
                     dg_connection.on(LiveTranscriptionEvents.Close, on_close)
                     dg_connection.on(LiveTranscriptionEvents.Unhandled, on_unhandled)
 
-                    # 3. Define options
+                    # 3. Define options using configured language
                     options = LiveOptions(
-                        model="nova-2", language="en-US", smart_format=True,
+                        model="nova-2", 
+                        language=SELECTED_LANGUAGE, # Use variable here
+                        smart_format=True,
                         interim_results=True, utterance_end_ms="1000", 
                         vad_events=True, endpointing=300, 
                         encoding="linear16", channels=1, sample_rate=16000
@@ -382,7 +400,7 @@ async def main():
                 # 4. Reset state
                 current_mode = None
                 current_command_transcript = ""
-                last_typed_transcript = "" # Reset dictation tracking
+                last_typed_interim = "" # Reset dictation tracking
                 
             await asyncio.sleep(0.1)
 

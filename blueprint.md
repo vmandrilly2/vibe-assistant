@@ -33,11 +33,11 @@ Shall we make a search to consider what already exists (especially on github) th
 - **Dual Voice Modes (Multiple Activation Methods):** 
     - **Primary Trigger:** Middle Mouse Button (Wheel Press) - Hold-to-Talk. (Further differentiation TBD).
     - (Future) Wake Word activation.
-- **User Configuration:** Highly configurable system via UI (e.g., tray icon menu): Trigger methods (buttons, keys, wake words), specific wake words, SR provider, optional Dictation AI correction, Command list, cancellation methods, confirmation methods, etc.
+- **User Configuration:** Highly configurable system via UI (e.g., tray icon menu): Trigger methods (buttons, keys, wake words), specific wake words, SR provider **and language**, optional Dictation AI correction, Command list, cancellation methods, confirmation methods, etc.
 
 - **Mode 1: Dictation**
     - **Activation:** Hold Dictation trigger (e.g., Middle Mouse Button).
-    - **Recording & Streaming:** Audio streamed to Deepgram while trigger is active (hold) or until confirmation/timeout (wake word).
+    - **Recording & Streaming:** Audio streamed to Deepgram (using configured language) while trigger is active (hold) or until confirmation/timeout (wake word).
     - **Real-time Typing Simulation:** Deepgram's interim/final results typed at cursor using `pynput`. Handles Deepgram's real-time corrections via backspace simulation.
     - **Completion:** Release Dictation trigger OR Say confirmation phrase (e.g., "confirmed") OR pause detection.
     - ***Optional* AI Correction:** If enabled, final segment sent to AI for review. Corrections highlighted; user can reject; final text updated at cursor.

@@ -40,7 +40,8 @@ current_mode = None # 'dictation' or 'command'
 kb_controller = keyboard.Controller()
 
 # --- State for Dictation Typing Simulation ---
-last_typed_interim = "" # Store the last *interim* text typed
+last_simulated_text = "" # Store the transcript corresponding to the last simulation action
+typed_word_history = [] # Store history of typed words
 
 # --- State for Command Mode ---
 current_command_transcript = "" # Store the transcript for command mode
@@ -61,78 +62,89 @@ def simulate_backspace(count):
         time.sleep(0.01) # Small delay between key presses
 
 def handle_dictation_interim(transcript):
-    """Handles interim dictation results with efficient typing simulation."""
-    global last_typed_interim
-    if not transcript or transcript == last_typed_interim:
-        return # Nothing to do if transcript is empty or unchanged
-        
-    logging.debug(f"Interim Dict D T: '{transcript}', Last typed interim: '{last_typed_interim}'")
+    """Handles interim dictation results ONLY by updating the last_typed_interim state.
+    It does NOT simulate typing or backspaces anymore."""
+    global last_simulated_text # Keep variable for now, but don't use for typing
+    if not transcript:
+        return
+
+    # Only log, do not simulate keys or update last_simulated_text here
+    logging.debug(f"Interim Received (Not Processed): '{transcript}'")
+    # last_simulated_text = transcript # DO NOT UPDATE STATE HERE
+
+    # TODO: Optionally display the interim transcript in a temporary UI element here
+
+    # --- REMOVED TYPING/BACKSPACE LOGIC ---
+
+def handle_dictation_final(final_transcript, history):
+    """Handles the final dictation transcript based on history and incoming transcript.
+    Calculates target state, determines diff from current state, executes, updates history."""
+    logging.warning(f"RAW FINAL TRANSCRIPT RECEIVED: '{final_transcript}'")
     
-    # Find the length of the longest common prefix
+    # --- Step A: Calculate Target Word List --- 
+    # Start with words from the current history
+    target_words = [entry['text'] for entry in history]
+    logging.debug(f"Initial target_words from history: {target_words}")
+
+    original_words = final_transcript.split()
+    punctuation_to_strip = '.,!?;:'
+    
+    # Process the new transcript against the target list
+    for word in original_words:
+        cleaned_word = word.rstrip(punctuation_to_strip).lower()
+
+        if cleaned_word == "back":
+            if target_words:
+                removed = target_words.pop()
+                logging.info(f"Processing 'back', removed '{removed}' from target_words.")
+            else:
+                logging.info(f"Processing 'back', but target_words already empty.")
+        else:
+            target_words.append(word) # Append original word with punctuation
+    
+    logging.debug(f"Final target_words after processing transcript: {target_words}")
+
+    # --- Step B: Calculate Target Text --- 
+    target_text = " ".join(target_words) + ' ' if target_words else ''
+    logging.debug(f"Calculated target_text: '{target_text}'")
+
+    # --- Step C: Calculate Current Text on Screen (Estimate from OLD history) --- 
+    # We need the text *before* processing the current transcript's 'back' commands
+    current_text_estimate = " ".join([entry['text'] for entry in history]) + ' ' if history else ''
+    logging.debug(f"Estimated current text (from old history): '{current_text_estimate}'")
+
+    # --- Step D: Calculate Diff --- 
     common_prefix_len = 0
-    min_len = min(len(last_typed_interim), len(transcript))
-    while common_prefix_len < min_len and last_typed_interim[common_prefix_len] == transcript[common_prefix_len]:
+    min_len = min(len(current_text_estimate), len(target_text))
+    while common_prefix_len < min_len and current_text_estimate[common_prefix_len] == target_text[common_prefix_len]:
         common_prefix_len += 1
         
-    # Calculate backspaces needed (characters to remove from the end of the old interim)
-    backspaces_needed = len(last_typed_interim) - common_prefix_len
-    
-    # Calculate the new suffix to type
-    text_to_type = transcript[common_prefix_len:]
-    
-    logging.debug(f"Common Prefix Len: {common_prefix_len}, Backspaces: {backspaces_needed}, Type: '{text_to_type}'")
-
-    if backspaces_needed > 0:
-        simulate_backspace(backspaces_needed)
-        
-    if text_to_type:
-        simulate_typing(text_to_type)
-        
-    last_typed_interim = transcript # Update the last typed interim transcript
-
-def handle_dictation_final(final_transcript):
-    """Handles the final dictation transcript, correcting the last interim result efficiently."""
-    global last_typed_interim
-    # Treat final transcript + space as the target text
-    target_text = final_transcript + ' ' if final_transcript else ''
-
-    if not target_text and not last_typed_interim:
-         return # Nothing to do
-             
-    logging.info(f"Final Dictation: '{final_transcript}' -> Target: '{target_text}', Last Interim: '{last_typed_interim}'")
-    
-    # Find the length of the longest common prefix between last interim and target
-    common_prefix_len = 0
-    min_len = min(len(last_typed_interim), len(target_text))
-    while common_prefix_len < min_len and last_typed_interim[common_prefix_len] == target_text[common_prefix_len]:
-        common_prefix_len += 1
-        
-    # Calculate backspaces needed (characters to remove from the end of the old interim)
-    backspaces_needed = len(last_typed_interim) - common_prefix_len
-    
-    # Calculate the new suffix to type
+    backspaces_needed = len(current_text_estimate) - common_prefix_len
     text_to_type = target_text[common_prefix_len:]
     
-    logging.debug(f"[Final] Common Prefix Len: {common_prefix_len}, Backspaces: {backspaces_needed}, Type: '{text_to_type}'")
+    logging.debug(f"Diff Calculation: Prefix={common_prefix_len}, Backspaces={backspaces_needed}, Type='{text_to_type}'")
 
+    # --- Step E: Execute Typing Actions --- 
+    # IMPORTANT: Order matters. Backspace first, then type.
     if backspaces_needed > 0:
         simulate_backspace(backspaces_needed)
         
     if text_to_type:
         simulate_typing(text_to_type)
-        
-    last_typed_interim = "" # Reset last interim typed *after* handling final result
 
-    # --- Optional AI Correction Section (Placeholder) ---
-    # This part remains a TODO, to be implemented if the setting is enabled
-    # if settings.enable_ai_correction:
-    #     corrected_text = call_ai_correction(final_transcript)
-    #     if corrected_text != final_transcript:
-    #         logging.info(f"AI Corrected: '{corrected_text}'")
-    #         simulate_backspace(len(final_transcript) + 1) # Remove final + space
-    #         simulate_typing(corrected_text + ' ')
-    #         # TODO: Handle highlighting/rejection UI logic
-    pass # End of function
+    # --- Step F: Update History to Match Target State --- 
+    history.clear() 
+    if target_words: # Use the target_words list we built
+        logging.debug(f"Rebuilding history with: {target_words}")
+        for word in target_words:
+            if word: # Should not be necessary if split is good, but safe
+                length_with_space = len(word) + 1
+                entry = {"text": word, "length_with_space": length_with_space}
+                history.append(entry)
+    else:
+        logging.debug("History cleared as target_words is empty.")
+
+    return history # Return the new history state
 
 def handle_command_interim(transcript):
     """Displays interim command transcript (e.g., in a UI)."""
@@ -178,6 +190,7 @@ async def on_open(self, open, **kwargs):
     logging.info("Deepgram connection opened.")
 
 async def on_message(self, result, **kwargs):
+    global typed_word_history # Keep global here to update the list reference
     try:
         transcript = result.channel.alternatives[0].transcript
         if not transcript:
@@ -186,8 +199,10 @@ async def on_message(self, result, **kwargs):
         if current_mode == "dictation":
             if result.is_final:
                 final_part = transcript # Get the final utterance part
-                handle_dictation_final(final_part)
+                # Pass history in, get potentially modified history back
+                typed_word_history = handle_dictation_final(final_part, typed_word_history)
             else:
+                # Interim handler doesn't need history
                 handle_dictation_interim(transcript)
         elif current_mode == "command":
             if result.is_final:
@@ -400,7 +415,7 @@ async def main():
                 # 4. Reset state
                 current_mode = None
                 current_command_transcript = ""
-                last_typed_interim = "" # Reset dictation tracking
+                last_simulated_text = "" # Reset dictation tracking
                 
             await asyncio.sleep(0.1)
 

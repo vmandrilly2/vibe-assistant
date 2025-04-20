@@ -23,15 +23,20 @@ Shall we make a search to consider what already exists (especially on github) th
 - **Future SR Options:** Design should allow adding other SR providers (e.g., AssemblyAI, Google Cloud Streaming, offline Whisper/Vosk) as selectable options later.
 - **Input Confirmation:** Testing confirmed `pynput` successfully captures all 5 mouse buttons (Left, Right, Middle, X1, X2) and scroll events on the target Windows 10 system.
 
+## Known Issues / Planned Enhancements
+
+- **Initial Transcription Delay:** Audio spoken immediately upon trigger activation may be missed due to connection/processing latency. **Plan:** Implement a short (~2s) rolling audio buffer to capture pre-activation speech.
+- **Trigger Button Conflicts:** Default side mouse buttons (X1/X2) conflict with standard application functions (e.g., Back/Forward navigation in Notepad++, Cursor). **Resolution:** Switched default trigger to Middle Mouse Button (Wheel Press). Further refinement (e.g., short vs. long press, modifiers) might be needed.
+
 ## Key Features
 
-- **Dual Voice Modes (Multiple Activation Methods):** Implement two distinct voice input modes, configurable to be activated by:
-    - **Hold-to-Talk:** Holding a specific mouse button or key.
-    - **Wake Word:** Detecting a specific phrase (e.g., "hey" for Dictation, "command" for Command).
+- **Dual Voice Modes (Multiple Activation Methods):** 
+    - **Primary Trigger:** Middle Mouse Button (Wheel Press) - Hold-to-Talk. (Further differentiation TBD).
+    - (Future) Wake Word activation.
 - **User Configuration:** Highly configurable system via UI (e.g., tray icon menu): Trigger methods (buttons, keys, wake words), specific wake words, SR provider, optional Dictation AI correction, Command list, cancellation methods, confirmation methods, etc.
 
 - **Mode 1: Dictation**
-    - **Activation:** Hold Dictation trigger OR Say Dictation wake word.
+    - **Activation:** Hold Dictation trigger (e.g., Middle Mouse Button).
     - **Recording & Streaming:** Audio streamed to Deepgram while trigger is active (hold) or until confirmation/timeout (wake word).
     - **Real-time Typing Simulation:** Deepgram's interim/final results typed at cursor using `pynput`. Handles Deepgram's real-time corrections via backspace simulation.
     - **Completion:** Release Dictation trigger OR Say confirmation phrase (e.g., "confirmed") OR pause detection.
@@ -39,7 +44,7 @@ Shall we make a search to consider what already exists (especially on github) th
     - **Filtering:** Minimum duration check.
 
 - **Mode 2: Command**
-    - **Activation:** Hold Command trigger OR Say Command wake word.
+    - **Activation:** Hold Command trigger (e.g., Needs alternative trigger - TBD, maybe Middle + Modifier Key?).
     - **Recording & Streaming:** Audio streamed to Deepgram while trigger is active or until confirmation/timeout.
     - **Command Feedback:** Recognized command text displayed in a temporary UI element.
     - **Completion & Confirmation:** Release Command trigger OR Say confirmation phrase (e.g., "confirmed").

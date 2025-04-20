@@ -21,8 +21,8 @@ load_dotenv() # Load environment variables from .env file
 API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
 # Placeholder for trigger configuration (will be loaded from settings later)
-DICTATION_TRIGGER_BUTTON = mouse.Button.x1 # Example: Side button 1
-COMMAND_TRIGGER_BUTTON = mouse.Button.x2   # Example: Side button 2
+DICTATION_TRIGGER_BUTTON = mouse.Button.middle # CHANGED: Use Middle Mouse Button
+COMMAND_TRIGGER_BUTTON = None # DISABLED temporarily until new trigger decided
 MIN_DURATION_SEC = 0.5 # Minimum recording duration to process
 # TODO: Add placeholders for wake words, confirmation/cancel phrases etc. for future features
 
@@ -62,35 +62,55 @@ def simulate_backspace(count):
 def handle_dictation_interim(transcript):
     """Handles interim dictation results by simulating typing/correction."""
     global last_typed_transcript
+    # Only simulate if the transcript is not empty
+    if not transcript:
+        return 
+        
     logging.debug(f"Interim Dictation: '{transcript}', Last typed: '{last_typed_transcript}'")
     
-    # Basic correction: backspace the previous interim result and type the new one
-    # More sophisticated logic needed for word-level correction
-    if last_typed_transcript:
-        simulate_backspace(len(last_typed_transcript))
+    # Calculate backspaces needed ONLY if there was a previous interim result
+    backspaces_needed = len(last_typed_transcript) if last_typed_transcript else 0
+    
+    if backspaces_needed > 0:
+        simulate_backspace(backspaces_needed)
     
     simulate_typing(transcript)
     last_typed_transcript = transcript # Store what was just typed
 
 def handle_dictation_final(final_transcript):
-    """Handles the final dictation transcript."""
+    """Handles the final dictation transcript by correcting the last interim result 
+       and typing the final version followed by a space."""
     global last_typed_transcript
+    # Only simulate if the final transcript is not empty
+    if not final_transcript:
+        # If the final is empty, but we typed an interim, clear the interim
+        if last_typed_transcript:
+            simulate_backspace(len(last_typed_transcript))
+            last_typed_transcript = "" 
+        return
+        
     logging.info(f"Final Dictation: '{final_transcript}'")
     
-    # Correct the last typed interim result
-    if last_typed_transcript:
-        simulate_backspace(len(last_typed_transcript))
+    # Calculate backspaces needed for the last interim result
+    backspaces_needed = len(last_typed_transcript) if last_typed_transcript else 0
+
+    if backspaces_needed > 0:
+        simulate_backspace(backspaces_needed)
     
-    simulate_typing(final_transcript + ' ') # Type final + space
+    # Type the final transcript + a space
+    simulate_typing(final_transcript + ' ') 
     last_typed_transcript = "" # Reset for next utterance
 
-    # TODO: Optional AI Correction (if enabled)
-    # corrected_text = call_ai_correction(final_transcript)
-    # if corrected_text != final_transcript:
-    #     simulate_backspace(len(final_transcript) + 1) # Remove final + space
-    #     simulate_typing(corrected_text + ' ')
-    #     # Handle highlighting/rejection UI
-    pass
+    # --- Optional AI Correction Section (Placeholder) ---
+    # This part remains a TODO, to be implemented if the setting is enabled
+    # if settings.enable_ai_correction:
+    #     corrected_text = call_ai_correction(final_transcript)
+    #     if corrected_text != final_transcript:
+    #         logging.info(f"AI Corrected: '{corrected_text}'")
+    #         simulate_backspace(len(final_transcript) + 1) # Remove final + space
+    #         simulate_typing(corrected_text + ' ')
+    #         # TODO: Handle highlighting/rejection UI logic
+    pass # End of function
 
 def handle_command_interim(transcript):
     """Displays interim command transcript (e.g., in a UI)."""
@@ -184,15 +204,19 @@ async def on_unhandled(self, unhandled, **kwargs):
 def on_click(x, y, button, pressed):
     global current_mode, start_time
     
-    # Determine which mode is being triggered/stopped
     trigger_mode = None
     active_event = None
+
+    # Check for Dictation Trigger
     if button == DICTATION_TRIGGER_BUTTON:
         trigger_mode = "dictation"
         active_event = is_dictation_active
-    elif button == COMMAND_TRIGGER_BUTTON:
+    # Check for Command Trigger (Currently disabled)
+    elif COMMAND_TRIGGER_BUTTON is not None and button == COMMAND_TRIGGER_BUTTON:
         trigger_mode = "command"
         active_event = is_command_active
+    else:
+        return # Ignore other button clicks
 
     if trigger_mode:
         if pressed:

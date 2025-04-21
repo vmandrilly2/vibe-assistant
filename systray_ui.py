@@ -69,6 +69,7 @@ LANGUAGE_OPTIONS = {
     "fr-FR": "French",
     "es-ES": "Spanish",
     "de-DE": "German",
+    "zh": "Chinese (Mandarin)",
     # Add more languages as needed (ensure Deepgram supports them)
 }
 

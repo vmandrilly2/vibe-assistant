@@ -6,6 +6,9 @@ import threading
 import logging
 import time
 from dotenv import load_dotenv
+import queue # Import queue for thread-safe communication
+import tkinter as tk # Import tkinter for the tooltip GUI
+import pyautogui # Import pyautogui to get mouse position
 
 from pynput import mouse, keyboard
 from deepgram import (
@@ -35,6 +38,7 @@ is_dictation_active = threading.Event()
 is_command_active = threading.Event()
 transcription_active_event = threading.Event() # True if either dictation or command is active
 current_mode = None # 'dictation' or 'command'
+tooltip_queue = queue.Queue() # Queue for communicating with the tooltip thread
 
 # --- Keyboard Controller (for typing simulation) ---
 kb_controller = keyboard.Controller()
@@ -46,6 +50,130 @@ typed_word_history = [] # Store history of typed words
 # --- State for Command Mode ---
 current_command_transcript = "" # Store the transcript for command mode
 last_command_executed = None # For potential undo feature
+
+# --- Tooltip Manager Class ---
+class TooltipManager:
+    """Manages a simple Tkinter tooltip window in a separate thread."""
+    def __init__(self, q):
+        self.queue = q
+        self.root = None
+        self.label = None
+        self.thread = threading.Thread(target=self._run_tkinter, daemon=True)
+        self._stop_event = threading.Event()
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        # Send a dummy event to ensure the loop wakes up
+        self.queue.put(("stop", None))
+        self.thread.join(timeout=1.0) # Wait briefly for thread cleanup
+
+    def _run_tkinter(self):
+        logging.info("Tooltip thread started.")
+        try:
+            self.root = tk.Tk()
+            self.root.withdraw() # Start hidden
+            self.root.overrideredirect(True) # No border, title bar, etc.
+            self.root.wm_attributes("-topmost", True) # Keep on top
+            self.root.attributes('-alpha', 0.85) # Slightly transparent
+            self.label = tk.Label(self.root, text="", bg="lightyellow", fg="black",
+                                  font=("Arial", 10), justify=tk.LEFT, padx=5, pady=2)
+            self.label.pack()
+
+            # Check queue periodically
+            self._check_queue() # Start the queue checking loop
+
+            # Manual loop to allow checking stop event
+            while not self._stop_event.is_set():
+                try:
+                    # Process pending Tkinter events
+                    self.root.update_idletasks()
+                    self.root.update()
+                except tk.TclError as e:
+                    # Handle cases where the window might be destroyed prematurely
+                    logging.warning(f"Tkinter update error (window likely closed): {e}")
+                    break
+                time.sleep(0.02) # Small sleep to prevent busy-waiting
+
+        except Exception as e:
+            logging.error(f"Error initializing Tkinter in tooltip thread: {e}", exc_info=True)
+        finally:
+            # Cleanup Tkinter window if it exists
+            if self.root:
+                try:
+                    self.root.destroy()
+                    logging.info("Tkinter root window destroyed.")
+                except tk.TclError as e:
+                    logging.warning(f"Error destroying Tkinter root (already destroyed?): {e}")
+            logging.info("Tooltip thread finished.")
+
+
+    def _check_queue(self):
+        """Processes messages from the queue."""
+        if self._stop_event.is_set(): # Don't reschedule if stopping
+             return
+        try:
+            while not self.queue.empty():
+                command, data = self.queue.get_nowait()
+                if command == "update":
+                    text, x, y = data
+                    self._update_tooltip(text, x, y)
+                elif command == "show":
+                    self._show_tooltip()
+                elif command == "hide":
+                    self._hide_tooltip()
+                elif command == "stop":
+                    self._stop_event.set() # Signal loop to exit
+                    # No need to break here, the outer loop condition will handle it
+        except queue.Empty:
+            pass
+        except tk.TclError as e: # Catch Tkinter errors during queue processing
+            logging.warning(f"Tkinter error during queue processing (window likely closed): {e}")
+            self._stop_event.set() # Stop processing if window is gone
+        except Exception as e:
+            logging.error(f"Error processing tooltip queue: {e}", exc_info=True)
+        finally:
+            # Reschedule check if root exists and not stopping
+            if self.root and not self._stop_event.is_set():
+                 try:
+                     # Use after instead of mainloop for better control with external thread
+                     self.root.after(50, self._check_queue)
+                 except tk.TclError: # Handle case where root might be destroyed between check and after()
+                     logging.warning("Tooltip root destroyed before rescheduling queue check.")
+                     self._stop_event.set()
+
+
+    def _update_tooltip(self, text, x, y):
+        if self.root and self.label and not self._stop_event.is_set():
+            try:
+                self.label.config(text=text)
+                # Position slightly above and to the right of the cursor
+                offset_x = 15
+                offset_y = -30
+                self.root.geometry(f"+{x + offset_x}+{y + offset_y}")
+            except tk.TclError as e:
+                 logging.warning(f"Failed to update tooltip (window likely closed): {e}")
+                 self._stop_event.set()
+
+
+    def _show_tooltip(self):
+        if self.root and not self._stop_event.is_set():
+            try:
+                self.root.deiconify() # Show the window
+            except tk.TclError as e:
+                 logging.warning(f"Failed to show tooltip (window likely closed): {e}")
+                 self._stop_event.set()
+
+    def _hide_tooltip(self):
+        # Allow hiding even if stop_event is set, for cleanup purposes
+        if self.root:
+            try:
+                self.root.withdraw() # Hide the window
+            except tk.TclError as e:
+                 logging.warning(f"Failed to hide tooltip (window likely closed): {e}")
+                 # Don't set stop_event here, might be called during shutdown
 
 # --- Placeholder/Handler Functions ---
 def simulate_typing(text):
@@ -62,27 +190,45 @@ def simulate_backspace(count):
         time.sleep(0.01) # Small delay between key presses
 
 def handle_dictation_interim(transcript):
-    """Handles interim dictation results ONLY by updating the last_typed_interim state.
-    It does NOT simulate typing or backspaces anymore."""
+    """Handles interim dictation results by displaying them in a temporary tooltip."""
     global last_simulated_text # Keep variable for now, but don't use for typing
     if not transcript:
         return
 
-    # Only log, do not simulate keys or update last_simulated_text here
-    logging.debug(f"Interim Received (Not Processed): '{transcript}'")
-    # last_simulated_text = transcript # DO NOT UPDATE STATE HERE
+    # Log the interim transcript
+    logging.debug(f"Interim Received (for Tooltip): '{transcript}'")
 
-    # TODO: Optionally display the interim transcript in a temporary UI element here
+    # --- Tooltip Update Logic ---
+    try:
+        # Get current mouse position
+        x, y = pyautogui.position()
+        # Send update command to the tooltip manager thread
+        # Use put_nowait or handle Full exception if queue might fill up,
+        # but for this use case, blocking put is likely fine.
+        tooltip_queue.put(("update", (transcript, x, y)))
+        tooltip_queue.put(("show", None)) # Ensure it's visible
+    except pyautogui.FailSafeException:
+         logging.warning("PyAutoGUI fail-safe triggered (mouse moved to corner?).")
+    except Exception as e:
+        logging.error(f"Error getting mouse position or updating tooltip: {e}")
 
     # --- REMOVED TYPING/BACKSPACE LOGIC ---
+    # last_simulated_text = transcript # DO NOT UPDATE STATE HERE
 
 def handle_dictation_final(final_transcript, history):
     """Handles the final dictation transcript based on history and incoming transcript.
-    Calculates target state, determines diff from current state, executes, updates history."""
+    Calculates target state, determines diff from current state, executes, updates history.
+    Also hides the interim tooltip."""
     logging.warning(f"RAW FINAL TRANSCRIPT RECEIVED: '{final_transcript}'")
-    
-    # --- Step A: Calculate Target Word List --- 
-    # Start with words from the current history
+
+    # --- Hide the interim tooltip ---
+    # Use put_nowait as hiding is less critical if queue is full during shutdown
+    try:
+        tooltip_queue.put_nowait(("hide", None))
+    except queue.Full:
+        logging.warning("Tooltip queue full when trying to hide on final.")
+
+    # --- Step A: Calculate Target Word List ---
     target_words = [entry['text'] for entry in history]
     logging.debug(f"Initial target_words from history: {target_words}")
 
@@ -104,16 +250,16 @@ def handle_dictation_final(final_transcript, history):
     
     logging.debug(f"Final target_words after processing transcript: {target_words}")
 
-    # --- Step B: Calculate Target Text --- 
+    # --- Step B: Calculate Target Text ---
     target_text = " ".join(target_words) + ' ' if target_words else ''
     logging.debug(f"Calculated target_text: '{target_text}'")
 
-    # --- Step C: Calculate Current Text on Screen (Estimate from OLD history) --- 
+    # --- Step C: Calculate Current Text on Screen (Estimate from OLD history) ---
     # We need the text *before* processing the current transcript's 'back' commands
     current_text_estimate = " ".join([entry['text'] for entry in history]) + ' ' if history else ''
     logging.debug(f"Estimated current text (from old history): '{current_text_estimate}'")
 
-    # --- Step D: Calculate Diff --- 
+    # --- Step D: Calculate Diff ---
     common_prefix_len = 0
     min_len = min(len(current_text_estimate), len(target_text))
     while common_prefix_len < min_len and current_text_estimate[common_prefix_len] == target_text[common_prefix_len]:
@@ -124,7 +270,7 @@ def handle_dictation_final(final_transcript, history):
     
     logging.debug(f"Diff Calculation: Prefix={common_prefix_len}, Backspaces={backspaces_needed}, Type='{text_to_type}'")
 
-    # --- Step E: Execute Typing Actions --- 
+    # --- Step E: Execute Typing Actions ---
     # IMPORTANT: Order matters. Backspace first, then type.
     if backspaces_needed > 0:
         simulate_backspace(backspaces_needed)
@@ -132,7 +278,7 @@ def handle_dictation_final(final_transcript, history):
     if text_to_type:
         simulate_typing(text_to_type)
 
-    # --- Step F: Update History to Match Target State --- 
+    # --- Step F: Update History to Match Target State ---
     history.clear() 
     if target_words: # Use the target_words list we built
         logging.debug(f"Rebuilding history with: {target_words}")
@@ -212,6 +358,8 @@ async def on_message(self, result, **kwargs):
 
     except (AttributeError, IndexError) as e:
         logging.error(f"Error processing Deepgram message: {e} - Result: {result}")
+    except Exception as e: # Catch potential errors from handlers
+        logging.error(f"Unhandled error in on_message handler: {e}", exc_info=True)
 
 async def on_metadata(self, metadata, **kwargs):
     logging.debug(f"Deepgram Metadata: {metadata}")
@@ -263,7 +411,8 @@ def on_click(x, y, button, pressed):
                 start_time = time.time() # Record start time for duration check
                 if trigger_mode == "command":
                     # TODO: Show command feedback UI
-                    pass 
+                    pass
+                # DO NOT show tooltip here, wait for first interim result
             else:
                 logging.warning(f"Attempted to start {trigger_mode} while already active ({current_mode})")
         else: # Button released
@@ -273,6 +422,14 @@ def on_click(x, y, button, pressed):
                 # Clear events to signal stopping
                 active_event.clear()
                 transcription_active_event.clear() # Signal main loop to stop DG/Mic
+
+                # --- Hide tooltip on button release ---
+                if trigger_mode == "dictation":
+                    try:
+                        tooltip_queue.put_nowait(("hide", None))
+                    except queue.Full:
+                         logging.warning("Tooltip queue full when trying to hide on release.")
+
                 # Post-processing is handled in the main loop after stopping
                 if trigger_mode == "command":
                      # TODO: Hide command feedback UI
@@ -293,12 +450,20 @@ def on_press(key):
             
     except AttributeError:
         pass
+    except Exception as e: # Catch potential errors
+        logging.error(f"Error in on_press handler: {e}", exc_info=True)
 
 # --- Main Application Logic ---
 async def main():
-    global start_time, current_mode, current_command_transcript # Access global state
+    global start_time, current_mode, current_command_transcript, tooltip_queue # Access global state
     
     logging.info("Starting Vibe App...")
+
+    # --- Start Tooltip Manager ---
+    # Pass the global queue to the manager
+    tooltip_mgr = TooltipManager(tooltip_queue)
+    tooltip_mgr.start()
+    logging.info("Tooltip Manager started.")
 
     # Initialize Deepgram Client with reduced verbosity
     try:
@@ -387,6 +552,12 @@ async def main():
                 duration = time.time() - start_time if start_time else 0
                 start_time = None
 
+                # --- Ensure tooltip is hidden ---
+                try:
+                    tooltip_queue.put_nowait(("hide", None))
+                except queue.Full:
+                    logging.warning("Tooltip queue full when trying to hide on deactivate.")
+
                 # 1. Stop microphone
                 if microphone:
                     microphone.finish()
@@ -423,17 +594,45 @@ async def main():
         logging.info("Main task cancelled.")
     finally:
         logging.info("Stopping Vibe App...")
+        # Cleanup tooltip manager
+        if 'tooltip_mgr' in locals() and tooltip_mgr.thread.is_alive():
+             tooltip_mgr.stop()
+             logging.info("Tooltip Manager stopped.")
+        else:
+             logging.info("Tooltip Manager already stopped or not started.")
         # Cleanup listeners
-        mouse_listener.stop()
-        keyboard_listener.stop()
-        mouse_listener.join()
-        keyboard_listener.join()
-        logging.info("Input listeners stopped.")
+        if 'mouse_listener' in locals() and mouse_listener.is_alive():
+            mouse_listener.stop()
+            # Join might block if listener had an error, use timeout
+            mouse_listener.join(timeout=0.5)
+            logging.info("Mouse listener stopped.")
+        if 'keyboard_listener' in locals() and keyboard_listener.is_alive():
+            keyboard_listener.stop()
+            keyboard_listener.join(timeout=0.5)
+            logging.info("Keyboard listener stopped.")
+
         # Ensure microphone and connection are stopped on exit
         if microphone:
             microphone.finish()
+            logging.info("Microphone finished on exit.")
         if dg_connection:
-            await dg_connection.finish()
+            # Ensure finish is awaited if called from async context
+            # Check if the loop is still running before awaiting
+            try:
+                loop = asyncio.get_running_loop()
+                if loop.is_running():
+                     try:
+                         logging.info("Attempting to finish Deepgram connection on exit...")
+                         await dg_connection.finish()
+                         logging.info("Deepgram connection finished on exit.")
+                     except Exception as e:
+                         logging.error(f"Error during final dg_connection.finish: {e}")
+                else:
+                     logging.warning("Asyncio loop not running, cannot await dg_connection.finish().")
+            except RuntimeError:
+                 logging.warning("No running asyncio loop found, cannot await dg_connection.finish().")
+
+
         logging.info("Vibe App finished.")
 
 

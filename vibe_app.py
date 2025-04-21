@@ -19,6 +19,9 @@ import pyaudio     # Import PyAudio
 # Import the run function and the reload event
 import systray_ui
 
+# --- Audio Buffer Import ---
+from audio_buffer import BufferedAudioInput
+
 from pynput import mouse, keyboard
 from deepgram import (
     DeepgramClient,
@@ -383,99 +386,6 @@ class TooltipManager:
                  logging.warning(f"Failed to hide tooltip (window likely closed): {e}")
                  self._stop_event.set()
 
-
-# --- Audio Monitor Class (NEW) ---
-class AudioMonitor:
-    """Handles a *separate* PyAudio stream for volume monitoring."""
-    def __init__(self, status_q):
-        self.status_queue = status_q # Queue for sending volume updates
-        self.p = None
-        self.stream = None
-        self.running = threading.Event()
-        self.thread = None
-        self.device_index = None # TODO: Add device index selection later
-
-    def _calculate_rms(self, data):
-        """Calculate Root Mean Square (RMS) volume of audio data."""
-        if not data: return 0
-        try:
-            audio_data = np.frombuffer(data, dtype=np.int16)
-            if audio_data.size == 0: return 0
-            rms = np.sqrt(np.mean(audio_data.astype(float)**2))
-            normalized_rms = min(rms / MAX_RMS, 1.0)
-            return normalized_rms
-        except Exception as e:
-            logging.error(f"Error calculating RMS: {e}")
-            return 0
-
-    def _monitor_loop(self):
-        """Continuously reads audio data and calculates volume."""
-        logging.info("Audio monitoring loop started.")
-        stream_opened = False
-        try:
-            self.p = pyaudio.PyAudio() # Initialize PyAudio in this thread
-            self.stream = self.p.open(format=MONITOR_FORMAT,
-                                      channels=MONITOR_CHANNELS,
-                                      rate=MONITOR_RATE,
-                                      input=True,
-                                      frames_per_buffer=MONITOR_CHUNK_SIZE,
-                                      input_device_index=self.device_index)
-            stream_opened = True
-            logging.info(f"PyAudio monitoring stream opened (Device: {self.device_index or 'Default'}).")
-        except Exception as e:
-            logging.error(f"Failed to open PyAudio monitoring stream: {e}", exc_info=True)
-            self.running.clear() # Ensure loop doesn't run if stream fails
-
-        while self.running.is_set() and stream_opened:
-            try:
-                data = self.stream.read(MONITOR_CHUNK_SIZE, exception_on_overflow=False)
-                volume = self._calculate_rms(data)
-                try:
-                    self.status_queue.put_nowait(("volume", volume))
-                except queue.Full:
-                    pass # Ignore if UI queue is full
-            except IOError as e:
-                if self.running.is_set(): logging.error(f"PyAudio monitor read error: {e}")
-                break
-            except Exception as e:
-                 if self.running.is_set(): logging.error(f"Unexpected error in audio monitor loop: {e}", exc_info=True)
-                 break
-
-        # Cleanup stream
-        if self.stream:
-            try:
-                self.stream.stop_stream()
-                self.stream.close()
-                logging.info("PyAudio monitoring stream stopped and closed.")
-            except Exception as e: logging.error(f"Error closing PyAudio monitoring stream: {e}")
-        self.stream = None
-        # Terminate PyAudio instance for this thread
-        if self.p:
-            try:
-                self.p.terminate()
-                logging.info("PyAudio monitoring instance terminated.")
-            except Exception as e: logging.error(f"Error terminating PyAudio monitoring instance: {e}")
-        self.p = None
-        logging.info("Audio monitoring loop finished.")
-
-    def start(self):
-        if not self.running.is_set(): # Only start if not already running
-            self.running.set()
-            # Create thread only when starting
-            self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
-            self.thread.start()
-            logging.info("AudioMonitor started.")
-
-    def stop(self):
-        if self.running.is_set():
-            logging.info("Stopping AudioMonitor...")
-            self.running.clear()
-            if self.thread and self.thread.is_alive():
-                self.thread.join(timeout=1.0)
-                if self.thread.is_alive():
-                    logging.warning("AudioMonitor thread did not stop cleanly.")
-            self.thread = None # Clear thread reference
-            logging.info("AudioMonitor stopped.")
 
 # --- Status Indicator Manager Class (NEW) ---
 class StatusIndicatorManager:
@@ -1045,9 +955,11 @@ async def main():
     status_mgr.start()
     logging.info("Status Indicator Manager started.")
 
-    # --- Initialize Audio Monitor ---
-    audio_monitor = AudioMonitor(status_queue)
-    # Don't start it yet, only when transcription is active
+    # --- Initialize and Start Buffered Audio Input --- 
+    # Replaces the old AudioMonitor
+    buffered_audio_input = BufferedAudioInput(status_queue) 
+    buffered_audio_input.start()
+    logging.info("Buffered Audio Input thread started.")
 
     # Initialize Deepgram Client with reduced verbosity
     try:
@@ -1101,6 +1013,23 @@ async def main():
                     # 4. Start connection
                     await dg_connection.start(options)
 
+                    # 4.5 Send buffered audio FIRST
+                    pre_activation_buffer = buffered_audio_input.get_buffer()
+                    if pre_activation_buffer:
+                        logging.info(f"Sending {len(pre_activation_buffer)} chunks from pre-activation buffer...")
+                        for chunk in pre_activation_buffer:
+                            if dg_connection and await dg_connection.is_connected():
+                                try: await dg_connection.send(chunk)
+                                except Exception as send_e:
+                                    logging.error(f"Error sending buffered chunk: {send_e}")
+                                    break # Stop sending buffer if error occurs
+                            else:
+                                logging.warning("Connection closed before finishing sending buffer.")
+                                break
+                        logging.info("Finished sending pre-activation buffer.")
+                    else:
+                        logging.info("Pre-activation buffer was empty.")
+
                     # 5. Initialize and start *Deepgram* Microphone
                     #    This uses the *original* logging_send_wrapper
                     original_send = dg_connection.send
@@ -1121,13 +1050,11 @@ async def main():
                     microphone.start()
                     logging.info("Deepgram connection and microphone started.")
 
-                    # --- Start Audio Monitor ---
-                    audio_monitor.start()
+                    # Buffered audio input is already running continuously
 
                 except Exception as e:
                     logging.error(f"Failed to start Deepgram/Microphone/Monitor: {e}")
-                    # --- Stop Audio Monitor on failure ---
-                    audio_monitor.stop()
+                    # Don't stop buffered input here, it should run continuously
                     # Reset state fully on failure
                     if dg_connection:
                        try: await dg_connection.finish()
@@ -1151,7 +1078,7 @@ async def main():
                 start_time = None
 
                 # --- Stop Audio Monitor ---
-                audio_monitor.stop()
+                # Don't stop the buffered input here, keep it running
 
                 # --- Ensure tooltip & status are hidden ---
                 try: tooltip_queue.put_nowait(("hide", None))
@@ -1246,7 +1173,10 @@ async def main():
         logging.info("Stopping Vibe App...")
 
         # --- Stop Audio Monitor if still running ---
-        if 'audio_monitor' in locals(): audio_monitor.stop()
+        # if 'audio_monitor' in locals(): audio_monitor.stop()
+        # --- Stop Buffered Audio Input --- 
+        if 'buffered_audio_input' in locals(): 
+            buffered_audio_input.stop()
 
         # --- Stop Systray --- (Needs access to the icon object to stop it)
         # This is tricky because icon is created in the thread.

@@ -14,6 +14,11 @@ import sys # Import sys for exiting on critical config error
 import numpy as np # Import numpy
 import pyaudio     # Import PyAudio
 
+# --- Systray UI Import ---
+# We need threading anyway, so let's use it for the systray
+# Import the run function and the reload event
+import systray_ui
+
 from pynput import mouse, keyboard
 from deepgram import (
     DeepgramClient,
@@ -76,17 +81,14 @@ def load_config():
 
 config = load_config()
 
-# --- Constants ---
-# PyAudio settings for *volume monitoring only*
-MONITOR_CHUNK_SIZE = 1024 # Can be larger than Deepgram's internal chunk size
+# --- PyAudio Constants --- (Define globally for AudioMonitor)
+MONITOR_CHUNK_SIZE = 1024
 MONITOR_FORMAT = pyaudio.paInt16
 MONITOR_CHANNELS = 1
-MONITOR_RATE = 16000 # Match sample rate for consistency, though not strictly necessary for RMS
-# Volume calculation settings
-MAX_RMS = 5000 # Adjust this based on your microphone sensitivity (empirical)
+MONITOR_RATE = 16000
+MAX_RMS = 5000 # Adjust based on microphone sensitivity
 
-# --- Pynput Mappings ---
-# Map string names from config to pynput button objects
+# --- Pynput Mappings --- (Define globally)
 PYNPUT_BUTTON_MAP = {
     "left": mouse.Button.left,
     "right": mouse.Button.right,
@@ -95,8 +97,6 @@ PYNPUT_BUTTON_MAP = {
     "x2": mouse.Button.x2,
     None: None
 }
-
-# Map string names from config to pynput key objects (add more as needed)
 PYNPUT_MODIFIER_MAP = {
     "shift": keyboard.Key.shift,
     "shift_l": keyboard.Key.shift_l,
@@ -111,57 +111,67 @@ PYNPUT_MODIFIER_MAP = {
     None: None
 }
 
-# --- Apply Configuration ---
+# --- Global Configurable Variables ---
+# These will be updated by apply_config()
+DICTATION_TRIGGER_BUTTON = None
+COMMAND_TRIGGER_BUTTON = None
+COMMAND_MODIFIER_KEY_STR = None
+COMMAND_MODIFIER_KEY = None
+MIN_DURATION_SEC = 0.5
+SELECTED_LANGUAGE = "en-US"
+TOOLTIP_ALPHA = 0.85
+TOOLTIP_BG = "lightyellow"
+TOOLTIP_FG = "black"
+TOOLTIP_FONT_FAMILY = "Arial"
+TOOLTIP_FONT_SIZE = 10
+
+def apply_config(cfg):
+    """Applies the loaded configuration to the global variables."""
+    global DICTATION_TRIGGER_BUTTON, COMMAND_TRIGGER_BUTTON, COMMAND_MODIFIER_KEY_STR
+    global COMMAND_MODIFIER_KEY, MIN_DURATION_SEC, SELECTED_LANGUAGE
+    global TOOLTIP_ALPHA, TOOLTIP_BG, TOOLTIP_FG, TOOLTIP_FONT_FAMILY, TOOLTIP_FONT_SIZE
+
+    logging.info("Applying configuration...")
+    try:
+        # Triggers
+        DICTATION_TRIGGER_BUTTON = PYNPUT_BUTTON_MAP.get(cfg.get("triggers", {}).get("dictation_button", "middle"))
+        COMMAND_TRIGGER_BUTTON = PYNPUT_BUTTON_MAP.get(cfg.get("triggers", {}).get("command_button")) # Defaults to None if key missing
+        COMMAND_MODIFIER_KEY_STR = cfg.get("triggers", {}).get("command_modifier")
+        COMMAND_MODIFIER_KEY = PYNPUT_MODIFIER_MAP.get(COMMAND_MODIFIER_KEY_STR)
+
+        # General
+        MIN_DURATION_SEC = float(cfg.get("general", {}).get("min_duration_sec", 0.5))
+        SELECTED_LANGUAGE = str(cfg.get("general", {}).get("selected_language", "en-US"))
+
+        # Tooltip
+        TOOLTIP_ALPHA = float(cfg.get("tooltip", {}).get("alpha", 0.85))
+        TOOLTIP_BG = str(cfg.get("tooltip", {}).get("bg_color", "lightyellow"))
+        TOOLTIP_FG = str(cfg.get("tooltip", {}).get("fg_color", "black"))
+        TOOLTIP_FONT_FAMILY = str(cfg.get("tooltip", {}).get("font_family", "Arial"))
+        TOOLTIP_FONT_SIZE = int(cfg.get("tooltip", {}).get("font_size", 10))
+
+        logging.info(f"Config applied: Lang={SELECTED_LANGUAGE}, Dictation={cfg.get('triggers', {}).get('dictation_button', 'middle')}, ...")
+
+    except (ValueError, TypeError, KeyError) as e:
+        logging.error(f"Error applying configuration: {e}. Some settings may not be updated correctly.")
+        # Keep existing values or fall back to defaults? For now, just log.
+
+# --- Initial Configuration Application --- (After defining apply_config)
 load_dotenv() # Load environment variables from .env file (still used for API key)
 API_KEY = os.getenv("DEEPGRAM_API_KEY")
 if not API_KEY:
     logging.critical("DEEPGRAM_API_KEY not found in environment variables or .env file. Exiting.")
-    # Optionally: Check config dict first if you decide to allow API key there
-    sys.exit(1) # Exit if API key is missing
+    sys.exit(1)
 
-
-# Get trigger settings from config, using defaults if mapping fails
-try:
-    DICTATION_TRIGGER_BUTTON = PYNPUT_BUTTON_MAP.get(config.get("triggers", {}).get("dictation_button", "middle"))
-    COMMAND_TRIGGER_BUTTON = PYNPUT_BUTTON_MAP.get(config.get("triggers", {}).get("command_button")) # Defaults to None if key missing
-    COMMAND_MODIFIER_KEY_STR = config.get("triggers", {}).get("command_modifier")
-    COMMAND_MODIFIER_KEY = PYNPUT_MODIFIER_MAP.get(COMMAND_MODIFIER_KEY_STR)
-except Exception as e:
-     logging.error(f"Error applying trigger configuration: {e}. Using defaults.")
-     DICTATION_TRIGGER_BUTTON = mouse.Button.middle
-     COMMAND_TRIGGER_BUTTON = None
-     COMMAND_MODIFIER_KEY = None
-
-# Get general settings
-try:
-    MIN_DURATION_SEC = float(config.get("general", {}).get("min_duration_sec", 0.5))
-    SELECTED_LANGUAGE = str(config.get("general", {}).get("selected_language", "en-US"))
-except (ValueError, TypeError) as e:
-    logging.error(f"Error applying general configuration: {e}. Using defaults.")
-    MIN_DURATION_SEC = 0.5
-    SELECTED_LANGUAGE = "en-US"
-
-# Get tooltip settings
-try:
-    TOOLTIP_ALPHA = float(config.get("tooltip", {}).get("alpha", 0.85))
-    TOOLTIP_BG = str(config.get("tooltip", {}).get("bg_color", "lightyellow"))
-    TOOLTIP_FG = str(config.get("tooltip", {}).get("fg_color", "black"))
-    TOOLTIP_FONT_FAMILY = str(config.get("tooltip", {}).get("font_family", "Arial"))
-    TOOLTIP_FONT_SIZE = int(config.get("tooltip", {}).get("font_size", 10))
-except (ValueError, TypeError) as e:
-    logging.error(f"Error applying tooltip configuration: {e}. Using defaults.")
-    TOOLTIP_ALPHA = 0.85
-    TOOLTIP_BG = "lightyellow"
-    TOOLTIP_FG = "black"
-    TOOLTIP_FONT_FAMILY = "Arial"
-    TOOLTIP_FONT_SIZE = 10
+# Apply the initially loaded config
+apply_config(config)
 
 
 logging.info(f"Using Language: {SELECTED_LANGUAGE}")
-logging.info(f"Dictation Trigger: {config.get('triggers', {}).get('dictation_button', 'middle')}")
+logging.info(f"Dictation Trigger: {config.get('triggers', {}).get('dictation_button', 'middle')}") # Log the raw value from config
 if COMMAND_TRIGGER_BUTTON:
     mod_str = f" + {COMMAND_MODIFIER_KEY_STR}" if COMMAND_MODIFIER_KEY else ""
-    logging.info(f"Command Trigger: {config.get('triggers', {}).get('command_button')}{mod_str}")
+    logging.info(f"Command Trigger: {config.get('triggers', {}).get('command_button')}{mod_str}") # Log the raw value from config
 else:
     logging.info("Command Trigger: Disabled")
 
@@ -199,6 +209,31 @@ class TooltipManager:
         self.thread = threading.Thread(target=self._run_tkinter, daemon=True)
         self._stop_event = threading.Event()
         self._tk_ready = threading.Event() # Signal when Tkinter root is ready
+        # --- Add config references ---
+        self._apply_tooltip_config()
+
+    def _apply_tooltip_config(self):
+        """Applies tooltip config to internal variables."""
+        # Use the global config variables directly
+        self.alpha = TOOLTIP_ALPHA
+        self.bg_color = TOOLTIP_BG
+        self.fg_color = TOOLTIP_FG
+        self.font_family = TOOLTIP_FONT_FAMILY
+        self.font_size = TOOLTIP_FONT_SIZE
+        logging.debug(f"Tooltip config applied: Alpha={self.alpha}, BG={self.bg_color}, FG={self.fg_color}")
+
+    def reload_config(self):
+        """Called when main config reloads to update tooltip appearance."""
+        self._apply_tooltip_config()
+        # If the window exists, update its attributes
+        if self.root and self.label:
+            try:
+                self.root.attributes('-alpha', self.alpha)
+                self.label.config(bg=self.bg_color, fg=self.fg_color,
+                                  font=(self.font_family, self.font_size))
+                logging.info("Tooltip appearance updated from reloaded config.")
+            except tk.TclError as e:
+                logging.warning(f"Could not update tooltip appearance on reload: {e}")
 
     def start(self):
         self.thread.start()
@@ -206,7 +241,6 @@ class TooltipManager:
         self._tk_ready.wait(timeout=2.0)
         if not self._tk_ready.is_set():
             logging.warning("Tooltip Tkinter thread did not become ready in time.")
-
 
     def stop(self):
         """Signals the Tkinter thread to stop and cleanup."""
@@ -228,9 +262,10 @@ class TooltipManager:
             self.root.withdraw() # Start hidden
             self.root.overrideredirect(True) # No border, title bar, etc.
             self.root.wm_attributes("-topmost", True) # Keep on top
-            self.root.attributes('-alpha', TOOLTIP_ALPHA)
-            self.label = tk.Label(self.root, text="", bg=TOOLTIP_BG, fg=TOOLTIP_FG,
-                                  font=(TOOLTIP_FONT_FAMILY, TOOLTIP_FONT_SIZE),
+            # Apply config settings during creation
+            self.root.attributes('-alpha', self.alpha)
+            self.label = tk.Label(self.root, text="", bg=self.bg_color, fg=self.fg_color,
+                                  font=(self.font_family, self.font_size),
                                   justify=tk.LEFT, padx=5, pady=2)
             self.label.pack()
 
@@ -254,7 +289,6 @@ class TooltipManager:
             logging.info("Tooltip thread finished.")
             # Ensure stop event is set if mainloop exited unexpectedly
             self._stop_event.set()
-
 
     def _check_queue(self):
         """Processes messages from the queue using root.after."""
@@ -319,7 +353,6 @@ class TooltipManager:
             except Exception as e:
                 logging.error(f"Unexpected error during Tkinter destroy: {e}", exc_info=True)
 
-
     def _update_tooltip(self, text, x, y):
         # Check if root exists and stop event isn't set
         if self.root and self.label and not self._stop_event.is_set():
@@ -331,7 +364,6 @@ class TooltipManager:
             except tk.TclError as e:
                  logging.warning(f"Failed to update tooltip (window likely closed): {e}")
                  self._stop_event.set() # Stop if window is broken
-
 
     def _show_tooltip(self):
         if self.root and not self._stop_event.is_set():
@@ -467,6 +499,8 @@ class StatusIndicatorManager:
         self.volume_fill_color = "#FF0000" # Red for volume level
         self.idle_indicator_color = "#ADD8E6" # Light blue when ready but not recording
         self.bg_color = "#FEFEFE" # Use a near-white color for transparency key
+        # --- Add config references (if needed later, e.g. for icon colors) ---
+        # self._apply_status_config()
 
     def start(self):
         self.thread.start()
@@ -991,8 +1025,15 @@ def on_release(key):
 # --- Main Application Logic ---
 async def main():
     global start_time, current_mode, current_command_transcript, tooltip_queue, status_queue # Add status_queue
-    
+    global config # Make main config global for reloading
+
     logging.info("Starting Vibe App...")
+
+    # --- Initialize Systray UI --- (Before other UI components)
+    systray_icon = None
+    systray_thread = threading.Thread(target=systray_ui.run_systray, args=(systray_ui.exit_app_event,), daemon=True)
+    systray_thread.start()
+    logging.info("Systray UI thread started.")
 
     # --- Start Tooltip Manager ---
     tooltip_mgr = TooltipManager(tooltip_queue)
@@ -1151,6 +1192,41 @@ async def main():
                 current_command_transcript = ""
                 last_simulated_text = "" # Reset dictation tracking
                 
+            # --- Check for Config Reload Event from Systray ---
+            if systray_ui.config_reload_event.is_set():
+                logging.info("Detected config reload request from systray.")
+                old_language = SELECTED_LANGUAGE # Store language before reload
+                logging.debug(f"Language before reload: {old_language}")
+                config = load_config() # Reload the config dictionary
+                apply_config(config)  # Apply the new config to global vars
+                logging.debug(f"Language after applying new config: {SELECTED_LANGUAGE}")
+
+                # Check if language changed and connection is active
+                language_changed = (SELECTED_LANGUAGE != old_language)
+                restart_dg_needed = (dg_connection is not None and language_changed)
+
+                # Notify UI components that need updating
+                if tooltip_mgr:
+                    tooltip_mgr.reload_config()
+                # if status_mgr: # If status icon needs config updates
+                #    status_mgr.reload_config()
+                systray_ui.config_reload_event.clear() # Clear the event AFTER processing
+                logging.debug("Config reload event cleared.")
+
+                # Restart Deepgram connection if language changed mid-session
+                if restart_dg_needed:
+                    logging.info("Language changed mid-session, restarting Deepgram connection.")
+                    # Reset state and restart
+                    is_dictation_active.clear()
+                    is_command_active.clear()
+                    transcription_active_event.clear()
+                    current_mode = None
+                    dg_connection = None
+                    microphone = None
+                    # --- Hide Status Indicator on restart ---
+                    try: status_queue.put_nowait(("state", {"state": "hidden"}))
+                    except queue.Full: pass
+
             # Add checks for thread health
             if not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set():
                  logging.error("TooltipManager thread terminated unexpectedly. Stopping.")
@@ -1171,6 +1247,23 @@ async def main():
 
         # --- Stop Audio Monitor if still running ---
         if 'audio_monitor' in locals(): audio_monitor.stop()
+
+        # --- Stop Systray --- (Needs access to the icon object to stop it)
+        # This is tricky because icon is created in the thread.
+        # Option 1: Use a global or shared object (less ideal)
+        # Option 2: Signal the thread to stop itself (better)
+        # For now, relying on daemon thread termination, but pystray might need explicit stop.
+        # We added icon.stop() in the systray's on_exit_clicked, needs integration.
+        # Let's try stopping the icon from the systray thread when on_exit_clicked is called.
+        # We also need a way to signal the main loop to exit if 'Exit' is clicked.
+        # ADDING an exit event for this.
+        if systray_ui.exit_app_event.is_set(): # Check if systray requested exit
+             logging.info("Exit requested via systray menu.")
+             # No need to explicitly stop systray thread if it stopped itself via icon.stop()
+        elif systray_thread and systray_thread.is_alive():
+             logging.warning("Systray thread still alive, explicit stop not implemented yet.")
+             # Ideally, we'd signal the systray thread to call icon.stop()
+             # For now, daemon should handle it, but might not be clean.
 
         # Signal GUI managers to stop
         if 'tooltip_mgr' in locals(): tooltip_mgr.stop()
@@ -1219,6 +1312,9 @@ async def main():
 
         logging.info("Vibe App finished.")
 
+
+# --- Add Exit Event for Systray Communication ---
+systray_ui.exit_app_event = threading.Event() # Create event in main module
 
 if __name__ == "__main__":
     # API Key check moved earlier, before main()

@@ -1,0 +1,18 @@
+{
+  "general": {
+    "min_duration_sec": 0.5,
+    "selected_language": "en-US"
+  },
+  "triggers": {
+    "dictation_button": "middle",
+    "command_button": null,
+    "command_modifier": null
+  },
+  "tooltip": {
+    "alpha": 0.85,
+    "bg_color": "lightyellow",
+    "fg_color": "black",
+    "font_family": "Arial",
+    "font_size": 10
+  }
+} 

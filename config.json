@@ -1,7 +1,7 @@
 {
   "general": {
     "min_duration_sec": 0.5,
-    "selected_language": "fr-FR"
+    "selected_language": "en-US"
   },
   "triggers": {
     "dictation_button": "middle",

@@ -1,83 +1,129 @@
-# This file contains the core request for this project
+# Blueprint & Task List
 
-This file SHALL be updated by me or the AI assistant/coworker. It does NOT contain code, but shall include EVERYTHING functional that was included in the code, so that if the code disapear or needs to be rebuilt, this file alone shall be enough indication to recreate completely what was coded.
+This file acts as both the project blueprint and a task manager. It outlines the core requirements and tracks implementation progress.
 
-# Purpose
+*   This file SHALL be updated by me or the AI assistant/coworker.
+*   It does NOT contain code, but shall include EVERYTHING functional that was included in the code.
+*   If the code disappears or needs rebuilding, this file alone shall be enough indication to recreate it completely.
 
-This project shall make it very easy for me to write text AND code, as well as EDIT text and code, with much less keybord presses needed if any at all. Mouse actions shall prevail (Mouse has 5 buttons: left, right, wheel press + 2 side buttons that are never used by other softares and therefore should be used in priority for this project).
+## Purpose
 
-# Task 1: let's make a plan. 
+[x] Create a tool to facilitate writing and editing text/code using voice commands and mouse triggers, minimizing keyboard use.
+[x] Prioritize mouse actions (especially side buttons, though defaults have changed).
 
-Shall we make a search to consider what already exists (especially on github) that could be tested and modified，or would it be better to start from scratch? Probably the best would be to have existing code as a basis to see what exists, get inspiration, but starting from scratch with exactly what I need could be easier for the AI model since the code it will be improving on would be his own thinking to start with.
+## Core Technical Approach
 
-## Technical Approach
-
-- **Operating System:** The target OS is Windows 10. This is important for mouse/keyboard event handling.
-- **Input Listener & Controller:** We will use the `pynput` Python library for capturing global mouse/keyboard events (`pynput.mouse.Listener`, `pynput.keyboard.Listener`) and for simulating keyboard output (`pynput.keyboard.Controller`).
-- **Real-time Speech Recognition:** We will start with **Deepgram** using their Python SDK and streaming API for low-latency transcription in both Dictation and Command modes, once activated.
-- **Microphone Handling:** Initial implementation will use `PyAudio` to capture microphone input and stream it to Deepgram.
-- **Wake Word Detection:** (Future Enhancement) When implemented, the chosen library is **`openWakeWord`** ([GitHub](https://github.com/dscripka/openWakeWord)) due to its performance, customizability, and open-source nature.
-- **AI Models:** 
-    - An AI model will be used for interpreting user intent in **Command Mode**.
-    - A separate, cost-effective AI model can *optionally* be used for post-transcription correction in **Dictation Mode** (configurable).
-- **Future SR Options:** Design should allow adding other SR providers (e.g., AssemblyAI, Google Cloud Streaming, offline Whisper/Vosk) as selectable options later.
-- **Input Confirmation:** Testing confirmed `pynput` successfully captures all 5 mouse buttons (Left, Right, Middle, X1, X2) and scroll events on the target Windows 10 system.
-
-## Known Issues / Planned Enhancements
-
-- **Initial Transcription Delay:** Audio spoken immediately upon trigger activation may be missed due to connection/processing latency. **Plan:** Implement a short (~2s) rolling audio buffer to capture pre-activation speech.
-- **Trigger Button Conflicts:** Default side mouse buttons (X1/X2) conflict with standard application functions (e.g., Back/Forward navigation in Notepad++, Cursor). **Resolution:** Switched default trigger to Middle Mouse Button (Wheel Press). Further refinement (e.g., short vs. long press, modifiers) might be needed.
+*   [x] **Target OS:** Windows 10.
+*   [x] **Input Listener:** `pynput` for global mouse/keyboard events.
+*   [x] **Keyboard Output:** `pynput.keyboard.Controller` for simulating typing.
+*   [x] **Real-time Speech Recognition (SR):** Deepgram Python SDK (Streaming API).
+*   [x] **Microphone Handling:** `PyAudio` for capturing input.
+*   [ ] **AI Model (Commands):** Use an AI model for interpreting user intent in Command Mode.
+*   [ ] **AI Model (Dictation Correction - Optional):** Use a cost-effective AI model for post-transcription correction (configurable).
+*   [ ] **Future SR Options:** Design to allow adding other SR providers (e.g., AssemblyAI, Google Cloud Streaming, offline Whisper/Vosk).
+*   [x] **Input Confirmation:** Verified `pynput` captures all 5 mouse buttons and scroll events on Windows 10.
 
 ## Configuration (`config.json`)
 
-The application uses a `config.json` file in the same directory to manage settings. If the file doesn't exist, it will be created with default values upon first run.
+*   [x] Use `config.json` for settings.
+*   [x] Create default `config.json` if missing.
+*   [x] **`general`**:
+    *   [x] `min_duration_sec`: (Float) Minimum recording duration (Default: 0.5).
+    *   [x] `selected_language`: (String) SR language code (Default: "en-US").
+*   [x] **`triggers`**:
+    *   [x] `dictation_button`: (String) Mouse button for dictation ("left", "right", "middle", "x1", "x2") (Default: "middle").
+    *   [x] `command_button`: (String) Mouse button for command (same options or `null`) (Default: `null`).
+    *   [x] `command_modifier`: (String) Keyboard modifier key for command ("shift", "ctrl", "alt", or `null`) (Default: `null`).
+*   [x] **`tooltip`**: Settings for interim dictation feedback.
+    *   [x] `alpha`: (Float) Transparency (Default: 0.85).
+    *   [x] `bg_color`: (String) Background color (Default: "lightyellow").
+    *   [x] `fg_color`: (String) Text color (Default: "black").
+    *   [x] `font_family`: (String) Font name (Default: "Arial").
+    *   [x] `font_size`: (Integer) Font size (Default: 10).
+*   [x] **API Key:** Deepgram key handled via `.env` or environment variable.
 
-- **`general`**:
-    - `min_duration_sec`: (Float) Minimum recording duration in seconds required to process the audio (default: 0.5).
-    - `selected_language`: (String) The language code for speech recognition (e.g., "en-US", "fr-FR", "es-ES") (default: "en-US").
-- **`triggers`**:
-    - `dictation_button`: (String) Mouse button for dictation mode ("left", "right", "middle", "x1", "x2") (default: "middle").
-    - `command_button`: (String) Mouse button for command mode (same options as dictation) or `null` to disable (default: `null`).
-    - `command_modifier`: (String) Keyboard modifier key required with `command_button` ("shift", "ctrl", "alt") or `null` for no modifier (default: `null`).
-- **`tooltip`**: Settings for the interim dictation feedback tooltip.
-    - `alpha`: (Float) Window transparency (0.0 to 1.0) (default: 0.85).
-    - `bg_color`: (String) Background color (Tkinter color name or hex) (default: "lightyellow").
-    - `fg_color`: (String) Text color (Tkinter color name or hex) (default: "black").
-    - `font_family`: (String) Font name (default: "Arial").
-    - `font_size`: (Integer) Font size (default: 10).
+## Known Issues / Enhancements
 
-*(Note: The Deepgram API key should still be set via a `.env` file or environment variable for security.)*
+*   [x] **Initial Transcription Delay:** Mitigated with a rolling audio buffer (`audio_buffer.py`).
+*   [x] **Trigger Button Conflicts:** Default changed from side buttons to Middle Mouse Button due to conflicts. Further refinement may be needed.
 
-## Key Features
+## Key Features & Task Breakdown
 
-- **Dual Voice Modes (Multiple Activation Methods):** 
-    - **Primary Trigger:** Middle Mouse Button (Wheel Press) - Hold-to-Talk. (Further differentiation TBD).
-    - (Future) Wake Word activation.
-- **User Configuration:** Highly configurable system via UI (e.g., tray icon menu): Trigger methods (buttons, keys, wake words), specific wake words, SR provider **and language**, optional Dictation AI correction, Command list, cancellation methods, confirmation methods, etc.
-- **Real-time Visual Feedback:**
-    - **Interim Text Tooltip:** While dictation is active, interim transcription results are displayed in a text tooltip near the cursor (Configurable via `tooltip` section in `config.json`).
-    - **Microphone Status/Volume Indicator:** When dictation or command mode is active, a microphone icon appears below the cursor. The fill level of the icon dynamically represents the current input volume level detected by a parallel audio monitoring stream (using `PyAudio`, `numpy`). (Icon appearance currently hardcoded, could be added to config later).
+### Core Functionality
 
-- **Mode 1: Dictation**
-    - **Activation:** Hold Dictation trigger (Configurable via `triggers.dictation_button`). Shows text tooltip and status icon.
-    - **Recording & Streaming:** Audio streamed to Deepgram (using configured language) while trigger is active (hold) or until confirmation/timeout (wake word).
-    - **Real-time Interim Feedback (Tooltip):** While dictation is active, interim transcription results from Deepgram are displayed in a small, temporary tooltip window near the mouse cursor. This provides immediate visual feedback without simulating keyboard input. (Uses `tkinter` for the window and `pyautogui` for cursor position).
-    - **Real-time Typing Simulation (Final):** Deepgram's *final* results (after pauses or corrections) are typed at the cursor using `pynput`. Handles Deepgram's real-time corrections via backspace simulation based on word history comparison.
-    - **Completion:** Release Dictation trigger OR Say confirmation phrase (e.g., "confirmed") OR pause detection. The interim tooltip is hidden upon completion or when a final result is processed. Hides text tooltip and status icon.
-    - ***Optional* AI Correction:** If enabled, final segment sent to AI for review. Corrections highlighted; user can reject; final text updated at cursor.
-    - **Filtering:** Minimum duration check.
+*   [x] **Dual Voice Modes:** Support distinct Dictation and Command modes.
+*   [x] **Systray Icon & Menu:**
+    *   [x] Create a systray icon (`pystray`).
+    *   [x] Build a dynamic menu for configuration.
+    *   [x] **General Settings:**
+        *   [x] Language selection submenu (dynamic options, checked state).
+        *   [ ] Min Duration setting (requires input mechanism).
+    *   [x] **Trigger Settings:**
+        *   [x] Dictation Button submenu (dynamic options, checked state).
+        *   [x] Command Button submenu (dynamic options, checked state).
+        *   [x] Command Modifier submenu (dynamic options, checked state).
+    *   [ ] **Tooltip Settings:** (Requires input mechanism for changes)
+        *   [x] Display current values (Transparency, Background, Text Color, Font, Size).
+    *   [x] **Control:**
+        *   [x] Reload Config option (signals main app).
+        *   [x] Exit option (signals main app).
+    *   [x] Save config changes to `config.json`.
+    *   [x] Signal main application (`vibe_app.py`) to reload config when changed via systray.
+*   [x] **Real-time Visual Feedback:**
+    *   [x] **Interim Text Tooltip (Dictation):**
+        *   [x] Display interim results near cursor (`tkinter`, `pyautogui`).
+        *   [x] Make appearance configurable via `config.json` (`tooltip` section).
+        *   [x] Manage tooltip lifecycle (show/hide/update) via a queue (`TooltipManager`).
+    *   [x] **Microphone Status/Volume Indicator:**
+        *   [x] Display mic icon near cursor when active (`tkinter`).
+        *   [x] Dynamically show input volume level via icon fill (`numpy`, `pyaudio`).
+        *   [x] Manage indicator lifecycle/updates via a queue (`StatusIndicatorManager`).
+        *   [x] Use background audio monitoring (`audio_buffer.py`) for continuous volume level.
+        *   [ ] Make icon appearance configurable (currently hardcoded).
+*   [x] **Audio Buffering:** Use `BufferedAudioInput` class to continuously capture audio in the background.
+    *   [x] Maintain a rolling buffer of recent audio.
+    *   [x] Send buffered audio to Deepgram upon activation.
+    *   [x] Continuously calculate RMS volume and send to status indicator queue.
 
-- **Mode 2: Command**
-    - **Activation:** Hold Command trigger (Configurable via `triggers.command_button` and `triggers.command_modifier`). Shows status icon (and potentially command feedback UI later).
-    - **Recording & Streaming:** Audio streamed to Deepgram while trigger is active or until confirmation/timeout.
-    - **Command Feedback:** Recognized command text displayed in a temporary UI element.
-    - **Completion & Confirmation:** Release Command trigger OR Say confirmation phrase (e.g., "confirmed"). Hides status icon.
-    - **Cancellation (Before Confirmation):** Allow cancellation via configurable methods: Esc key, mouse gesture (e.g., specific movement), specific voice command (e.g., "cancel").
-    - **AI Interpretation:** On confirmation, recognized text sent to AI model to interpret intent.
-    - **Action Execution:** Interpreted intent mapped to predefined actions:
-        - Simulate keyboard presses/shortcuts (`pynput`).
-        - Execute specific, pre-approved scripts/commands (Requires careful security design).
-    - **Undo / Go Back (Post-Execution):** Implement a mechanism (triggered by key/mouse/voice, e.g., "go back") to undo the last executed command (requires state tracking and revert logic).
-    - **Filtering:** Minimum duration check.
+### Mode 1: Dictation
 
-- **System Interaction:** Primarily interacts via simulating keyboard input (`pynput`) or executing defined system actions in command mode.
+*   [x] **Activation:** Hold Dictation trigger (`triggers.dictation_button` from config).
+*   [x] **Visual Feedback:** Show text tooltip and status icon on activation.
+*   [x] **Recording & Streaming:** Stream audio to Deepgram using the selected language (`general.selected_language`).
+*   [x] **Real-time Interim Feedback:** Display interim results in the tooltip.
+*   [x] **Real-time Typing Simulation (Final):** Type final results at the cursor (`pynput`).
+*   [x] **Correction Handling:** Handle Deepgram's real-time corrections via backspace simulation based on word history.
+    *   [x] Implement `handle_dictation_final` logic comparing history and new transcript.
+    *   [x] Implement special "back" word handling.
+*   [x] **Completion:** Release Dictation trigger.
+*   [x] **Cleanup:** Hide text tooltip and status icon on completion.
+*   [ ] **Optional AI Correction:** Implement post-processing step with AI review.
+    *   [ ] Add configuration flag to enable/disable.
+    *   [ ] Send final text to AI.
+    *   [ ] Implement UI/mechanism for user to accept/reject AI corrections.
+    *   [ ] Update text at cursor based on user decision.
+*   [x] **Filtering:** Discard transcription if duration < `general.min_duration_sec`.
+
+### Mode 2: Command (Partially Implemented)
+
+*   [x] **Activation:** Hold Command trigger (`triggers.command_button` + optional `triggers.command_modifier` from config).
+*   [x] **Visual Feedback:** Show status icon on activation.
+*   [x] **Recording & Streaming:** Stream audio to Deepgram.
+*   [ ] **Command Feedback UI:** Display recognized command text in a temporary UI element. (Currently only logs).
+*   [x] **Completion:** Release Command trigger.
+*   [x] **Cleanup:** Hide status icon on completion.
+*   [x] **Cancellation:** Allow cancellation via Esc key during command mode.
+*   [ ] **AI Interpretation:** Send recognized text to AI model on completion to interpret intent.
+*   [ ] **Action Execution:** Map interpreted intent to actions:
+    *   [ ] Simulate keyboard presses/shortcuts (`pynput`). (Basic 'press enter' example exists).
+    *   [ ] Execute specific, pre-approved scripts/commands (Requires security design).
+*   [ ] **Undo / Go Back:** Implement mechanism to undo the last executed command.
+    *   [ ] Track last executed command details.
+    *   [ ] Implement revert logic for different action types.
+    *   [ ] Define trigger (key/mouse/voice) for undo.
+*   [x] **Filtering:** Discard command if duration < `general.min_duration_sec`.
+
+### System Interaction
+
+*   [x] Primarily interact via simulating keyboard input (`pynput`).
+*   [ ] Allow executing defined system actions in command mode (requires implementation).

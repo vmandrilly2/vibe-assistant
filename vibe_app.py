@@ -247,6 +247,12 @@ current_mode = None # 'dictation' or 'command'
 tooltip_queue = queue.Queue() # Queue for communicating with the tooltip thread
 status_queue = queue.Queue() # For the microphone status icon (handled by StatusIndicatorManager)
 modifier_keys_pressed = set() # Keep track of currently pressed modifier keys
+# --- NEW: Queue for actions from UI elements ---
+ui_action_queue = queue.Queue()
+# --- NEW: Flag for cancellation ---
+ui_interaction_cancelled = False
+# --- NEW: Store initial position ---
+initial_activation_pos = None
 
 # --- Keyboard Controller (for typing simulation) ---
 kb_controller = keyboard.Controller()
@@ -718,92 +724,77 @@ async def on_unhandled(self, unhandled, **kwargs):
 
 # --- Pynput Listener Callbacks ---
 def on_click(x, y, button, pressed):
-    global current_mode, start_time, status_queue
+    global current_mode, start_time, status_queue, ui_interaction_cancelled
     global is_dictation_active, is_command_active
     global transcription_active_event
-    global typed_word_history, final_source_text # Reset state vars
-    # --- Access global language config ---
+    global typed_word_history, final_source_text
     global SELECTED_LANGUAGE, TARGET_LANGUAGE
+    # --- Access the new global ---
+    global initial_activation_pos
 
     trigger_mode = None
     active_event = None
     required_modifier = None
-    modifier_str = None # For logging
+    modifier_str = None
 
     # Determine which mode is being triggered, checking modifiers
     if button == DICTATION_TRIGGER_BUTTON:
         is_command_modifier_pressed = (COMMAND_MODIFIER_KEY is not None and COMMAND_MODIFIER_KEY in modifier_keys_pressed)
         if not is_command_modifier_pressed:
-            trigger_mode = "dictation"
-            active_event = is_dictation_active
-        else:
-             logging.debug(f"Dictation button ({button}) pressed, but command modifier ({COMMAND_MODIFIER_KEY_STR}) is also pressed. Ignoring.")
-             return
+            trigger_mode = "dictation"; active_event = is_dictation_active
+        else: return # Ignore if modifier pressed
 
     elif COMMAND_TRIGGER_BUTTON is not None and button == COMMAND_TRIGGER_BUTTON:
         modifier_ok = (COMMAND_MODIFIER_KEY is None or COMMAND_MODIFIER_KEY in modifier_keys_pressed)
         if modifier_ok:
-            trigger_mode = "command"
-            active_event = is_command_active
-            required_modifier = COMMAND_MODIFIER_KEY
-            modifier_str = COMMAND_MODIFIER_KEY_STR
-        else:
-            logging.debug(f"Command button ({button}) pressed, but required modifier ({COMMAND_MODIFIER_KEY_STR}) is not pressed. Ignoring.")
-            return
-
+            trigger_mode = "command"; active_event = is_command_active
+            required_modifier = COMMAND_MODIFIER_KEY; modifier_str = COMMAND_MODIFIER_KEY_STR
+        else: return # Ignore if modifier not pressed
     else:
-        return # Ignore other button clicks
+        return # Ignore other buttons
 
     if trigger_mode:
         if pressed:
-            if not transcription_active_event.is_set(): # Start only if nothing else is active
+            # --- Reset cancellation flag on new press ---
+            ui_interaction_cancelled = False
+            if not transcription_active_event.is_set():
                 mod_log_str = f" with {modifier_str} " if required_modifier else ""
                 logging.info(f"{trigger_mode.capitalize()} button pressed{mod_log_str}- starting mode.")
-                is_dictation_active.clear()
-                is_command_active.clear()
-                if trigger_mode == "dictation":
-                    typed_word_history.clear()
-                    final_source_text = ""
-                elif trigger_mode == "command":
-                    global current_command_transcript
-                    current_command_transcript = ""
-
-                active_event.set()
-                transcription_active_event.set()
+                # Clear state...
+                is_dictation_active.clear(); is_command_active.clear()
+                if trigger_mode == "dictation": typed_word_history.clear(); final_source_text = ""
+                elif trigger_mode == "command": global current_command_transcript; current_command_transcript = ""
+                # Set events...
+                active_event.set(); transcription_active_event.set()
                 current_mode = trigger_mode
                 start_time = time.time()
+                # --- Store initial position ---
+                initial_activation_pos = (x, y)
+                logging.debug(f"Stored initial activation position: {initial_activation_pos}")
 
-                # Show Status Indicator with language info
+                # Show Status Indicator using the STORED initial position
                 try:
                     status_data = {
                         "state": "active",
-                        "pos": (x, y),
+                        # --- Send the stored initial position ---
+                        "pos": initial_activation_pos,
                         "source_lang": SELECTED_LANGUAGE,
                         "target_lang": TARGET_LANGUAGE
                     }
                     status_queue.put_nowait(("state", status_data))
-                except queue.Full:
-                    logging.warning("Status queue full when trying to show indicator.")
-
-            else:
-                logging.warning(f"Attempted to start {trigger_mode} while already active ({current_mode})")
+                except queue.Full: logging.warning("Status queue full showing indicator.")
+                except Exception as e: logging.error(f"Error sending initial state to status indicator: {e}")
+            else: logging.warning(f"Attempted start {trigger_mode} while already active.")
         else: # Button released
             if active_event and active_event.is_set():
-                duration = time.time() - start_time if start_time else 0
-                logging.info(f"{trigger_mode.capitalize()} button released (duration: {duration:.2f}s). Stopping mode.")
+                # --- FIX: Remove 'self' check, check 'start_time' directly ---
+                duration = time.time() - start_time if 'start_time' in globals() and start_time else 0
+                # --- END FIX ---
+                logging.info(f"{trigger_mode.capitalize()} button released (duration: {duration:.2f}s). Stopping mode (pending cancellation check).")
                 active_event.clear()
                 transcription_active_event.clear()
-
-                # Hide Tooltip & Status Indicator (send empty langs on hide)
-                if trigger_mode == "dictation":
-                    try: tooltip_queue.put_nowait(("hide", None))
-                    except queue.Full: logging.warning("Tooltip queue full on release.")
-                try:
-                    # Also reset languages when hiding
-                    status_data = {"state": "hidden", "source_lang": "", "target_lang": ""}
-                    status_queue.put_nowait(("state", status_data))
-                except queue.Full:
-                    logging.warning("Status queue full when trying to hide indicator.")
+                # --- Reset initial position on release ---
+                initial_activation_pos = None
 
 def on_press(key):
     global current_mode, modifier_keys_pressed, status_queue
@@ -873,19 +864,36 @@ def on_release(key):
          # Post-processing will happen in the main loop's stop flow
 
 
+# --- Config Saving Function (Moved/Duplicated for now) ---
+# TODO: Refactor config loading/saving/applying into a dedicated module
+def save_config_local(cfg_dict):
+    """Saves the provided config dictionary back to the JSON file."""
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(cfg_dict, f, indent=2)
+        logging.info(f"Configuration saved to {CONFIG_FILE} by vibe_app.")
+        # Signal systray to update its display (it reloads file anyway on its interaction)
+        # but good practice to signal. Let systray clear the event.
+        systray_ui.config_reload_event.set()
+    except IOError as e:
+        logging.error(f"Error saving config file {CONFIG_FILE}: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error saving config: {e}")
+
 # --- Main Application Logic ---
 async def main():
-    global start_time, current_mode, current_command_transcript, tooltip_queue, status_queue
-    global config # Make main config global for reloading
-    global final_source_text # Access final dictation text
-    global typed_word_history # Access dictation history
-    # --- Access global language config ---
-    global SELECTED_LANGUAGE, TARGET_LANGUAGE
+    # --- Make managers global or pass them correctly ---
+    global tooltip_mgr, status_mgr, buffered_audio_input, deepgram, start_time
+    # --- Add mouse_controller to globals if needed, or ensure it's passed ---
+    global mouse_controller # Add if needed by other functions
+    # --- Declare other necessary globals used/modified within main ---
+    global current_mode, current_command_transcript, final_source_text, typed_word_history
+    global ui_interaction_cancelled, config, SELECTED_LANGUAGE, TARGET_LANGUAGE
+    # --- Ensure initial_activation_pos is accessible if needed, though mainly set/used in on_click ---
+    global initial_activation_pos
 
     logging.info("Starting Vibe App...")
-
-    # --- Initialize Systray UI ---
-    systray_icon = None
+    # --- Initialize Systray ---
     systray_thread = threading.Thread(target=systray_ui.run_systray, args=(systray_ui.exit_app_event,), daemon=True)
     systray_thread.start()
     logging.info("Systray UI thread started.")
@@ -895,329 +903,262 @@ async def main():
     tooltip_mgr.start()
     logging.info("Tooltip Manager started.")
 
-    # --- Start Status Indicator Manager (using imported class) ---
-    status_mgr = StatusIndicatorManager(status_queue)
+    # --- Start Status Indicator Manager ---
+    status_mgr = StatusIndicatorManager(status_queue, ui_action_queue, PREFERRED_SOURCE_LANGUAGES, PREFERRED_TARGET_LANGUAGES)
     status_mgr.start()
     logging.info("Status Indicator Manager started.")
 
-    # --- Initialize and Start Buffered Audio Input ---
+    # --- Start Buffered Audio Input ---
     buffered_audio_input = BufferedAudioInput(status_queue)
     buffered_audio_input.start()
     logging.info("Buffered Audio Input thread started.")
 
-    # Initialize Deepgram Client with reduced verbosity
+    # --- Initialize Deepgram Client ---
     try:
         config_dg = DeepgramClientOptions(verbose=logging.WARNING)
-        deepgram: DeepgramClient = DeepgramClient(DEEPGRAM_API_KEY, config_dg)
+        deepgram = DeepgramClient(DEEPGRAM_API_KEY, config_dg)
     except Exception as e:
         logging.error(f"Failed to initialize Deepgram client: {e}")
+        systray_ui.exit_app_event.set() # Signal exit if DG fails
         return
 
+    # --- Initialize pynput Controller ---
+    mouse_controller = mouse.Controller()
+
+    # --- Start Listeners ---
     mouse_listener = mouse.Listener(on_click=on_click)
     keyboard_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     mouse_listener.start()
     keyboard_listener.start()
     logging.info("Input listeners started.")
 
+    # --- Loop Variables (Initialize locals) ---
     dg_connection = None
     microphone = None
-    active_mode_on_stop = None
+    active_mode_on_stop = None # Local: Only used within the stop flow
+    last_hover_check_time = 0
+    hover_check_interval = 0.1
+    # start_time is handled globally
 
     try:
-        while True:
-            # Start Transcription Flow
-            if transcription_active_event.is_set() and dg_connection is None:
-                logging.info(f"Activating {current_mode} mode...")
-                if current_mode == "dictation":
-                    typed_word_history.clear()
-                    final_source_text = ""
-                elif current_mode == "command":
-                    current_command_transcript = ""
+        while not systray_ui.exit_app_event.is_set(): # Check exit event
+            current_time = time.time()
 
+            # --- Handle UI Actions ---
+            try:
+                action_command, action_data = ui_action_queue.get_nowait()
+                # logging.info(f"Received UI action: {action_command}") # Reduce log noise
+                if action_command == "select_language":
+                    lang_type = action_data.get("type"); new_lang = action_data.get("lang")
+                    config_key = "selected_language" if lang_type == "source" else "target_language"
+                    if "general" not in config: config["general"] = {}
+                    config["general"][config_key] = new_lang
+                    logging.info(f"UI selected {lang_type} language: {new_lang}. Updating config.")
+                    save_config_local(config); apply_config(config); ui_interaction_cancelled = True
+            except queue.Empty: pass
+            except Exception as e: logging.error(f"Error processing UI action queue: {e}", exc_info=True)
+
+            # --- Check Hover Position ---
+            if transcription_active_event.is_set() and current_time - last_hover_check_time > hover_check_interval:
+                last_hover_check_time = current_time
                 try:
-                    # 1. Get connection object
+                    hover_pos = mouse_controller.position
+                    if status_mgr and status_mgr.thread.is_alive():
+                        # Send current position for hover *checking*
+                        status_mgr.queue.put_nowait(("check_hover_position", hover_pos))
+                except queue.Full: pass
+                except Exception as e:
+                    if time.time() % 5 < 0.1: logging.error(f"Error checking/sending hover position: {e}")
+
+            # --- Start Transcription Flow ---
+            if transcription_active_event.is_set() and dg_connection is None:
+                # Now uses the global current_mode correctly
+                logging.info(f"Activating {current_mode} mode...")
+                # Clear state...
+                if current_mode == "dictation": typed_word_history.clear(); final_source_text = ""
+                elif current_mode == "command": current_command_transcript = ""
+                try:
+                    # Connect, register handlers, set options...
                     dg_connection = deepgram.listen.asyncwebsocket.v("1")
-
-                    # 2. Register handlers
-                    dg_connection.on(LiveTranscriptionEvents.Open, on_open)
-                    dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
-                    dg_connection.on(LiveTranscriptionEvents.Metadata, on_metadata)
-                    dg_connection.on(LiveTranscriptionEvents.SpeechStarted, on_speech_started)
-                    dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, on_utterance_end)
-                    dg_connection.on(LiveTranscriptionEvents.Error, on_error)
-                    dg_connection.on(LiveTranscriptionEvents.Close, on_close)
-                    dg_connection.on(LiveTranscriptionEvents.Unhandled, on_unhandled)
-
-                    # 3. Define options using configured SOURCE language
-                    options = LiveOptions(
-                        model="nova-2",
-                        language=SELECTED_LANGUAGE, # Use SOURCE language
-                        smart_format=True,
-                        interim_results=True, utterance_end_ms="1000",
-                        vad_events=True, endpointing=300,
-                        encoding="linear16", channels=1, sample_rate=16000,
-                        # Keep word-level timestamps if handle_dictation_final relies on them implicitly
-                        # (Though current implementation seems okay without explicit timestamps)
-                        punctuate=True, # Enable punctuation
-                        numerals=True, # Enable number formatting
-                    )
-                    
-                    # 4. Start connection
+                    # ... handlers ...
+                    dg_connection.on(LiveTranscriptionEvents.Transcript, on_message) # Ensure this uses global vars correctly
+                    # ... other handlers ...
+                    options = LiveOptions(model="nova-2", language=SELECTED_LANGUAGE, interim_results=True, smart_format=True, # etc.
+                                          encoding="linear16", channels=1, sample_rate=16000, punctuate=True, numerals=True,
+                                          utterance_end_ms="1000", vad_events=True, endpointing=300)
                     await dg_connection.start(options)
-
-                    # 4.5 Send buffered audio FIRST
+                    # Send buffer...
                     pre_activation_buffer = buffered_audio_input.get_buffer()
+                    # ... buffer sending logic ...
                     if pre_activation_buffer:
-                        logging.info(f"Sending {len(pre_activation_buffer)} chunks from pre-activation buffer...")
+                        # logging.info(...)
                         for chunk in pre_activation_buffer:
+                            # ... send chunk ...
                             if dg_connection and await dg_connection.is_connected():
                                 try: await dg_connection.send(chunk)
-                                except Exception as send_e:
-                                    logging.error(f"Error sending buffered chunk: {send_e}")
-                                    break # Stop sending buffer if error occurs
-                            else:
-                                logging.warning("Connection closed before finishing sending buffer.")
-                                break
-                        logging.info("Finished sending pre-activation buffer.")
-                    else:
-                        logging.info("Pre-activation buffer was empty.")
+                                except Exception: break
+                            else: break
+                        # logging.info(...)
 
-                    # 5. Initialize and start *Deepgram* Microphone
-                    #    This uses the *original* logging_send_wrapper
+                    # Start DG mic...
                     original_send = dg_connection.send
                     async def logging_send_wrapper(data):
-                        # (Keep the corrected version from previous step)
+                        # ... wrapper logic ...
                         is_conn_connected = False
                         if dg_connection:
                             try: is_conn_connected = await dg_connection.is_connected()
-                            except Exception as check_e: logging.error(f"Error checking dg_connection state: {check_e}")
+                            except Exception: pass
                         if is_conn_connected:
-                            logging.debug(f"DG Mic sending {len(data)} bytes...")
+                            # logging.debug(...) # Reduce noise
                             try: await original_send(data)
-                            except asyncio.CancelledError: logging.warning("DG Send cancelled.")
-                            except Exception as send_e: logging.error(f"Error during dg_connection.send: {send_e}")
-                        else: logging.warning("DG Mic send attempted but connection closed.")
+                            except Exception: pass
 
-                    microphone = Microphone(logging_send_wrapper) # DEEPGRAM Microphone
+                    microphone = Microphone(logging_send_wrapper)
                     microphone.start()
                     logging.info("Deepgram connection and microphone started.")
 
-                    # --- Ensure Status Indicator has correct language info (in case missed by trigger) ---
-                    # This might be slightly redundant if on_click always works, but safe.
-                    try:
-                        current_pos = pyautogui.position() # Get current pos again
-                        status_data = {
-                            "state": "active", # Reaffirm state
-                            "pos": current_pos,
-                            "source_lang": SELECTED_LANGUAGE,
-                            "target_lang": TARGET_LANGUAGE
-                        }
-                        status_queue.put_nowait(("state", status_data))
-                    except queue.Full: pass
-                    except Exception as e: logging.warning(f"Error updating status on activation: {e}")
-
                 except Exception as e:
-                    logging.error(f"Failed to start Deepgram/Microphone: {e}")
-                    # Reset state fully on failure
+                    # ... (Error handling for DG start) ...
+                    logging.error(f"Failed to start DG/Mic: {e}", exc_info=True)
+                    # ... reset state ...
                     if dg_connection:
                        try: await dg_connection.finish()
                        except Exception: pass
-                    is_dictation_active.clear()
-                    is_command_active.clear()
-                    transcription_active_event.clear()
-                    current_mode = None
-                    dg_connection = None
-                    microphone = None
-                    # Hide Status Indicator on failure (send empty langs)
-                    try:
-                        status_data = {"state": "hidden", "source_lang": "", "target_lang": ""}
-                        status_queue.put_nowait(("state", status_data))
-                    except queue.Full: pass
+                    is_dictation_active.clear(); is_command_active.clear(); transcription_active_event.clear()
+                    current_mode = None; dg_connection = None; microphone = None
+                    initial_activation_pos = None # Reset initial pos on error
+                    try: status_mgr.queue.put_nowait(("state", {"state": "hidden", "source_lang": "", "target_lang": ""}))
+                    except Exception: pass
 
-            # Stop Transcription Flow
+            # --- Stop Transcription Flow ---
             elif not transcription_active_event.is_set() and dg_connection is not None:
-                active_mode_on_stop = current_mode # Capture mode *before* resetting
+                active_mode_on_stop = current_mode # Capture global mode before reset
                 logging.info(f"Deactivating {active_mode_on_stop} mode...")
-                duration = time.time() - start_time if start_time else 0
-                start_time = None # Reset start time
-
-                # Ensure tooltip & status are hidden (send empty langs)
-                try: tooltip_queue.put_nowait(("hide", None))
-                except queue.Full: logging.warning("Tooltip queue full on deactivate.")
-                try:
-                    status_data = {"state": "hidden", "source_lang": "", "target_lang": ""}
-                    status_queue.put_nowait(("state", status_data))
-                except queue.Full: logging.warning("Status queue full on deactivate.")
-
-                # 1. Stop *Deepgram* microphone
-                if microphone:
-                    microphone.finish()
-                    microphone = None
-                    logging.info("Deepgram microphone finished.")
-
-                # 2. Stop Deepgram connection
+                duration = current_time - start_time if start_time else 0
+                start_time = None # Reset global start_time
+                # Hide UI...
+                try: status_mgr.queue.put_nowait(("state", {"state": "hidden", "source_lang": "", "target_lang": ""}))
+                except Exception: pass
+                if active_mode_on_stop == "dictation":
+                    try: tooltip_mgr.queue.put_nowait(("hide", None))
+                    except Exception: pass
+                # Stop Mic/Conn...
+                if microphone: microphone.finish(); microphone = None; logging.info("DG Mic finished.")
                 if dg_connection:
-                    try:
-                        # Wait briefly for any final messages from DG before finishing
-                        await asyncio.sleep(0.1)
-                        await dg_connection.finish()
-                        logging.info("Deepgram connection finished.")
-                    except Exception as e:
-                         logging.error(f"Error finishing deepgram connection: {e}")
+                    try: await asyncio.sleep(0.1); await dg_connection.finish(); logging.info("DG Conn finished.")
+                    except Exception as e: logging.error(f"Error finishing DG conn: {e}")
                     dg_connection = None
-
-                # 3. Post-processing (check duration, handle final transcripts/commands, TRANSLATE)
+                # Check cancellation...
+                perform_action = True
+                if ui_interaction_cancelled: perform_action = False; ui_interaction_cancelled = False; logging.info("UI interaction cancelled.")
+                elif active_mode_on_stop == "cancel": perform_action = False; logging.info("Command cancelled.")
+                # Post-process / Translate...
                 translation_task = None
-                if active_mode_on_stop == "cancel":
-                     logging.info("Command cancelled by user.")
-                elif duration >= MIN_DURATION_SEC:
-                    if active_mode_on_stop == "dictation":
-                        if TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE and final_source_text:
-                            logging.info("Dictation finished, initiating translation...")
-                            translation_task = asyncio.create_task(
-                                translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE)
-                            )
-                        else:
-                            logging.info("Dictation finished. No translation needed.")
-                    elif active_mode_on_stop == "command":
-                        execute_command(current_command_transcript)
-                else:
-                    logging.info(f"Transcription duration ({duration:.2f}s) less than minimum ({MIN_DURATION_SEC}s), discarding.")
-                    if active_mode_on_stop == "dictation":
-                        typed_word_history.clear()
-                        final_source_text = ""
-
-                # 4. Reset state (happens *before* awaiting translation)
+                if perform_action:
+                    if duration >= MIN_DURATION_SEC:
+                        if active_mode_on_stop == "dictation":
+                            if TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE and final_source_text:
+                                translation_task = asyncio.create_task(translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE))
+                            else: logging.info("Dictation finished. No translation.")
+                        elif active_mode_on_stop == "command": execute_command(current_command_transcript)
+                    else: # Discard short
+                         logging.info(f"Duration < min ({MIN_DURATION_SEC}s), discarding.")
+                         if active_mode_on_stop == "dictation": typed_word_history.clear(); final_source_text = ""
+                else: # Clear state if cancelled
+                     if active_mode_on_stop == "dictation": typed_word_history.clear(); final_source_text = ""
+                     elif active_mode_on_stop == "command": current_command_transcript = ""
+                # Reset state...
                 current_mode = None
                 current_command_transcript = ""
-
-                # 5. Await translation task if it was created
+                # Await translation...
                 if translation_task:
-                    try:
-                        logging.debug("Waiting for translation task to complete...")
-                        await translation_task
-                        logging.debug("Translation task finished.")
-                    except Exception as e:
-                        logging.error(f"Error occurred during await of translation task: {e}", exc_info=True)
+                    try: await translation_task
+                    except Exception as e: logging.error(f"Error awaiting translation: {e}", exc_info=True)
 
-            # --- Check for Config Reload Event from Systray ---
+            # --- Check Config Reload ---
             if systray_ui.config_reload_event.is_set():
-                logging.info("Detected config reload request from systray.")
-                old_source_language = SELECTED_LANGUAGE
-                old_target_language = TARGET_LANGUAGE
-                logging.debug(f"Lang before reload: Source={old_source_language}, Target={old_target_language}")
-
-                config = load_config()
-                apply_config(config)
-                logging.debug(f"Lang after applying new config: Source={SELECTED_LANGUAGE}, Target={TARGET_LANGUAGE}")
-
-                source_language_changed = (SELECTED_LANGUAGE != old_source_language)
-                restart_dg_needed = (dg_connection is not None and source_language_changed)
-
-                # Notify UI components
-                if tooltip_mgr: tooltip_mgr.reload_config()
-                # --- NEW: Notify Status Indicator IF VISIBLE ---
-                # We can send an updated state message if it's currently active
-                # This requires checking status_mgr state, which isn't directly possible.
-                # Alternative: Send an "update_display" message, let status_mgr decide.
-                # Simplest: Rely on next activation to show correct languages.
-                # Let's stick with simple for now. If the icon is showing when config
-                # reloads, it will show old languages until next activation.
-
+                logging.info("Detected config reload request.")
+                old_source = SELECTED_LANGUAGE
+                config = load_config(); apply_config(config); tooltip_mgr.reload_config()
                 systray_ui.config_reload_event.clear()
-                logging.debug("Config reload event cleared.")
+                if dg_connection and SELECTED_LANGUAGE != old_source:
+                     logging.info("Source language changed, restarting DG...")
+                     transcription_active_event.clear() # This will trigger the stop flow above
 
-                # Restart Deepgram connection if source language changed mid-session
-                if restart_dg_needed:
-                    logging.info("Source language changed mid-session, restarting Deepgram connection.")
-                    # Stop existing connection
-                    is_dictation_active.clear()
-                    is_command_active.clear()
-                    transcription_active_event.clear() # Signal stop flow
-                    # Hide Status Indicator during restart (send empty langs)
-                    try:
-                        status_data = {"state": "hidden", "source_lang": "", "target_lang": ""}
-                        status_queue.put_nowait(("state", status_data))
-                    except queue.Full: pass
-                    # The main loop will handle stopping DG/mic because transcription_active_event is false
-                    # and dg_connection is not None. On the next iteration, it will be None, ready to restart if needed.
-                    current_mode = None # Prevent immediate restart if button isn't held
+            # --- Thread Health Checks ---
+            if not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set(): logging.error("Tooltip thread died."); break
+            if not status_mgr.thread.is_alive() and not status_mgr._stop_event.is_set(): logging.error("Status Indicator thread died."); break
 
-            # Add checks for thread health
-            if not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set():
-                 logging.error("TooltipManager thread terminated unexpectedly. Stopping.")
-                 break
-            if not status_mgr.thread.is_alive() and not status_mgr._stop_event.is_set(): # Check new manager
-                 logging.error("StatusIndicatorManager thread terminated unexpectedly. Stopping.")
-                 break
+            await asyncio.sleep(0.05) # Main loop sleep
 
-            await asyncio.sleep(0.05)
-
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        logging.info("Main task cancelled or interrupted.")
-    except Exception as e:
-         logging.error(f"Unexpected error in main loop: {e}", exc_info=True)
+    except (asyncio.CancelledError, KeyboardInterrupt): logging.info("Main task cancelled/interrupted.")
+    except Exception as e: logging.error(f"Unexpected error in main loop: {e}", exc_info=True)
     finally:
         logging.info("Stopping Vibe App...")
+        # Trigger exit event if not already set, to ensure systray stops cleanly
+        if not systray_ui.exit_app_event.is_set():
+            systray_ui.exit_app_event.set()
 
         # --- Stop Audio Input ---
-        if 'buffered_audio_input' in locals():
-            buffered_audio_input.stop()
+        if 'buffered_audio_input' in locals() and buffered_audio_input: buffered_audio_input.stop()
 
         # --- Signal GUI Managers to Stop ---
-        if 'tooltip_mgr' in locals(): tooltip_mgr.stop()
-        if 'status_mgr' in locals(): status_mgr.stop() # Signal new manager
+        if 'tooltip_mgr' in locals() and tooltip_mgr: tooltip_mgr.stop()
+        if 'status_mgr' in locals() and status_mgr: status_mgr.stop()
         logging.info("GUI Managers stop requested.")
 
         # --- Systray Stop Logic ---
-        if systray_ui.exit_app_event.is_set():
-             logging.info("Exit requested via systray menu.")
-        elif systray_thread and systray_thread.is_alive():
-             logging.warning("Systray thread still alive, explicit stop not implemented yet.")
+        # Wait for the systray thread to finish if it's running
+        if 'systray_thread' in locals() and systray_thread.is_alive():
+            logging.info("Waiting for systray thread to exit...")
+            systray_thread.join(timeout=1.0) # Wait up to 1 second
+            if systray_thread.is_alive():
+                logging.warning("Systray thread did not exit cleanly.")
+            else:
+                logging.info("Systray thread finished.")
 
-        # Cleanup listeners (ensure they exist before stopping/joining)
-        if 'mouse_listener' in locals() and mouse_listener.is_alive():
-            logging.debug("Stopping mouse listener...")
-            mouse_listener.stop()
-            mouse_listener.join(timeout=0.5)
-            logging.info("Mouse listener stopped.")
-        if 'keyboard_listener' in locals() and keyboard_listener.is_alive():
-            logging.debug("Stopping keyboard listener...")
-            keyboard_listener.stop()
-            keyboard_listener.join(timeout=0.5)
-            logging.info("Keyboard listener stopped.")
+        # Cleanup listeners (pynput listeners are daemons, no need to join)
+        if 'mouse_listener' in locals() and mouse_listener.is_alive(): mouse_listener.stop()
+        if 'keyboard_listener' in locals() and keyboard_listener.is_alive(): keyboard_listener.stop()
+        logging.info("Input listeners stop requested.")
 
-        # Ensure Deepgram microphone and connection are stopped
-        if microphone:
+        # --- Ensure Deepgram microphone and connection are stopped ---
+        if 'microphone' in locals() and microphone:
             logging.debug("Finishing Deepgram microphone on exit...")
-            microphone.finish() # Stop microphone first
+            microphone.finish()
             logging.info("Deepgram microphone finished on exit.")
-            await asyncio.sleep(0.01) # Allow loop iteration for mic cleanup tasks
 
-        if dg_connection:
+        if 'dg_connection' in locals() and dg_connection:
             is_conn_connected_final = False
             try: is_conn_connected_final = await dg_connection.is_connected()
-            except Exception: pass
-
+            except Exception: pass # Ignore errors checking state during shutdown
             if is_conn_connected_final:
                 logging.debug("Finishing Deepgram connection on exit...")
                 try:
                     await dg_connection.finish()
                     logging.info("Deepgram connection finished on exit.")
-                except asyncio.CancelledError:
-                    logging.warning("Deepgram finish cancelled, likely during shutdown.")
-                except Exception as e:
-                    logging.error(f"Error during final dg_connection.finish: {e}")
-            else:
-                 logging.info("Deepgram connection already closed or not connected on exit.")
-        else:
-             logging.info("No active Deepgram connection to finish on exit.")
+                except asyncio.CancelledError: logging.warning("Deepgram finish cancelled.")
+                except Exception as e: logging.error(f"Error during final dg_connection.finish: {e}")
+            else: logging.info("Deepgram connection already closed on exit.")
+        else: logging.info("No active Deepgram connection to finish on exit.")
 
         logging.info("Vibe App finished.")
 
-
 # --- Add Exit Event for Systray Communication ---
 systray_ui.exit_app_event = threading.Event() # Create event in main module
+
+# --- Copy Preferred Languages (Temporary Solution) ---
+# Ideally, move these to a shared constants/config module later
+PREFERRED_SOURCE_LANGUAGES = {
+    "en-US": "English (US)",
+    "fr-FR": "French",
+}
+PREFERRED_TARGET_LANGUAGES = {
+    None: "Aucune", # Simpler name for display
+    "en-US": "English (US)",
+    "fr-FR": "French",
+}
+# Add more preferred languages here if needed
 
 if __name__ == "__main__":
     # API Key check moved earlier, before main()

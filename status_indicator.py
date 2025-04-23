@@ -313,14 +313,30 @@ class StatusIndicatorManager:
         except Exception as e: logging.error(f"Unexpected error drawing status icon: {e}", exc_info=True)
 
     def _create_lang_popup(self, lang_type):
-        """Creates and displays the language selection popup."""
+        """Creates and displays the language selection popup directly above the corresponding text area."""
         other_type = "target" if lang_type == "source" else "source"
         self._destroy_lang_popup(other_type)
-        self._destroy_lang_popup(lang_type) # Destroy existing of same type first
-        if not self.root or self._stop_event.is_set(): return
+        self._destroy_lang_popup(lang_type)
+
+        if not self.root or not self.canvas or self._stop_event.is_set() or not self.root.winfo_exists():
+            return
+
+        tag_name = "source_lang_area" if lang_type == "source" else "target_lang_area"
+
+        try:
+            bbox_rel = self.canvas.bbox(tag_name)
+            logging.debug(f"Popup '{lang_type}': Relative bbox for tag '{tag_name}': {bbox_rel}") # Keep this log
+            if not bbox_rel:
+                logging.warning(f"Could not find bbox for tag '{tag_name}' to position popup.")
+                return
+        except tk.TclError as e:
+             logging.warning(f"TclError getting bbox for {tag_name}: {e}")
+             return
+
         popup = tk.Toplevel(self.root)
         popup.overrideredirect(True); popup.wm_attributes("-topmost", True)
         popup.config(bg=self.popup_bg, relief=tk.SOLID, borderwidth=1)
+
         lang_dict = self.pref_src_langs if lang_type == "source" else self.pref_tgt_langs
         for lang_code, lang_name in lang_dict.items():
             display_name = lang_name if lang_code is not None else "None"
@@ -329,19 +345,68 @@ class StatusIndicatorManager:
             label.bind("<Enter>", partial(self._on_popup_label_enter, label=label))
             label.bind("<Leave>", partial(self._on_popup_label_leave, label=label))
             label.bind("<ButtonRelease-1>", partial(self._on_popup_label_release, lang_type=lang_type, lang_code=lang_code))
+
         try:
-            popup.update_idletasks(); self.root.update_idletasks()
-            main_win_x = self.root.winfo_rootx(); main_win_y = self.root.winfo_rooty()
-            popup_offset_x = self.canvas_width + 5; popup_offset_y = 0
-            popup.geometry(f"+{main_win_x + popup_offset_x}+{main_win_y + popup_offset_y}")
-            # logging.debug(f"Popup for {lang_type} positioned relative at +{main_win_x + popup_offset_x}+{main_win_y + popup_offset_y}")
+            popup.update_idletasks() # Calculate popup size needed first
+            self.canvas.update_idletasks() # Ensure canvas size/pos is current
+
+            canvas_x = self.canvas.winfo_rootx()
+            canvas_y = self.canvas.winfo_rooty()
+            logging.debug(f"Popup '{lang_type}': Canvas root coords: ({canvas_x}, {canvas_y})") # Keep
+
+            # Calculate absolute screen coordinates for the language area bbox
+            # bbox_rel = (x0, y0, x1, y1) relative to canvas
+            bbox_abs_x0 = canvas_x + bbox_rel[0]
+            bbox_abs_y0 = canvas_y + bbox_rel[1]
+            bbox_abs_x1 = canvas_x + bbox_rel[2]
+            bbox_abs_y1 = canvas_y + bbox_rel[3]
+            logging.debug(f"Popup '{lang_type}': Absolute bbox for tag '{tag_name}': ({bbox_abs_x0}, {bbox_abs_y0}, {bbox_abs_x1}, {bbox_abs_y1})") # Keep
+
+            popup_height = popup.winfo_reqheight()
+            popup_width = popup.winfo_reqwidth()
+            logging.debug(f"Popup '{lang_type}': Required size: {popup_width}x{popup_height}") # Keep
+
+            # --- Calculate position ABOVE the text area ---
+            popup_x = bbox_abs_x0 # Align left edge with the language area's left edge
+            popup_y = bbox_abs_y0 - popup_height - 2 # Position above the top edge with a small gap
+            logging.debug(f"Popup '{lang_type}': Calculated initial coords: ({popup_x}, {popup_y})") # Keep
+
+            # --- Screen Bounds Check (Simplified) ---
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            adjusted = False
+
+            # Adjust X if needed
+            if popup_x < 0: popup_x = 0; adjusted = True
+            if popup_x + popup_width > screen_width: popup_x = screen_width - popup_width; adjusted = True
+
+            # Adjust Y: Prioritize placing above. If it goes off top, place below.
+            if popup_y < 0:
+                popup_y = bbox_abs_y1 + 2 # Place below bottom edge
+                adjusted = True
+                # If placing below STILL goes off screen, move it up just enough to fit
+                if popup_y + popup_height > screen_height:
+                    popup_y = screen_height - popup_height
+                    adjusted = True # Indicate further adjustment
+
+            # (No need to check if original 'above' position went off bottom,
+            #  as the 'below' check handles cases where 'above' wasn't feasible anyway)
+
+            if adjusted:
+                logging.debug(f"Popup '{lang_type}': Adjusted coords for screen bounds: ({popup_x}, {popup_y})")
+
+            popup.geometry(f"+{popup_x}+{popup_y}")
+            logging.info(f"Popup for {lang_type} positioned at +{popup_x}+{popup_y}") # Use INFO for final position
+
         except tk.TclError as e:
-            logging.warning(f"Could not get geometry for popup positioning: {e}.")
+            logging.warning(f"Could not get geometry for precise popup positioning: {e}.")
             try: popup.destroy(); return
             except: pass
+
+        # Store reference
         if lang_type == "source": self.source_popup = popup
         else: self.target_popup = popup
-        # logging.debug(f"Popup created for {lang_type}") # Noisy
+        # logging.debug(f"Popup created for {lang_type}") # Keep less noisy
 
     def _destroy_lang_popup(self, lang_type):
         """Destroys the specified language popup if it exists."""
@@ -353,8 +418,7 @@ class StatusIndicatorManager:
         if popup:
             try:
                 if self.root and self.root.winfo_exists(): popup.destroy()#; logging.debug(f"Popup destroyed for {lang_type}")
-                # else: logging.debug(f"Skipped destroying popup for {lang_type}, root destroyed.")
-            except tk.TclError: pass # Ignore errors during shutdown
+            except tk.TclError: pass
             except Exception as e: logging.error(f"Unexpected error destroying popup {lang_type}: {e}", exc_info=True)
 
     def _check_hover_and_update_popups(self, mouse_x, mouse_y):

@@ -61,22 +61,66 @@ config = load_config()
 config_reload_event = threading.Event() # Used to signal main app to reload
 exit_app_event = None # Placeholder for the event from main app
 
-# Define valid options
-BUTTON_OPTIONS = ["left", "right", "middle", "x1", "x2"]
-COMMAND_BUTTON_OPTIONS = BUTTON_OPTIONS + [None] # Add None option for command button
-MODIFIER_OPTIONS = ["shift", "ctrl", "alt", None] # Add None option for modifier
-# --- Language options now include "None" for target ---
-TARGET_LANGUAGE_OPTIONS = { # Use a separate dict to include None easily
-    None: "None (Dictation Only)",
+# --- Define Language Lists ---
+
+# Preferred languages for SOURCE menu
+PREFERRED_SOURCE_LANGUAGES = {
     "en-US": "English (US)",
+    "fr-FR": "French",
+    # Add other frequently used SOURCE languages here
+}
+
+# Preferred languages for TARGET menu (can include None)
+PREFERRED_TARGET_LANGUAGES = {
+    None: "Aucune (Dictée seulement)", # Keep None easily accessible
+    "en-US": "English (US)",
+    "fr-FR": "French",
+    "ko-KR": "Korean",
+    "ja-JP": "Japanese",
+    # Add other frequently used TARGET languages here
+}
+
+# Comprehensive list (ensure codes are valid for Deepgram/OpenAI)
+# Add more as needed, cross-reference with Deepgram/OpenAI documentation
+ALL_LANGUAGES = {
+    "en-US": "English (US)",
+    "en-GB": "English (UK)",
     "fr-FR": "French",
     "es-ES": "Spanish",
     "de-DE": "German",
-    "zh": "Chinese (Mandarin)",
-    # Add more languages as needed (ensure Deepgram supports them)
+    "it-IT": "Italian",
+    "pt-PT": "Portuguese",
+    "pt-BR": "Portuguese (Brazil)",
+    "ru-RU": "Russian",
+    "zh": "Chinese (Mandarin)", # Or zh-CN? Check docs
+    "ko-KR": "Korean",
+    "ja-JP": "Japanese",
+    "hi-IN": "Hindi",
+    "ar": "Arabic", # Or specific dialect codes?
+    "nl-NL": "Dutch",
+    # Add many more here...
 }
-# Source languages don't need "None"
-SOURCE_LANGUAGE_OPTIONS = {k: v for k, v in TARGET_LANGUAGE_OPTIONS.items() if k is not None}
+
+# Calculate 'Other' SOURCE languages dynamically
+# Sort alphabetically by language name for the 'Other' menu
+OTHER_SOURCE_LANGUAGES = {
+    k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
+    if k not in PREFERRED_SOURCE_LANGUAGES
+}
+
+# Calculate 'Other' TARGET languages dynamically (excluding None and preferred ones)
+# Sort alphabetically by language name for the 'Other' menu
+OTHER_TARGET_LANGUAGES = {
+    k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
+    if k not in PREFERRED_TARGET_LANGUAGES # Exclude preferred targets (None is handled separately)
+}
+
+
+# Define valid options for triggers (no change)
+BUTTON_OPTIONS = ["left", "right", "middle", "x1", "x2"]
+COMMAND_BUTTON_OPTIONS = BUTTON_OPTIONS + [None]
+MODIFIER_OPTIONS = ["shift", "ctrl", "alt", None]
+
 
 # --- Helper Functions ---
 def create_image(width, height, color1, color2):
@@ -150,10 +194,32 @@ def update_trigger_setting_callback(icon, item, setting_key, value):
 
 # --- Functions to build the menu dynamically ---
 def build_general_menu():
-    # --- Source Language Submenu ---
-    current_source_lang = config.get("general", {}).get("selected_language", "en-US")
+    # --- Build "Other Languages" Submenus ---
+    # Submenu for OTHER SOURCE languages
+    other_source_submenu = menu(*[
+        item(
+            name,
+            partial(update_general_setting_callback, setting_key='selected_language', value=code),
+            checked=lambda item, c=code: config.get("general", {}).get("selected_language") == c,
+            radio=True
+        ) for code, name in OTHER_SOURCE_LANGUAGES.items() # Use OTHER_SOURCE_LANGUAGES
+    ])
+
+    # Submenu for OTHER TARGET languages
+    other_target_submenu = menu(*[
+        item(
+            name,
+            partial(update_general_setting_callback, setting_key='target_language', value=code),
+            checked=lambda item, c=code: config.get("general", {}).get("target_language") == c,
+            radio=True
+        ) for code, name in OTHER_TARGET_LANGUAGES.items() # Use OTHER_TARGET_LANGUAGES
+    ])
+
+
+    # --- Source Language Menu ---
     source_lang_items = []
-    for code, name in SOURCE_LANGUAGE_OPTIONS.items(): # Use SOURCE_LANGUAGE_OPTIONS
+    # Add preferred SOURCE languages first
+    for code, name in PREFERRED_SOURCE_LANGUAGES.items(): # Use PREFERRED_SOURCE_LANGUAGES
         source_lang_items.append(
             item(
                 name,
@@ -162,21 +228,29 @@ def build_general_menu():
                 radio=True
             )
         )
-    source_lang_submenu = menu(*source_lang_items)
+    # Add separator and 'Other' submenu if there are other source languages
+    if OTHER_SOURCE_LANGUAGES:
+        source_lang_items.append(menu.SEPARATOR)
+        source_lang_items.append(item('Autres langues', other_source_submenu))
 
-    # --- Target Language Submenu ---
-    current_target_lang = config.get("general", {}).get("target_language") # Can be None
+    # --- Target Language Menu ---
     target_lang_items = []
-    for code, name in TARGET_LANGUAGE_OPTIONS.items(): # Use TARGET_LANGUAGE_OPTIONS
-        target_lang_items.append(
+    # Add preferred TARGET languages (which includes None)
+    for code, name in PREFERRED_TARGET_LANGUAGES.items(): # Use PREFERRED_TARGET_LANGUAGES
+         target_lang_items.append(
             item(
-                name,
+                name, # Name already includes "Aucune..." for None
                 partial(update_general_setting_callback, setting_key='target_language', value=code),
+                # Adjust checked function slightly for None vs code comparison
                 checked=lambda item, c=code: config.get("general", {}).get("target_language") == c,
                 radio=True
             )
         )
-    target_lang_submenu = menu(*target_lang_items)
+    # Add separator and 'Other' submenu if there are other target languages
+    if OTHER_TARGET_LANGUAGES:
+        target_lang_items.append(menu.SEPARATOR)
+        target_lang_items.append(item('Autres langues', other_target_submenu))
+
 
     # --- Min Duration (Display only) ---
     min_dur = config.get("general", {}).get("min_duration_sec", "N/A")
@@ -184,13 +258,13 @@ def build_general_menu():
 
     # --- OpenAI Model (Display only for now) ---
     openai_model = config.get("general", {}).get("openai_model", "N/A")
-    model_item = item(f'Translation Model: {openai_model}', None, enabled=False) # TODO: Make configurable later?
+    model_item = item(f'Translation Model: {openai_model}', None, enabled=False)
 
     return [
-        item('Source Language', source_lang_submenu),
-        item('Target Language', target_lang_submenu), # Add Target Language submenu
+        item('Langue Source', menu(*source_lang_items)),
+        item('Langue Cible', menu(*target_lang_items)),
         min_dur_item,
-        model_item # Display the model being used
+        model_item
     ]
 
 def build_triggers_menu():
@@ -263,12 +337,12 @@ def build_tooltip_menu():
 def build_menu():
     """Builds the main systray menu structure."""
     return menu(
-        item('General', menu(*build_general_menu())),
-        item('Triggers', menu(*build_triggers_menu())),
-        item('Tooltip', menu(*build_tooltip_menu())),
+        item('Général', menu(*build_general_menu())), # Changed name slightly
+        item('Déclencheurs', menu(*build_triggers_menu())), # Changed name slightly
+        item('Info-bulle', menu(*build_tooltip_menu())), # Changed name slightly
         menu.SEPARATOR,
-        item('Reload Config', on_reload_config_clicked),
-        item('Exit', on_exit_clicked)
+        item('Recharger Config', on_reload_config_clicked), # Changed name slightly
+        item('Quitter', on_exit_clicked) # Changed name slightly
     )
 
 # --- Main Systray Function ---

@@ -68,8 +68,11 @@ class StatusIndicatorManager:
         # Colors
         self.mic_body_color = "#CCCCCC" # Light grey for mic body
         self.mic_stand_color = "#AAAAAA" # Darker grey for stand
-        self.volume_fill_color = "#FF0000" # Red for volume level
-        self.idle_indicator_color = "#ADD8E6" # Light blue when ready but not recording
+        # self.volume_fill_color = "#FF0000" # REMOVED - Now mode-dependent
+        self.dictation_volume_color = "#FF0000" # Red for Dictation volume
+        self.keyboard_volume_color = "#0000FF" # Blue for Keyboard volume
+        self.command_volume_color = "#008000" # Green for Command volume (placeholder)
+        # self.idle_indicator_color = "#ADD8E6" # REMOVED - No longer needed
         self.text_color = "#333333" # Color for language text
         self.inactive_text_color = "#AAAAAA" # Lighter gray for inactive target lang
         self.mode_text_color = "#333333" # Color for mode text
@@ -248,7 +251,7 @@ class StatusIndicatorManager:
                              break # Found hover
 
                 # Source Language Popup Check (only if not hovering mode)
-                if not self.hovering_over_mode_name and self.source_popup and self._is_point_over_popup(mx, my, self.source_popup):
+                elif not self.hovering_over_mode_name and self.source_popup and self._is_point_over_popup(mx, my, self.source_popup):
                     for code, label in self.source_popup_labels.items():
                         if self._is_point_over_widget(mx, my, label):
                             self.hovering_over_lang_type = "source"
@@ -257,7 +260,7 @@ class StatusIndicatorManager:
                             break # Found hover, no need to check others in this popup
 
                 # Target Language Popup Check (only if not hovering mode or source)
-                if not self.hovering_over_mode_name and not self.hovering_over_lang_code and self.target_popup and self._is_point_over_popup(mx, my, self.target_popup):
+                elif not self.hovering_over_mode_name and not self.hovering_over_lang_code and self.target_popup and self._is_point_over_popup(mx, my, self.target_popup):
                      for code, label in self.target_popup_labels.items():
                          if self._is_point_over_widget(mx, my, label):
                              self.hovering_over_lang_type = "target"
@@ -292,10 +295,13 @@ class StatusIndicatorManager:
         # Destroy popups if mouse is not over their trigger area or the popup itself
         if self.mode_popup and not is_over_mode_area and not is_over_mode_popup:
             self._destroy_mode_popup()
-        if self.source_popup and not is_over_source_area and not is_over_source_popup:
-            self._destroy_lang_popup("source")
-        if self.target_popup and not is_over_target_area and not is_over_target_popup:
-            self._destroy_lang_popup("target")
+        # Check language popups only if NOT hovering over the mode area or mode popup
+        # (prevents language popups closing if mouse briefly leaves lang area towards mode area)
+        if not is_over_mode_area and not is_over_mode_popup:
+            if self.source_popup and not is_over_source_area and not is_over_source_popup:
+                self._destroy_lang_popup("source")
+            if self.target_popup and not is_over_target_area and not is_over_target_popup:
+                self._destroy_lang_popup("target")
 
     def _cleanup_tk(self):
         logging.debug("Executing StatusIndicator _cleanup_tk.")
@@ -312,10 +318,20 @@ class StatusIndicatorManager:
             try:
                 x, y = pos
                 logging.debug(f"[_position_window] Positioning main indicator based on initial pos: ({x}, {y})")
-                offset_x = 5
-                offset_y = 15
-                self.root.geometry(f"+{x + offset_x}+{y + offset_y}")
-                logging.debug(f"[_position_window] Geometry set to +{x + offset_x}+{y + offset_y}")
+                # Adjust offsets: negative x shifts left, smaller y shifts up
+                offset_x = -85 # Shift significantly left
+                offset_y = 10  # Shift slightly up from original +15
+                new_x = x + offset_x
+                new_y = y + offset_y
+                # Basic screen boundary check (optional but good practice)
+                screen_width = self.root.winfo_screenwidth()
+                if new_x + self.canvas_width > screen_width:
+                     new_x = screen_width - self.canvas_width
+                if new_x < 0: new_x = 0
+                if new_y < 0: new_y = 0
+                # Apply geometry
+                self.root.geometry(f"+{new_x}+{new_y}")
+                logging.debug(f"[_position_window] Geometry set to +{new_x}+{new_y}")
             except Exception as e:
                  logging.warning(f"Failed to position StatusIndicator: {e}")
         elif not pos:
@@ -366,20 +382,31 @@ class StatusIndicatorManager:
             self.canvas.create_rectangle(stand_x, stand_y, stand_x + stand_w, stand_y + stand_h, fill=self.mic_stand_color, outline="")
             self.canvas.create_rectangle(base_x, base_y, base_x + base_w, base_y + base_h, fill=self.mic_stand_color, outline="")
             mic_body = self.canvas.create_rectangle(body_x, body_y, body_x + body_w, body_y + body_h, fill=self.mic_body_color, outline=self.mic_stand_color)
-            if self.current_state == "idle":
-                idle_r = body_w * 0.2; idle_cx = body_x + body_w / 2; idle_cy = body_y + body_h / 2
-                self.canvas.create_oval(idle_cx - idle_r, idle_cy - idle_r, idle_cx + idle_r, idle_cy + idle_r, fill=self.idle_indicator_color, outline="")
-            elif self.current_state == "active":
-                fill_h = body_h * self.current_volume; fill_y = body_y + body_h - fill_h
-                if fill_h > 0:
+
+            # --- Draw Volume/Idle Indicator based on MODE ---
+            # REMOVED idle indicator circle:
+            # if self.current_state == "idle":
+            #     idle_r = body_w * 0.2; idle_cx = body_x + body_w / 2; idle_cy = body_y + body_h / 2
+            #     self.canvas.create_oval(idle_cx - idle_r, idle_cy - idle_r, idle_cx + idle_r, idle_cy + idle_r, fill=self.idle_indicator_color, outline="")
+
+            if self.current_state == "active":
+                 # Select volume color based on current mode
+                 volume_color = self.dictation_volume_color # Default
+                 if self.current_mode == "Keyboard": # Match the key used in AVAILABLE_MODES
+                     volume_color = self.keyboard_volume_color
+                 # elif self.current_mode == "Command": # Example for future
+                 #     volume_color = self.command_volume_color
+
+                 fill_h = body_h * self.current_volume
+                 fill_y = body_y + body_h - fill_h
+                 if fill_h > 0:
                     # Ensure volume fill is drawn within the mic body bounds
                     vol_x0 = body_x
                     vol_y0 = max(body_y, fill_y) # Clamp top
                     vol_x1 = body_x + body_w
                     vol_y1 = body_y + body_h
                     if vol_y0 < vol_y1: # Only draw if height is positive
-                         self.canvas.create_rectangle(vol_x0, vol_y0, vol_x1, vol_y1, fill=self.volume_fill_color, outline="")
-
+                         self.canvas.create_rectangle(vol_x0, vol_y0, vol_x1, vol_y1, fill=volume_color, outline="")
 
             # --- Draw Language Text (Right of Mic, IF active and source exists) ---
             if self.current_state in ["idle", "active"] and self.source_lang:
@@ -607,7 +634,7 @@ class StatusIndicatorManager:
 
 
     def _check_hover_and_update_popups(self, mouse_x, mouse_y):
-        """Checks if mouse coords are over language areas and creates popups."""
+        """Checks if mouse coords are over mode/language areas and creates popups."""
         # Don't check if already destroying
         if self._stop_event.is_set() or not self.root or not self.root.winfo_exists():
             return
@@ -616,17 +643,16 @@ class StatusIndicatorManager:
         is_over_source = self._is_point_over_tag(mouse_x, mouse_y, "source_lang_area")
         is_over_target = self._is_point_over_tag(mouse_x, mouse_y, "target_lang_area")
 
-        # Create mode popup if hovering and it doesn't exist
+        # Prioritize Mode popup creation
         if is_over_mode and not self.mode_popup:
              self._create_mode_popup()
-        # Create source popup if hovering and it doesn't exist
-        elif is_over_source and not self.source_popup:
-            self._create_lang_popup("source")
-        # Create target popup if hovering and it doesn't exist
-        elif is_over_target and not self.target_popup:
-             self._create_lang_popup("target")
-        # Note: This function ONLY creates popups based on hover position.
-        # The separate check in _check_queue handles destroying them when hover stops.
+        # Only create language popups if NOT hovering over mode area
+        elif not is_over_mode:
+            if is_over_source and not self.source_popup:
+                self._create_lang_popup("source")
+            elif is_over_target and not self.target_popup:
+                 self._create_lang_popup("target")
+
 
     def _is_point_over_tag(self, point_x, point_y, tag_name):
         """Checks if screen coordinates (point_x, point_y) are over the canvas item with tag_name."""

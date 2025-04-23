@@ -3,7 +3,8 @@
     "min_duration_sec": 0.5,
     "selected_language": "fr-FR",
     "target_language": "fr-FR",
-    "openai_model": "gpt-4.1-nano"
+    "openai_model": "gpt-4.1-nano",
+    "active_mode": "Dictation"
   },
   "triggers": {
     "dictation_button": "middle",

@@ -50,6 +50,7 @@ class StatusIndicatorManager:
         self.volume_fill_color = "#FF0000" # Red for volume level
         self.idle_indicator_color = "#ADD8E6" # Light blue when ready but not recording
         self.text_color = "#333333" # Color for language text
+        self.inactive_text_color = "#AAAAAA" # Lighter gray for inactive target lang
         self.bg_color = "#FEFEFE" # Use a near-white color for transparency key
         self.popup_bg = "#E0E0E0" # Background for popup
         self.popup_fg = "#000000"
@@ -308,24 +309,31 @@ class StatusIndicatorManager:
                 text_y = self.icon_height / 2; text_bg_color = "#FFFFFF"; text_padding_x = 3; text_padding_y = 2
                 bg_y0 = text_y - (self.text_font_size / 1.5) - text_padding_y; bg_y1 = text_y + (self.text_font_size / 1.5) + text_padding_y
                 current_x = icon_x_offset + self.icon_base_width + self.padding
-                # 1. Draw Source Language
+
+                # 1. Draw Source Language (Always Active Color)
                 src_text = self.source_lang; src_width = self.text_font.measure(src_text)
                 src_bg_x0 = current_x - text_padding_x; src_bg_x1 = current_x + src_width + text_padding_x
                 self.canvas.create_rectangle(src_bg_x0, bg_y0, src_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("source_lang_area",))
                 self.canvas.create_text(current_x, text_y, text=src_text, anchor=tk.W, font=self.text_font, fill=self.text_color, tags=("source_lang_area",))
-                # logging.debug(f"[DrawIcon] Drawn source: '{src_text}' at ({current_x}, {text_y})")
                 current_x += src_width
-                # 2. Draw Arrow and Target Language (if applicable)
-                if self.target_lang and self.target_lang != self.source_lang:
-                    arrow_text = " > "; arrow_width = self.text_font.measure(arrow_text)
-                    tgt_text = self.target_lang; tgt_width = self.text_font.measure(tgt_text)
-                    self.canvas.create_text(current_x, text_y, text=arrow_text, anchor=tk.W, font=self.text_font, fill=self.text_color)
-                    # logging.debug(f"[DrawIcon] Drawn arrow: '{arrow_text}' at ({current_x}, {text_y})")
-                    current_x += arrow_width
-                    tgt_bg_x0 = current_x - text_padding_x; tgt_bg_x1 = current_x + tgt_width + text_padding_x
-                    self.canvas.create_rectangle(tgt_bg_x0, bg_y0, tgt_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("target_lang_area",))
-                    self.canvas.create_text(current_x, text_y, text=tgt_text, anchor=tk.W, font=self.text_font, fill=self.text_color, tags=("target_lang_area",))
-                    # logging.debug(f"[DrawIcon] Drawn target: '{tgt_text}' at ({current_x}, {text_y})")
+
+                # 2. Always Draw Arrow and Target Language Area
+                arrow_text = " > "; arrow_width = self.text_font.measure(arrow_text)
+                self.canvas.create_text(current_x, text_y, text=arrow_text, anchor=tk.W, font=self.text_font, fill=self.text_color)
+                current_x += arrow_width
+
+                # Determine target text and color
+                is_target_active = self.target_lang and self.target_lang != self.source_lang
+                tgt_text = self.target_lang if is_target_active else "None"
+                tgt_color = self.text_color if is_target_active else self.inactive_text_color
+                tgt_width = self.text_font.measure(tgt_text)
+
+                # Draw target background and text (always tagged for hover)
+                tgt_bg_x0 = current_x - text_padding_x; tgt_bg_x1 = current_x + tgt_width + text_padding_x
+                self.canvas.create_rectangle(tgt_bg_x0, bg_y0, tgt_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("target_lang_area",))
+                self.canvas.create_text(current_x, text_y, text=tgt_text, anchor=tk.W, font=self.text_font, fill=tgt_color, tags=("target_lang_area",))
+                # logging.debug(f"[DrawIcon] Drawn target: '{tgt_text}' at ({current_x}, {text_y})")
+
             # else: logging.debug(f"[DrawIcon] Skipping text draw.")
         except tk.TclError as e: logging.warning(f"Error drawing status icon: {e}"); self._stop_event.set()
         except Exception as e: logging.error(f"Unexpected error drawing status icon: {e}", exc_info=True)
@@ -435,11 +443,12 @@ class StatusIndicatorManager:
         if is_over_source and not self.source_popup:
             # logging.debug(f"Hover check: Mouse ({mouse_x},{mouse_y}) detected over source area, creating popup.") # Noisy
             self._create_lang_popup("source")
-        # Create target popup if hovering and it doesn't exist (and should exist)
+        # Create target popup if hovering and it doesn't exist
         elif is_over_target and not self.target_popup:
-             if self.target_lang and self.target_lang != self.source_lang:
-                 # logging.debug(f"Hover check: Mouse ({mouse_x},{mouse_y}) detected over target area, creating popup.") # Noisy
-                 self._create_lang_popup("target")
+             # REMOVED condition: `if self.target_lang and self.target_lang != self.source_lang:`
+             # Now always attempts to create the popup if hovering over the target area
+             # logging.debug(f"Hover check: Mouse ({mouse_x},{mouse_y}) detected over target area, creating popup.") # Noisy
+             self._create_lang_popup("target")
         # Note: This function ONLY creates popups based on hover position.
         # The separate check in _check_queue handles destroying them when hover stops.
 

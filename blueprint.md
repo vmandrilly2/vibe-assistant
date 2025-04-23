@@ -42,7 +42,7 @@ This file acts as both the project blueprint and a task manager. It outlines the
     *   [x] `fg_color`: (String) Text color (Default: "black").
     *   [x] `font_family`: (String) Font name (Default: "Arial").
     *   [x] `font_size`: (Integer) Font size (Default: 10).
-*   [x] **API Key:** Deepgram key handled via `.env` or environment variable.
+*   [x] **API Key:** Deepgram key handled via `.env` or environment variable. OpenAI key handled via `.env` or environment variable.
 
 ## Known Issues / Enhancements
 
@@ -78,11 +78,20 @@ This file acts as both the project blueprint and a task manager. It outlines the
         *   [x] Display interim results near cursor (`tkinter`, `pyautogui`).
         *   [x] Make appearance configurable via `config.json` (`tooltip` section).
         *   [x] Manage tooltip lifecycle (show/hide/update) via a queue (`TooltipManager`).
-    *   [x] **Microphone Status/Volume Indicator:**
+    *   [x] **Microphone Status/Volume/Language Indicator:**
         *   [x] Display mic icon near cursor when active (`tkinter`).
         *   [x] Dynamically show input volume level via icon fill (`numpy`, `pyaudio`).
         *   [x] Manage indicator lifecycle/updates via a queue (`StatusIndicatorManager`).
         *   [x] Use background audio monitoring (`audio_buffer.py`) for continuous volume level.
+        *   [x] Display current Source and Target languages next to the icon.
+        *   [x] **Language Selection Popups:**
+            *   [x] Show popup on hover over Source/Target language text.
+            *   [x] List preferred languages (defined in `vibe_app.py` for now).
+            *   [x] Position popups above text area, handle screen edges.
+            *   [x] Dismiss popups on mouse leave.
+            *   [x] Select language via standard mouse click on popup option.
+            *   [x] Select language by releasing the main trigger button while hovering over a popup option.
+            *   [x] Update `config.json` and running state immediately on selection.
         *   [ ] Make icon appearance configurable (currently hardcoded).
 *   [x] **Audio Buffering:** Use `BufferedAudioInput` class to continuously capture audio in the background.
     *   [x] Maintain a rolling buffer of recent audio.
@@ -92,14 +101,14 @@ This file acts as both the project blueprint and a task manager. It outlines the
 ### Mode 1: Dictation (with Optional Translation)
 
 *   [x] **Activation:** Hold Dictation trigger (`triggers.dictation_button` from config).
-*   [x] **Visual Feedback:** Show text tooltip (source language) and status icon on activation.
+*   [x] **Visual Feedback:** Show text tooltip (source language) and status icon (with languages) on activation.
 *   [x] **Recording & Streaming:** Stream audio to Deepgram using the selected source language (`general.selected_language`).
 *   [x] **Real-time Interim Feedback:** Display interim results (source language) in the tooltip.
 *   [x] **Real-time Typing Simulation (Final Source):** Type final results (source language) at the cursor (`pynput`), handling corrections.
 *   [x] **Correction Handling:** Handle Deepgram's real-time corrections via backspace simulation based on word history.
     *   [x] Implement `handle_dictation_final` logic comparing history and new transcript.
     *   [x] Implement special "back" word handling.
-*   [x] **Completion:** Release Dictation trigger.
+*   [x] **Completion:** Release Dictation trigger (unless released over language popup).
 *   [x] **Cleanup:** Hide text tooltip and status icon on completion.
 *   [x] **Optional Translation (Post-Dictation):**
     *   [x] Check if `general.target_language` is set and different from `general.selected_language`.
@@ -111,10 +120,10 @@ This file acts as both the project blueprint and a task manager. It outlines the
 ### Mode 2: Command (Partially Implemented)
 
 *   [x] **Activation:** Hold Command trigger (`triggers.command_button` + optional `triggers.command_modifier` from config).
-*   [x] **Visual Feedback:** Show status icon on activation.
+*   [x] **Visual Feedback:** Show status icon (with languages) on activation.
 *   [x] **Recording & Streaming:** Stream audio to Deepgram.
 *   [ ] **Command Feedback UI:** Display recognized command text in a temporary UI element. (Currently only logs).
-*   [x] **Completion:** Release Command trigger.
+*   [x] **Completion:** Release Command trigger (unless released over language popup).
 *   [x] **Cleanup:** Hide status icon on completion.
 *   [x] **Cancellation:** Allow cancellation via Esc key during command mode.
 *   [ ] **AI Interpretation:** Send recognized text to AI model on completion to interpret intent.

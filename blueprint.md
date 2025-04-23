@@ -31,7 +31,7 @@ This file acts as both the project blueprint and a task manager. It outlines the
     *   [x] `min_duration_sec`: (Float) Minimum recording duration (Default: 0.5).
     *   [x] `selected_language`: (String) SR language code (Default: "en-US").
     *   [x] `target_language`: (String or `null`) Target language for optional translation after dictation (Default: `null`). If `null` or same as `selected_language`, translation is disabled.
-    *   [x] `openai_model`: (String) OpenAI model used for translation (Default: "gpt-4o-mini").
+    *   [x] `openai_model`: (String) OpenAI model used for translation (Default: "gpt-4.1-nano").
 *   [x] **`triggers`**:
     *   [x] `dictation_button`: (String) Mouse button for dictation ("left", "right", "middle", "x1", "x2") (Default: "middle").
     *   [x] `command_button`: (String) Mouse button for command (same options or `null`) (Default: `null`).

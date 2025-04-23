@@ -39,7 +39,7 @@ DEFAULT_CONFIG = {
     "min_duration_sec": 0.5,
     "selected_language": "en-US",
     "target_language": None,
-    "openai_model": "gpt-4o-mini"
+    "openai_model": "gpt-4.1-nano"
   },
   "triggers": {
     "dictation_button": "middle",
@@ -126,7 +126,7 @@ COMMAND_MODIFIER_KEY = None
 MIN_DURATION_SEC = 0.5
 SELECTED_LANGUAGE = "en-US"
 TARGET_LANGUAGE = None
-OPENAI_MODEL = "gpt-4o-mini"
+OPENAI_MODEL = "gpt-4.1-nano"
 TOOLTIP_ALPHA = 0.85
 TOOLTIP_BG = "lightyellow"
 TOOLTIP_FG = "black"
@@ -154,7 +154,7 @@ def apply_config(cfg):
         MIN_DURATION_SEC = float(general_cfg.get("min_duration_sec", 0.5))
         SELECTED_LANGUAGE = str(general_cfg.get("selected_language", "en-US"))
         TARGET_LANGUAGE = general_cfg.get("target_language")
-        OPENAI_MODEL = str(general_cfg.get("openai_model", "gpt-4o-mini"))
+        OPENAI_MODEL = str(general_cfg.get("openai_model", "gpt-4.1-nano"))
 
         # Tooltip
         TOOLTIP_ALPHA = float(cfg.get("tooltip", {}).get("alpha", 0.85))

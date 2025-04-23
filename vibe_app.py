@@ -27,6 +27,7 @@ from audio_buffer import BufferedAudioInput
 from status_indicator import StatusIndicatorManager, DEFAULT_MODES # Import DEFAULT_MODES
 
 from pynput import mouse, keyboard
+from pynput.keyboard import Key, KeyCode # Import KeyCode
 from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
@@ -85,6 +86,114 @@ TOOLTIP_FONT_FAMILY = "Arial"
 TOOLTIP_FONT_SIZE = 10
 ACTIVE_MODE = MODE_DICTATION # Initialize with default
 
+# --- Pynput Mappings ---
+PYNPUT_BUTTON_MAP = {
+    "left": mouse.Button.left,
+    "right": mouse.Button.right,
+    "middle": mouse.Button.middle,
+    "x1": mouse.Button.x1,
+    "x2": mouse.Button.x2,
+    None: None
+}
+PYNPUT_MODIFIER_MAP = {
+    "shift": keyboard.Key.shift,
+    "shift_l": keyboard.Key.shift_l,
+    "shift_r": keyboard.Key.shift_r,
+    "ctrl": keyboard.Key.ctrl,
+    "ctrl_l": keyboard.Key.ctrl_l,
+    "ctrl_r": keyboard.Key.ctrl_r,
+    "alt": keyboard.Key.alt,
+    "alt_l": keyboard.Key.alt_l,
+    "alt_r": keyboard.Key.alt_r,
+    "cmd": keyboard.Key.cmd, # For Mac compatibility if needed later
+    None: None
+}
+
+# --- NEW: Pynput Key Name to Key Object Mapping ---
+# Add common keys here. Needs careful mapping.
+# Keys without a simple name (like ';') might need KeyCode.from_char(':')
+PYNPUT_KEY_MAP = {
+    # Special Keys
+    "enter": Key.enter,
+    "esc": Key.esc,
+    "escape": Key.esc,
+    "tab": Key.tab,
+    "space": Key.space,
+    "backspace": Key.backspace,
+    "delete": Key.delete,
+    "del": Key.delete,
+    "insert": Key.insert,
+    "home": Key.home,
+    "end": Key.end,
+    "pageup": Key.page_up,
+    "pagedown": Key.page_down,
+    "up": Key.up,
+    "down": Key.down,
+    "left": Key.left,
+    "right": Key.right,
+    "capslock": Key.caps_lock,
+    "numlock": Key.num_lock,
+    "scrolllock": Key.scroll_lock,
+    "printscreen": Key.print_screen,
+    # Modifiers (ensure consistency with PYNPUT_MODIFIER_MAP keys if possible)
+    "shift": Key.shift,
+    "shift_l": Key.shift_l,
+    "shift_r": Key.shift_r,
+    "ctrl": Key.ctrl,
+    "control": Key.ctrl,
+    "ctrl_l": Key.ctrl_l,
+    "ctrl_r": Key.ctrl_r,
+    "alt": Key.alt,
+    "alt_l": Key.alt_l,
+    "alt_r": Key.alt_r,
+    "cmd": Key.cmd, # Mac command key
+    "command": Key.cmd,
+    "win": Key.cmd, # Windows key often maps to cmd
+    "windows": Key.cmd,
+    # Function Keys
+    "f1": Key.f1, "f2": Key.f2, "f3": Key.f3, "f4": Key.f4,
+    "f5": Key.f5, "f6": Key.f6, "f7": Key.f7, "f8": Key.f8,
+    "f9": Key.f9, "f10": Key.f10, "f11": Key.f11, "f12": Key.f12,
+    "f13": Key.f13, "f14": Key.f14, "f15": Key.f15, "f16": Key.f16,
+    "f17": Key.f17, "f18": Key.f18, "f19": Key.f19, "f20": Key.f20,
+    # Alphanumeric and Symbols (handle single chars directly later)
+    # Simple symbols that might be spoken
+    "dot": ".",
+    "period": ".",
+    "comma": ",",
+    "question": "?",
+    "exclamation": "!",
+    "colon": ":",
+    "semicolon": ";",
+    "quote": "'",
+    "doublequote": '"',
+    "slash": "/",
+    "backslash": "\\",
+    "pipe": "|",
+    "dash": "-",
+    "hyphen": "-",
+    "underscore": "_",
+    "plus": "+",
+    "equal": "=",
+    "asterisk": "*",
+    "ampersand": "&",
+    "at": "@",
+    "hash": "#",
+    "dollar": "$",
+    "percent": "%",
+    "caret": "^",
+    "tilde": "~",
+    "backtick": "`",
+    "openparen": "(",
+    "closeparen": ")",
+    "openbracket": "[",
+    "closebracket": "]",
+    "openbrace": "{",
+    "closebrace": "}",
+    "less": "<",
+    "greater": ">",
+}
+
 def load_config():
     """Loads configuration from JSON file, creates default if not found."""
     if not os.path.exists(CONFIG_FILE):
@@ -123,29 +232,6 @@ MONITOR_FORMAT = pyaudio.paInt16
 MONITOR_CHANNELS = 1
 MONITOR_RATE = 16000
 MAX_RMS = 5000 # Adjust based on microphone sensitivity
-
-# --- Pynput Mappings --- (Define globally)
-PYNPUT_BUTTON_MAP = {
-    "left": mouse.Button.left,
-    "right": mouse.Button.right,
-    "middle": mouse.Button.middle,
-    "x1": mouse.Button.x1,
-    "x2": mouse.Button.x2,
-    None: None
-}
-PYNPUT_MODIFIER_MAP = {
-    "shift": keyboard.Key.shift,
-    "shift_l": keyboard.Key.shift_l,
-    "shift_r": keyboard.Key.shift_r,
-    "ctrl": keyboard.Key.ctrl,
-    "ctrl_l": keyboard.Key.ctrl_l,
-    "ctrl_r": keyboard.Key.ctrl_r,
-    "alt": keyboard.Key.alt,
-    "alt_l": keyboard.Key.alt_l,
-    "alt_r": keyboard.Key.alt_r,
-    "cmd": keyboard.Key.cmd, # For Mac compatibility if needed later
-    None: None
-}
 
 def apply_config(cfg):
     """Applies the loaded configuration to the global variables."""
@@ -478,6 +564,67 @@ def simulate_backspace(count):
         kb_controller.release(keyboard.Key.backspace)
         time.sleep(0.01) # Small delay between key presses
 
+def simulate_key_press_release(key_obj):
+    """Simulates pressing and releasing a single key."""
+    try:
+        kb_controller.press(key_obj)
+        kb_controller.release(key_obj)
+        logging.debug(f"Simulated press/release: {key_obj}")
+        time.sleep(0.02) # Small delay between keys
+    except Exception as e:
+        logging.error(f"Failed to simulate key {key_obj}: {e}")
+
+def simulate_key_combination(keys):
+    """Simulates pressing modifier keys, then a main key, then releasing all."""
+    if not keys: return
+    modifiers = []
+    main_key = None
+    try:
+        # Separate modifiers from the main key
+        for key_obj in keys:
+            # Check if key is a modifier using pynput's attributes
+            if hasattr(key_obj, 'is_modifier') and key_obj.is_modifier:
+                 modifiers.append(key_obj)
+            elif main_key is None: # First non-modifier is the main key
+                main_key = key_obj
+            else:
+                 logging.warning(f"Multiple non-modifier keys found in combination: {keys}. Using first: {main_key}")
+
+        if not main_key: # Maybe it was just modifiers? (e.g., "press control") - less common
+            if modifiers:
+                logging.info(f"Simulating modifier press/release only: {modifiers}")
+                for mod in modifiers: kb_controller.press(mod)
+                time.sleep(0.05) # Hold briefly
+                for mod in reversed(modifiers): kb_controller.release(mod)
+            else:
+                logging.warning("No main key or modifiers found in combination.")
+            return
+
+        # Press modifiers
+        logging.info(f"Simulating combo: Modifiers={modifiers}, Key={main_key}")
+        for mod in modifiers:
+            kb_controller.press(mod)
+        time.sleep(0.05) # Brief pause after modifiers
+
+        # Press and release main key
+        kb_controller.press(main_key)
+        kb_controller.release(main_key)
+        time.sleep(0.05) # Brief pause after main key
+
+        # Release modifiers (in reverse order)
+        for mod in reversed(modifiers):
+            kb_controller.release(mod)
+
+    except Exception as e:
+        logging.error(f"Error simulating key combination {keys}: {e}")
+        # Attempt to release any potentially stuck keys
+        if main_key:
+            try: kb_controller.release(main_key)
+            except: pass
+        for mod in reversed(modifiers):
+            try: kb_controller.release(mod)
+            except: pass
+
 def handle_dictation_interim(transcript):
     """Handles interim dictation results by displaying them in a temporary tooltip."""
     global last_simulated_text # Keep variable for now, but don't use for typing
@@ -623,21 +770,136 @@ def undo_last_command():
     # TODO: Implement undo logic based on stored action
     pass
 
-# --- NEW: Placeholder for Keyboard Input Final Handling ---
-def handle_keyboard_input_final(final_transcript):
-    """Handles the final transcript segment for Keyboard Input Mode."""
-    global final_keyboard_input_text
-    logging.info(f"Final Keyboard Input Transcript: '{final_transcript}'")
-    final_keyboard_input_text = final_transcript # Store the text
-    # In the future, this will:
-    # 1. Send final_keyboard_input_text to OpenAI with the keyboard prompt.
-    # 2. Parse the response (e.g., ["ctrl", "c", "enter"]).
-    # 3. Simulate the key presses/releases using pynput.keyboard.Controller.
-    # For now, just log.
-    logging.info("Keyboard input execution (simulation) not yet implemented.")
-    pass
+# --- UPDATED: Keyboard Input Final Handling ---
+async def handle_keyboard_input_final(final_transcript):
+    """Handles final transcript for Keyboard Input Mode: Sends to OpenAI, parses keys, simulates."""
+    global final_keyboard_input_text, openai_client, OPENAI_MODEL
 
-# --- NEW/MODIFIED: Translation Function ---
+    logging.info(f"Final Keyboard Input Transcript: '{final_transcript}'")
+    final_keyboard_input_text = final_transcript # Store the raw text
+
+    if not final_keyboard_input_text:
+        logging.warning("Keyboard Input: Empty transcript received.")
+        return
+
+    if not openai_client:
+        logging.error("OpenAI client not available. Cannot process keyboard input.")
+        return
+
+    # --- Prepare OpenAI Request ---
+    # Define valid keys for the prompt context - helps guide the LLM
+    # Create a simplified list of key names for the prompt
+    valid_key_names_str = ", ".join(list(PYNPUT_KEY_MAP.keys())[:40]) + ", etc. (standard alphanumeric keys also valid)" # Limit length
+
+    system_prompt = f"""
+You are an AI assistant that translates natural language commands into keyboard actions.
+The user will provide text representing desired keyboard input.
+Analyze the input and determine the sequence of keys to press.
+Output *only* a JSON list of strings, where each string is either:
+1. A special key name exactly as found in this list (lowercase): {valid_key_names_str}
+2. A single character to be typed (e.g., "a", "b", "1", "$", "?").
+3. A combination represented as a list within the list, e.g., ["ctrl", "c"] or ["shift", "a"].
+Modifiers should always come first in combinations. Do NOT output phrases like "press", "type", "key".
+Focus on interpreting common keyboard commands like "enter", "delete", "control c", "page down", "type hello", "shift 1".
+If the user says "type" followed by text, represent each character as a string in the list. Example: "type abc" -> ["a", "b", "c"].
+If the user says "press" followed by a key name, output that key name. Example: "press delete" -> ["delete"].
+If the user asks for a combination, output the list. Example: "press control alt delete" -> [["ctrl", "alt", "delete"]].
+Be precise. If unsure, return an empty list [].
+"""
+    user_prompt = f"User input: \"{final_keyboard_input_text}\""
+
+    logging.info(f"Requesting keyboard key interpretation for: '{final_keyboard_input_text}'")
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model=OPENAI_MODEL, # Use the configured model
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1, # Low temperature for precise interpretation
+            response_format={"type": "json_object"}, # Request JSON output
+            max_tokens=150 # Adjust as needed
+        )
+
+        response_content = response.choices[0].message.content
+        logging.debug(f"OpenAI Keyboard Response Raw: {response_content}")
+
+        # --- Parse the JSON response ---
+        parsed_keys = []
+        try:
+            # The response should be a JSON object containing a key, e.g., {"keys": ["enter"]}
+            response_data = json.loads(response_content)
+            if isinstance(response_data, dict) and "keys" in response_data and isinstance(response_data["keys"], list):
+                 parsed_keys = response_data["keys"]
+                 logging.info(f"Parsed keys from OpenAI: {parsed_keys}")
+            else:
+                 logging.error(f"OpenAI response JSON structure incorrect: {response_content}")
+
+        except json.JSONDecodeError:
+            logging.error(f"Failed to decode OpenAI JSON response: {response_content}")
+        except Exception as e:
+            logging.error(f"Error parsing OpenAI response keys: {e}")
+
+        # --- Simulate Key Presses ---
+        if not parsed_keys:
+            logging.warning("No valid keys parsed from OpenAI response.")
+            return
+
+        for item in parsed_keys:
+            if isinstance(item, str): # Single key or character
+                key_name_lower = item.lower()
+                key_obj = PYNPUT_KEY_MAP.get(key_name_lower)
+                if key_obj:
+                    # It's a known special key or symbol mapped directly
+                    if isinstance(key_obj, str): # It's a character mapped from a word (e.g., "dot" -> ".")
+                         simulate_typing(key_obj)
+                    else: # It's a pynput.keyboard.Key object
+                        simulate_key_press_release(key_obj)
+                elif len(item) == 1:
+                    # Assume it's a single character to type
+                    simulate_typing(item)
+                else:
+                    logging.warning(f"Unknown single key name: '{item}'")
+
+            elif isinstance(item, list): # Key combination
+                combo_keys = []
+                valid_combo = True
+                for key_name in item:
+                    if isinstance(key_name, str):
+                         key_name_lower = key_name.lower()
+                         key_obj = PYNPUT_KEY_MAP.get(key_name_lower)
+                         if key_obj:
+                             if isinstance(key_obj, str) and len(key_obj) == 1: # Single char from map
+                                 combo_keys.append(KeyCode.from_char(key_obj))
+                             elif not isinstance(key_obj, str): # pynput Key object
+                                 combo_keys.append(key_obj)
+                             else: # Mapped to multi-char string? Invalid for combo.
+                                 logging.warning(f"Mapped key '{key_name}' -> '{key_obj}' invalid for combination.")
+                                 valid_combo = False; break
+                         elif len(key_name) == 1: # Single char directly
+                             try: combo_keys.append(KeyCode.from_char(key_name))
+                             except Exception: logging.warning(f"Could not get KeyCode for char '{key_name}'"); valid_combo = False; break
+                         else:
+                             logging.warning(f"Unknown key name in combination: '{key_name}'")
+                             valid_combo = False; break
+                    else:
+                         logging.warning(f"Invalid item type in combination list: {key_name}")
+                         valid_combo = False; break
+
+                if valid_combo and combo_keys:
+                    simulate_key_combination(combo_keys)
+                elif not combo_keys:
+                     logging.warning(f"Empty key list derived from combination: {item}")
+
+            else:
+                logging.warning(f"Unexpected item type in parsed keys list: {item}")
+
+    except Exception as e:
+        logging.error(f"Error during OpenAI keyboard interpretation request: {e}", exc_info=True)
+
+
+# --- Translation Function ---
 async def translate_and_type(text_to_translate, source_lang_code, target_lang_code):
     """Translates text using OpenAI and types the result."""
     global openai_client, OPENAI_MODEL # Use configured model
@@ -1112,17 +1374,19 @@ async def main():
                      logging.info("UI interaction cancelled post-stop.")
 
                 # Post-process / Translate / Execute based on the mode that *was* active
-                translation_task = None
+                action_task = None # Use a general task name
                 if perform_action:
                     if duration >= MIN_DURATION_SEC:
                         logging.debug(f"Performing action for {active_mode_on_stop} (duration: {duration:.2f}s)")
                         if active_mode_on_stop == MODE_DICTATION:
                             if TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE and final_source_text:
-                                translation_task = asyncio.create_task(translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE))
+                                # Create translation task
+                                action_task = asyncio.create_task(translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE))
                             else: logging.info("Dictation finished. No translation necessary.")
                         elif active_mode_on_stop == MODE_KEYBOARD:
-                             handle_keyboard_input_final(final_keyboard_input_text)
-                        # elif active_mode_on_stop == MODE_COMMAND: execute_command(current_command_transcript)
+                             # Create keyboard input task
+                             action_task = asyncio.create_task(handle_keyboard_input_final(final_keyboard_input_text))
+                        # elif active_mode_on_stop == MODE_COMMAND: execute_command(current_command_transcript) # Not async yet
                     else: # Discard short
                          logging.info(f"Duration < min ({MIN_DURATION_SEC}s), discarding action for {active_mode_on_stop}.")
                          # Clear state if discarded
@@ -1133,13 +1397,13 @@ async def main():
                      if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
                      elif active_mode_on_stop == MODE_KEYBOARD: final_keyboard_input_text = ""
 
-                # Reset state variables related to transcription content
-                final_keyboard_input_text = "" # Always reset keyboard text buffer
+                # Reset keyboard text buffer regardless
+                final_keyboard_input_text = ""
 
-                # Await translation task if it was created
-                if translation_task:
-                    try: await translation_task
-                    except Exception as e: logging.error(f"Error awaiting translation: {e}", exc_info=True)
+                # Await the action task if it was created
+                if action_task:
+                    try: await action_task
+                    except Exception as e: logging.error(f"Error awaiting action task ({active_mode_on_stop}): {e}", exc_info=True)
 
                 # Reset the local flag after processing
                 perform_stop_flow = False

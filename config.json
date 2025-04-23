@@ -2,7 +2,7 @@
   "general": {
     "min_duration_sec": 0.5,
     "selected_language": "fr-FR",
-    "target_language": null,
+    "target_language": "zh",
     "openai_model": "gpt-4.1-nano"
   },
   "triggers": {

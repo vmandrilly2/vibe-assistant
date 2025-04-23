@@ -1,4 +1,5 @@
 import tkinter as tk
+import tkinter.font as tkFont
 import threading
 import queue
 import logging
@@ -21,8 +22,8 @@ class StatusIndicatorManager:
         # Icon drawing properties
         self.icon_base_width = 24 # Original icon width
         self.icon_height = 36
-        # Increase text width estimate slightly for larger font
-        self.text_width_estimate = 90
+        # Increase text width estimate for larger font and potential two parts
+        self.text_width_estimate = 120 # Increased estimate
         self.padding = 5
         self.canvas_width = self.icon_base_width + self.padding + self.text_width_estimate
 
@@ -33,6 +34,10 @@ class StatusIndicatorManager:
         self.idle_indicator_color = "#ADD8E6" # Light blue when ready but not recording
         self.text_color = "#333333" # Color for language text
         self.bg_color = "#FEFEFE" # Use a near-white color for transparency key
+
+        # Font object with increased size
+        self.text_font_size = 12 # Increased font size
+        self.text_font = tkFont.Font(family="Arial", size=self.text_font_size)
 
     def start(self):
         self.thread.start()
@@ -176,7 +181,7 @@ class StatusIndicatorManager:
                  logging.warning(f"Failed to position StatusIndicator: {e}")
 
     def _draw_icon(self):
-        """Draws the microphone icon and language text with background."""
+        """Draws the microphone icon and language text with separate backgrounds."""
         if not self.canvas or not self.root or self._stop_event.is_set():
             return
 
@@ -204,36 +209,59 @@ class StatusIndicatorManager:
                 fill_h = body_h * self.current_volume; fill_y = body_y + body_h - fill_h
                 if fill_h > 0: self.canvas.create_rectangle(body_x, fill_y, body_x + body_w, body_y + body_h, fill=self.volume_fill_color, outline="")
 
-
             # --- Draw Language Text ---
             if self.current_state in ["idle", "active"] and self.source_lang:
-                target_str = self.target_lang if self.target_lang else "N/A"
-                lang_text = f"{self.source_lang} > {target_str}"
-                text_x = icon_x_offset + self.icon_base_width + self.padding
+                # Common Y coordinate and background settings
                 text_y = self.icon_height / 2
-
-                # --- ADD BACKGROUND RECTANGLE ---
-                # Define background color and padding for the text area
-                text_bg_color = "#FFFFFF" # White background
+                text_bg_color = "#FFFFFF"
                 text_padding_x = 3
                 text_padding_y = 2
-                # Estimate text bounding box (this is tricky without rendering first)
-                # We'll use our estimated width and a bit less than full height
-                bg_x0 = text_x - text_padding_x
-                bg_y0 = text_y - (self.icon_height / 3) - text_padding_y # Adjust vertical position/height
-                bg_x1 = text_x + self.text_width_estimate - self.padding # Use estimate
-                bg_y1 = text_y + (self.icon_height / 3) + text_padding_y
-                # Draw the background rectangle
-                self.canvas.create_rectangle(bg_x0, bg_y0, bg_x1, bg_y1,
-                                            fill=text_bg_color, outline=self.mic_stand_color) # Add a subtle outline
-                # --- END BACKGROUND RECTANGLE ---
+                # Adjust vertical padding based on font size for better centering
+                bg_y0 = text_y - (self.text_font_size / 1.5) - text_padding_y # Adjust divisor as needed
+                bg_y1 = text_y + (self.text_font_size / 1.5) + text_padding_y
 
+                # Calculate starting X for the first text element
+                current_x = icon_x_offset + self.icon_base_width + self.padding
 
-                logging.debug(f"[DrawIcon] Attempting to draw text: '{lang_text}' at ({text_x}, {text_y})")
+                # 1. Draw Source Language
+                src_text = self.source_lang
+                src_width = self.text_font.measure(src_text)
+                # Draw source background
+                src_bg_x0 = current_x - text_padding_x
+                src_bg_x1 = current_x + src_width + text_padding_x
+                self.canvas.create_rectangle(src_bg_x0, bg_y0, src_bg_x1, bg_y1,
+                                            fill=text_bg_color, outline=self.mic_stand_color)
+                # Draw source text
+                self.canvas.create_text(current_x, text_y, text=src_text, anchor=tk.W,
+                                        font=self.text_font, fill=self.text_color)
+                logging.debug(f"[DrawIcon] Drawn source: '{src_text}' at ({current_x}, {text_y}) with bg")
+                # Update current_x for the next element
+                current_x += src_width
 
-                # Draw the actual text ON TOP of the background
-                self.canvas.create_text(text_x, text_y, text=lang_text, anchor=tk.W,
-                                        font=("Arial", 10), fill=self.text_color) # Reverted font, kept size 10
+                # 2. Draw Arrow and Target Language (if applicable)
+                if self.target_lang and self.target_lang != self.source_lang:
+                    arrow_text = " > "
+                    arrow_width = self.text_font.measure(arrow_text)
+                    tgt_text = self.target_lang
+                    tgt_width = self.text_font.measure(tgt_text)
+
+                    # Draw arrow text (no background)
+                    self.canvas.create_text(current_x, text_y, text=arrow_text, anchor=tk.W,
+                                            font=self.text_font, fill=self.text_color)
+                    logging.debug(f"[DrawIcon] Drawn arrow: '{arrow_text}' at ({current_x}, {text_y}) no bg")
+                    # Update current_x
+                    current_x += arrow_width
+
+                    # Draw target background
+                    tgt_bg_x0 = current_x - text_padding_x
+                    tgt_bg_x1 = current_x + tgt_width + text_padding_x
+                    self.canvas.create_rectangle(tgt_bg_x0, bg_y0, tgt_bg_x1, bg_y1,
+                                                fill=text_bg_color, outline=self.mic_stand_color)
+                    # Draw target text
+                    self.canvas.create_text(current_x, text_y, text=tgt_text, anchor=tk.W,
+                                            font=self.text_font, fill=self.text_color)
+                    logging.debug(f"[DrawIcon] Drawn target: '{tgt_text}' at ({current_x}, {text_y}) with bg")
+
             else:
                  logging.debug(f"[DrawIcon] Skipping text draw. State='{self.current_state}', Source Lang='{self.source_lang}'")
 

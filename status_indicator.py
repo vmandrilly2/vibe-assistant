@@ -5,13 +5,25 @@ import queue
 import logging
 from functools import partial # Import partial for callbacks
 
+# --- Define Mode Constants (can be shared with vibe_app.py) ---
+# It's slightly redundant defining them here and in vibe_app.py,
+# but keeps the StatusIndicator self-contained regarding display names.
+# Consider a shared constants file later if needed.
+DEFAULT_MODES = {
+    "Dictation": "Dictation Mode",
+    "Keyboard": "Keyboard Input Mode"
+    # Add "Command" later if desired
+}
+
 class StatusIndicatorManager:
-    """Manages a Tkinter status icon window (mic icon + volume + languages)."""
-    def __init__(self, q, action_q, pref_src_langs, pref_tgt_langs):
+    """Manages a Tkinter status icon window (mode + mic icon + volume + languages)."""
+    def __init__(self, q, action_q, pref_src_langs, pref_tgt_langs, available_modes=None):
         self.queue = q
         self.action_queue = action_q
         self.pref_src_langs = pref_src_langs
         self.pref_tgt_langs = pref_tgt_langs
+        # Use provided modes or default
+        self.available_modes = available_modes if available_modes is not None else DEFAULT_MODES
         self.root = None
         self.canvas = None
         self.thread = threading.Thread(target=self._run_tkinter, daemon=True)
@@ -19,6 +31,7 @@ class StatusIndicatorManager:
         self._tk_ready = threading.Event()
         self.current_volume = 0.0 # Store current volume level (0.0 to 1.0)
         self.current_state = "hidden" # "hidden", "idle", "active"
+        self.current_mode = list(self.available_modes.keys())[0] # Default to the first mode initially
         # --- Store the initial position received when activated ---
         self.initial_pos = None
         # --- Store last known mouse hover position for interaction checks ---
@@ -27,22 +40,30 @@ class StatusIndicatorManager:
         self.target_lang = "" # Store current target language code (or None/empty)
 
         # --- Popups ---
+        self.mode_popup = None
         self.source_popup = None
         self.target_popup = None
         # --- Store labels within popups ---
+        self.mode_popup_labels = {} # {mode_name: label_widget}
         self.source_popup_labels = {} # {lang_code: label_widget}
         self.target_popup_labels = {} # {lang_code: label_widget}
         # --- Track currently hovered lang code ---
         self.hovering_over_lang_type = None # 'source' or 'target'
         self.hovering_over_lang_code = None # The actual code (e.g., 'en-US')
+        self.hovering_over_mode_name = None # The name of the hovered mode (e.g., 'Keyboard')
 
         # Icon drawing properties
         self.icon_base_width = 24 # Original icon width
         self.icon_height = 36
-        # Increase text width estimate for larger font and potential two parts
-        self.text_width_estimate = 120 # Increased estimate
+        # Estimate width for mode text (can be adjusted)
+        self.mode_text_width_estimate = 80
+        # Increase text width estimate for languages
+        self.lang_text_width_estimate = 120 # Increased estimate
         self.padding = 5
-        self.canvas_width = self.icon_base_width + self.padding + self.text_width_estimate
+        # Update canvas width calculation
+        self.canvas_width = (self.mode_text_width_estimate + self.padding +
+                             self.icon_base_width + self.padding +
+                             self.lang_text_width_estimate)
 
         # Colors
         self.mic_body_color = "#CCCCCC" # Light grey for mic body
@@ -51,6 +72,7 @@ class StatusIndicatorManager:
         self.idle_indicator_color = "#ADD8E6" # Light blue when ready but not recording
         self.text_color = "#333333" # Color for language text
         self.inactive_text_color = "#AAAAAA" # Lighter gray for inactive target lang
+        self.mode_text_color = "#333333" # Color for mode text
         self.bg_color = "#FEFEFE" # Use a near-white color for transparency key
         self.popup_bg = "#E0E0E0" # Background for popup
         self.popup_fg = "#000000"
@@ -102,6 +124,7 @@ class StatusIndicatorManager:
             logging.info("StatusIndicator thread finished.")
             self._destroy_lang_popup("source")
             self._destroy_lang_popup("target")
+            self._destroy_mode_popup() # Destroy mode popup on exit
             self._stop_event.set()
 
     def _check_queue(self):
@@ -133,6 +156,7 @@ class StatusIndicatorManager:
                     pos = data.get("pos") # Initial position (only provided on activation)
                     rcvd_source_lang = data.get("source_lang", "")
                     rcvd_target_lang = data.get("target_lang", None)
+                    rcvd_mode = data.get("mode", self.current_mode) # Get current mode
 
                     # --- Store initial position if activating ---
                     if target_state != "hidden" and self.current_state == "hidden":
@@ -156,9 +180,15 @@ class StatusIndicatorManager:
                         if self.current_state != "hidden":
                             needs_redraw = True
                     
+                    # --- Update Mode ---
+                    if rcvd_mode != self.current_mode:
+                        self.current_mode = rcvd_mode
+                        if self.current_state != "hidden":
+                             needs_redraw = True
+                    
                     # Mark for redraw if the state itself changed
                     if target_state != self.current_state:
-                        logging.debug(f"StatusIndicator received state change: {self.current_state} -> {target_state}")
+                        logging.debug(f"StatusIndicator received state change: {self.current_state} -> {target_state}, Mode: {self.current_mode}")
                         needs_redraw = True
                         if target_state == "active":
                              self.current_volume = 0.0 # Reset volume on becoming active
@@ -166,6 +196,7 @@ class StatusIndicatorManager:
                              # Destroy popups when becoming hidden
                              self._destroy_lang_popup("source")
                              self._destroy_lang_popup("target")
+                             self._destroy_mode_popup() # Also destroy mode popup
 
 
                 elif command == "check_hover_position":
@@ -201,6 +232,7 @@ class StatusIndicatorManager:
         # --- Check Popups and Hovered Label (Based on updated last_hover_pos) ---
         self.hovering_over_lang_type = None # Reset hover state each cycle
         self.hovering_over_lang_code = None
+        self.hovering_over_mode_name = None # Reset mode hover state
         if self.root and not self._stop_event.is_set() and self.current_state != "hidden":
             try:
                 mx, my = self.last_hover_pos
@@ -208,15 +240,24 @@ class StatusIndicatorManager:
                 self._check_hover_and_update_popups(mx, my) # Creates popups if needed
 
                 # --- Check if Hovering Over Specific Label ---
-                if self.source_popup and self._is_point_over_popup(mx, my, self.source_popup):
+                # Mode Popup Check
+                if self.mode_popup and self._is_point_over_popup(mx, my, self.mode_popup):
+                    for mode_name, label in self.mode_popup_labels.items():
+                         if self._is_point_over_widget(mx, my, label):
+                             self.hovering_over_mode_name = mode_name
+                             break # Found hover
+
+                # Source Language Popup Check (only if not hovering mode)
+                if not self.hovering_over_mode_name and self.source_popup and self._is_point_over_popup(mx, my, self.source_popup):
                     for code, label in self.source_popup_labels.items():
                         if self._is_point_over_widget(mx, my, label):
                             self.hovering_over_lang_type = "source"
                             self.hovering_over_lang_code = code
                             # logging.debug(f"Hovering over source label: {code}") # Optional log
                             break # Found hover, no need to check others in this popup
-                # Check target popup only if not hovering source label
-                if self.target_popup and not self.hovering_over_lang_code and self._is_point_over_popup(mx, my, self.target_popup):
+
+                # Target Language Popup Check (only if not hovering mode or source)
+                if not self.hovering_over_mode_name and not self.hovering_over_lang_code and self.target_popup and self._is_point_over_popup(mx, my, self.target_popup):
                      for code, label in self.target_popup_labels.items():
                          if self._is_point_over_widget(mx, my, label):
                              self.hovering_over_lang_type = "target"
@@ -238,18 +279,22 @@ class StatusIndicatorManager:
 
     def _check_and_destroy_popups(self, mouse_x, mouse_y):
         """Checks if mouse is away from popups or their areas and destroys them."""
-        if not (self.source_popup or self.target_popup): return # Skip if no popups exist
+        # Include mode popup check
+        if not (self.source_popup or self.target_popup or self.mode_popup): return
 
+        is_over_mode_area = self._is_point_over_tag(mouse_x, mouse_y, "mode_area")
         is_over_source_area = self._is_point_over_tag(mouse_x, mouse_y, "source_lang_area")
         is_over_target_area = self._is_point_over_tag(mouse_x, mouse_y, "target_lang_area")
+        is_over_mode_popup = self._is_point_over_popup(mouse_x, mouse_y, self.mode_popup)
         is_over_source_popup = self._is_point_over_popup(mouse_x, mouse_y, self.source_popup)
         is_over_target_popup = self._is_point_over_popup(mouse_x, mouse_y, self.target_popup)
 
+        # Destroy popups if mouse is not over their trigger area or the popup itself
+        if self.mode_popup and not is_over_mode_area and not is_over_mode_popup:
+            self._destroy_mode_popup()
         if self.source_popup and not is_over_source_area and not is_over_source_popup:
-            # logging.debug("Mouse left source area/popup, destroying source popup.")
             self._destroy_lang_popup("source")
         if self.target_popup and not is_over_target_area and not is_over_target_popup:
-            # logging.debug("Mouse left target area/popup, destroying target popup.")
             self._destroy_lang_popup("target")
 
     def _cleanup_tk(self):
@@ -289,38 +334,71 @@ class StatusIndicatorManager:
                 # logging.debug("[DrawIcon] State is hidden, returning.")
                 return
 
-            # --- Draw Microphone Icon ---
-            w, h = self.icon_base_width, self.icon_height; icon_x_offset = 0
+            # Define common drawing params
+            text_y = self.icon_height / 2
+            text_bg_color = "#FFFFFF"
+            text_padding_x = 3
+            text_padding_y = 2
+            bg_y0 = text_y - (self.text_font_size / 1.5) - text_padding_y
+            bg_y1 = text_y + (self.text_font_size / 1.5) + text_padding_y
+            icon_x_offset = 0 # Initial default
+
+            # --- Draw Mode Text (Left of Mic, IF active) ---
+            if self.current_state in ["idle", "active"]:
+                current_x = 0 # Start from left edge
+                mode_text = self.current_mode # Display the short name (e.g., "Dictation", "Keyboard")
+                mode_width = self.text_font.measure(mode_text)
+                mode_bg_x0 = current_x # Start at edge
+                mode_bg_x1 = current_x + mode_width + text_padding_x * 2 # Add padding on both sides
+                self.canvas.create_rectangle(mode_bg_x0, bg_y0, mode_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("mode_area",))
+                # Center text within its background area
+                self.canvas.create_text(current_x + text_padding_x, text_y, text=mode_text, anchor=tk.W, font=self.text_font, fill=self.mode_text_color, tags=("mode_area",))
+                # Update icon offset based on the space taken by the mode text + padding
+                icon_x_offset = mode_bg_x1 + self.padding
+
+            # --- Draw Microphone Icon (Using updated icon_x_offset) ---
+            # Moved calculations here, AFTER icon_x_offset is potentially updated
+            w, h = self.icon_base_width, self.icon_height
             body_w = w * 0.6; body_h = h * 0.6; body_x = icon_x_offset + (w - body_w) / 2; body_y = h * 0.1
             stand_h = h * 0.2; stand_y = body_y + body_h; stand_w = w * 0.2; stand_x = icon_x_offset + (w - stand_w) / 2
             base_h = h * 0.1; base_y = stand_y + stand_h; base_w = w * 0.8; base_x = icon_x_offset + (w - base_w) / 2
+            # Draw the icon components
             self.canvas.create_rectangle(stand_x, stand_y, stand_x + stand_w, stand_y + stand_h, fill=self.mic_stand_color, outline="")
             self.canvas.create_rectangle(base_x, base_y, base_x + base_w, base_y + base_h, fill=self.mic_stand_color, outline="")
-            self.canvas.create_rectangle(body_x, body_y, body_x + body_w, body_y + body_h, fill=self.mic_body_color, outline=self.mic_stand_color)
+            mic_body = self.canvas.create_rectangle(body_x, body_y, body_x + body_w, body_y + body_h, fill=self.mic_body_color, outline=self.mic_stand_color)
             if self.current_state == "idle":
                 idle_r = body_w * 0.2; idle_cx = body_x + body_w / 2; idle_cy = body_y + body_h / 2
                 self.canvas.create_oval(idle_cx - idle_r, idle_cy - idle_r, idle_cx + idle_r, idle_cy + idle_r, fill=self.idle_indicator_color, outline="")
             elif self.current_state == "active":
                 fill_h = body_h * self.current_volume; fill_y = body_y + body_h - fill_h
-                if fill_h > 0: self.canvas.create_rectangle(body_x, fill_y, body_x + body_w, body_y + body_h, fill=self.volume_fill_color, outline="")
+                if fill_h > 0:
+                    # Ensure volume fill is drawn within the mic body bounds
+                    vol_x0 = body_x
+                    vol_y0 = max(body_y, fill_y) # Clamp top
+                    vol_x1 = body_x + body_w
+                    vol_y1 = body_y + body_h
+                    if vol_y0 < vol_y1: # Only draw if height is positive
+                         self.canvas.create_rectangle(vol_x0, vol_y0, vol_x1, vol_y1, fill=self.volume_fill_color, outline="")
 
-            # --- Draw Language Text ---
+
+            # --- Draw Language Text (Right of Mic, IF active and source exists) ---
             if self.current_state in ["idle", "active"] and self.source_lang:
-                text_y = self.icon_height / 2; text_bg_color = "#FFFFFF"; text_padding_x = 3; text_padding_y = 2
-                bg_y0 = text_y - (self.text_font_size / 1.5) - text_padding_y; bg_y1 = text_y + (self.text_font_size / 1.5) + text_padding_y
-                current_x = icon_x_offset + self.icon_base_width + self.padding
+                current_x = icon_x_offset + self.icon_base_width + self.padding # Start AFTER mic icon now
 
                 # 1. Draw Source Language (Always Active Color)
                 src_text = self.source_lang; src_width = self.text_font.measure(src_text)
-                src_bg_x0 = current_x - text_padding_x; src_bg_x1 = current_x + src_width + text_padding_x
+                src_bg_x0 = current_x # Start text area edge
+                src_bg_x1 = current_x + src_width + text_padding_x * 2 # Add padding
                 self.canvas.create_rectangle(src_bg_x0, bg_y0, src_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("source_lang_area",))
-                self.canvas.create_text(current_x, text_y, text=src_text, anchor=tk.W, font=self.text_font, fill=self.text_color, tags=("source_lang_area",))
-                current_x += src_width
+                # Center text
+                self.canvas.create_text(current_x + text_padding_x, text_y, text=src_text, anchor=tk.W, font=self.text_font, fill=self.text_color, tags=("source_lang_area",))
+                current_x = src_bg_x1 # Move to end of source area
 
                 # 2. Always Draw Arrow and Target Language Area
                 arrow_text = " > "; arrow_width = self.text_font.measure(arrow_text)
-                self.canvas.create_text(current_x, text_y, text=arrow_text, anchor=tk.W, font=self.text_font, fill=self.text_color)
-                current_x += arrow_width
+                arrow_x = current_x + self.padding // 2 # Position arrow with some padding
+                self.canvas.create_text(arrow_x, text_y, text=arrow_text, anchor=tk.W, font=self.text_font, fill=self.text_color)
+                current_x = arrow_x + arrow_width + self.padding // 2 # Update current_x after arrow
 
                 # Determine target text and color
                 is_target_active = self.target_lang and self.target_lang != self.source_lang
@@ -329,9 +407,11 @@ class StatusIndicatorManager:
                 tgt_width = self.text_font.measure(tgt_text)
 
                 # Draw target background and text (always tagged for hover)
-                tgt_bg_x0 = current_x - text_padding_x; tgt_bg_x1 = current_x + tgt_width + text_padding_x
+                tgt_bg_x0 = current_x # Start target area edge
+                tgt_bg_x1 = current_x + tgt_width + text_padding_x * 2 # Add padding
                 self.canvas.create_rectangle(tgt_bg_x0, bg_y0, tgt_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("target_lang_area",))
-                self.canvas.create_text(current_x, text_y, text=tgt_text, anchor=tk.W, font=self.text_font, fill=tgt_color, tags=("target_lang_area",))
+                # Center text
+                self.canvas.create_text(current_x + text_padding_x, text_y, text=tgt_text, anchor=tk.W, font=self.text_font, fill=tgt_color, tags=("target_lang_area",))
                 # logging.debug(f"[DrawIcon] Drawn target: '{tgt_text}' at ({current_x}, {text_y})")
 
             # else: logging.debug(f"[DrawIcon] Skipping text draw.")
@@ -340,8 +420,10 @@ class StatusIndicatorManager:
 
     def _create_lang_popup(self, lang_type):
         """Creates and displays the language selection popup directly above the corresponding text area."""
-        other_type = "target" if lang_type == "source" else "source"
-        self._destroy_lang_popup(other_type); self._destroy_lang_popup(lang_type)
+        # Ensure other popups are closed
+        self._destroy_lang_popup("source" if lang_type == "target" else "target")
+        self._destroy_mode_popup() # Also close mode popup
+        # self._destroy_lang_popup(lang_type) # Destroy self if exists (redundant?)
 
         if not self.root or not self.canvas or self._stop_event.is_set() or not self.root.winfo_exists():
             return
@@ -430,24 +512,118 @@ class StatusIndicatorManager:
             except tk.TclError: pass
             except Exception as e: logging.error(f"Unexpected error destroying popup {lang_type}: {e}", exc_info=True)
 
+    # --- NEW: Functions for Mode Popup ---
+    def _create_mode_popup(self):
+        """Creates and displays the mode selection popup directly above the mode text area."""
+        # Ensure other popups are closed
+        self._destroy_lang_popup("source")
+        self._destroy_lang_popup("target")
+        self._destroy_mode_popup() # Destroy self if exists
+
+        if not self.root or not self.canvas or self._stop_event.is_set() or not self.root.winfo_exists():
+            return
+
+        tag_name = "mode_area"
+
+        try:
+            bbox_rel = self.canvas.bbox(tag_name)
+            logging.debug(f"Popup 'Mode': Relative bbox for tag '{tag_name}': {bbox_rel}")
+            if not bbox_rel:
+                logging.warning(f"Could not find bbox for tag '{tag_name}' to position mode popup.")
+                return
+        except tk.TclError as e:
+             logging.warning(f"TclError getting bbox for {tag_name}: {e}")
+             return
+
+        popup = tk.Toplevel(self.root)
+        popup.overrideredirect(True); popup.wm_attributes("-topmost", True)
+        popup.config(bg=self.popup_bg, relief=tk.SOLID, borderwidth=1)
+
+        # --- Store labels for hover check ---
+        self.mode_popup_labels = {} # Clear previous labels
+        for mode_name, mode_display_name in self.available_modes.items():
+            label = tk.Label(popup, text=mode_display_name, font=self.popup_font, bg=self.popup_bg, fg=self.popup_fg, padx=5, pady=2, anchor=tk.W)
+            label.pack(fill=tk.X)
+            label.bind("<Enter>", partial(self._on_popup_label_enter, label=label))
+            label.bind("<Leave>", partial(self._on_popup_label_leave, label=label))
+            label.bind("<ButtonRelease-1>", partial(self._on_mode_popup_label_release, mode_name=mode_name))
+            # Store label reference
+            self.mode_popup_labels[mode_name] = label
+
+        # --- Positioning Logic (similar to language popups) ---
+        try:
+            popup.update_idletasks(); self.canvas.update_idletasks()
+            canvas_x = self.canvas.winfo_rootx(); canvas_y = self.canvas.winfo_rooty()
+            bbox_abs_x0 = canvas_x + bbox_rel[0]; bbox_abs_y0 = canvas_y + bbox_rel[1]
+            popup_height = popup.winfo_reqheight(); popup_width = popup.winfo_reqwidth()
+            popup_x = bbox_abs_x0; popup_y = bbox_abs_y0 - popup_height - 2 # Position above
+            screen_width = self.root.winfo_screenwidth(); screen_height = self.root.winfo_screenheight()
+            adjusted = False
+            if popup_x < 0: popup_x = 0; adjusted = True
+            if popup_x + popup_width > screen_width: popup_x = screen_width - popup_width; adjusted = True
+            if popup_y < 0: # If above screen, place below
+                popup_y = canvas_y + bbox_rel[3] + 2 # Below the mode text area
+                adjusted = True
+                if popup_y + popup_height > screen_height: popup_y = screen_height - popup_height; adjusted = True
+
+            popup.geometry(f"+{popup_x}+{popup_y}")
+            # logging.info(f"Popup for Mode positioned at +{popup_x}+{popup_y}")
+
+        except tk.TclError as e:
+            logging.warning(f"Could not get geometry for precise mode popup positioning: {e}.")
+            try: popup.destroy(); return
+            except: pass
+
+        # Store popup reference
+        self.mode_popup = popup
+        # logging.debug("Popup created for Mode")
+
+    def _destroy_mode_popup(self):
+        """Destroys the mode popup if it exists."""
+        if self.mode_popup:
+            popup = self.mode_popup
+            self.mode_popup = None
+            self.mode_popup_labels.clear() # Clear label dict
+            try:
+                if self.root and self.root.winfo_exists(): popup.destroy()#; logging.debug("Popup destroyed for Mode")
+            except tk.TclError: pass
+            except Exception as e: logging.error(f"Unexpected error destroying mode popup: {e}", exc_info=True)
+
+    def _on_mode_popup_label_release(self, event, mode_name):
+        """Handles click release on a mode label in the popup."""
+        logging.info(f"Mode selected via popup: {mode_name}")
+        # Send action to main thread
+        try:
+            # Send the internal mode name (e.g., "Keyboard"), not the display name
+            self.action_queue.put_nowait(("select_mode", mode_name))
+        except queue.Full:
+            logging.warning(f"Action queue full when sending mode selection ({mode_name}).")
+
+        # Destroy ALL popups immediately after selection
+        self._destroy_mode_popup()
+        self._destroy_lang_popup("source")
+        self._destroy_lang_popup("target")
+    # --- End NEW Mode Popup Functions ---
+
+
     def _check_hover_and_update_popups(self, mouse_x, mouse_y):
         """Checks if mouse coords are over language areas and creates popups."""
         # Don't check if already destroying
         if self._stop_event.is_set() or not self.root or not self.root.winfo_exists():
             return
 
+        is_over_mode = self._is_point_over_tag(mouse_x, mouse_y, "mode_area")
         is_over_source = self._is_point_over_tag(mouse_x, mouse_y, "source_lang_area")
         is_over_target = self._is_point_over_tag(mouse_x, mouse_y, "target_lang_area")
 
+        # Create mode popup if hovering and it doesn't exist
+        if is_over_mode and not self.mode_popup:
+             self._create_mode_popup()
         # Create source popup if hovering and it doesn't exist
-        if is_over_source and not self.source_popup:
-            # logging.debug(f"Hover check: Mouse ({mouse_x},{mouse_y}) detected over source area, creating popup.") # Noisy
+        elif is_over_source and not self.source_popup:
             self._create_lang_popup("source")
         # Create target popup if hovering and it doesn't exist
         elif is_over_target and not self.target_popup:
-             # REMOVED condition: `if self.target_lang and self.target_lang != self.source_lang:`
-             # Now always attempts to create the popup if hovering over the target area
-             # logging.debug(f"Hover check: Mouse ({mouse_x},{mouse_y}) detected over target area, creating popup.") # Noisy
              self._create_lang_popup("target")
         # Note: This function ONLY creates popups based on hover position.
         # The separate check in _check_queue handles destroying them when hover stops.

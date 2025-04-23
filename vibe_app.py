@@ -13,6 +13,7 @@ import json # Import json module
 import sys # Import sys for exiting on critical config error
 import numpy as np # Import numpy
 import pyaudio     # Import PyAudio
+from openai import OpenAI, AsyncOpenAI # Use AsyncOpenAI for non-blocking calls
 
 # --- Systray UI Import ---
 # We need threading anyway, so let's use it for the systray
@@ -36,7 +37,9 @@ CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
   "general": {
     "min_duration_sec": 0.5,
-    "selected_language": "en-US"
+    "selected_language": "en-US",
+    "target_language": None,
+    "openai_model": "gpt-4o-mini"
   },
   "triggers": {
     "dictation_button": "middle",
@@ -122,6 +125,8 @@ COMMAND_MODIFIER_KEY_STR = None
 COMMAND_MODIFIER_KEY = None
 MIN_DURATION_SEC = 0.5
 SELECTED_LANGUAGE = "en-US"
+TARGET_LANGUAGE = None
+OPENAI_MODEL = "gpt-4o-mini"
 TOOLTIP_ALPHA = 0.85
 TOOLTIP_BG = "lightyellow"
 TOOLTIP_FG = "black"
@@ -133,18 +138,23 @@ def apply_config(cfg):
     global DICTATION_TRIGGER_BUTTON, COMMAND_TRIGGER_BUTTON, COMMAND_MODIFIER_KEY_STR
     global COMMAND_MODIFIER_KEY, MIN_DURATION_SEC, SELECTED_LANGUAGE
     global TOOLTIP_ALPHA, TOOLTIP_BG, TOOLTIP_FG, TOOLTIP_FONT_FAMILY, TOOLTIP_FONT_SIZE
+    global TARGET_LANGUAGE, OPENAI_MODEL
 
     logging.info("Applying configuration...")
     try:
         # Triggers
-        DICTATION_TRIGGER_BUTTON = PYNPUT_BUTTON_MAP.get(cfg.get("triggers", {}).get("dictation_button", "middle"))
-        COMMAND_TRIGGER_BUTTON = PYNPUT_BUTTON_MAP.get(cfg.get("triggers", {}).get("command_button")) # Defaults to None if key missing
-        COMMAND_MODIFIER_KEY_STR = cfg.get("triggers", {}).get("command_modifier")
+        triggers_cfg = cfg.get("triggers", {})
+        DICTATION_TRIGGER_BUTTON = PYNPUT_BUTTON_MAP.get(triggers_cfg.get("dictation_button", "middle"))
+        COMMAND_TRIGGER_BUTTON = PYNPUT_BUTTON_MAP.get(triggers_cfg.get("command_button"))
+        COMMAND_MODIFIER_KEY_STR = triggers_cfg.get("command_modifier")
         COMMAND_MODIFIER_KEY = PYNPUT_MODIFIER_MAP.get(COMMAND_MODIFIER_KEY_STR)
 
         # General
-        MIN_DURATION_SEC = float(cfg.get("general", {}).get("min_duration_sec", 0.5))
-        SELECTED_LANGUAGE = str(cfg.get("general", {}).get("selected_language", "en-US"))
+        general_cfg = cfg.get("general", {})
+        MIN_DURATION_SEC = float(general_cfg.get("min_duration_sec", 0.5))
+        SELECTED_LANGUAGE = str(general_cfg.get("selected_language", "en-US"))
+        TARGET_LANGUAGE = general_cfg.get("target_language")
+        OPENAI_MODEL = str(general_cfg.get("openai_model", "gpt-4o-mini"))
 
         # Tooltip
         TOOLTIP_ALPHA = float(cfg.get("tooltip", {}).get("alpha", 0.85))
@@ -153,7 +163,8 @@ def apply_config(cfg):
         TOOLTIP_FONT_FAMILY = str(cfg.get("tooltip", {}).get("font_family", "Arial"))
         TOOLTIP_FONT_SIZE = int(cfg.get("tooltip", {}).get("font_size", 10))
 
-        logging.info(f"Config applied: Lang={SELECTED_LANGUAGE}, Dictation={cfg.get('triggers', {}).get('dictation_button', 'middle')}, ...")
+        target_lang_str = TARGET_LANGUAGE if TARGET_LANGUAGE else "None"
+        logging.info(f"Config applied: SourceLang={SELECTED_LANGUAGE}, TargetLang={target_lang_str}, Model={OPENAI_MODEL}, Dictation={triggers_cfg.get('dictation_button', 'middle')}, ...")
 
     except (ValueError, TypeError, KeyError) as e:
         logging.error(f"Error applying configuration: {e}. Some settings may not be updated correctly.")
@@ -161,23 +172,44 @@ def apply_config(cfg):
 
 # --- Initial Configuration Application --- (After defining apply_config)
 load_dotenv() # Load environment variables from .env file (still used for API key)
-API_KEY = os.getenv("DEEPGRAM_API_KEY")
-if not API_KEY:
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # --- Load OpenAI Key ---
+if not DEEPGRAM_API_KEY:
     logging.critical("DEEPGRAM_API_KEY not found in environment variables or .env file. Exiting.")
     sys.exit(1)
+# --- Check for OpenAI Key (warn if missing, needed for translation) ---
+if not OPENAI_API_KEY:
+    logging.warning("OPENAI_API_KEY not found in environment variables or .env file. Translation feature will be disabled.")
+    # Don't exit, allow other modes to work
 
 # Apply the initially loaded config
 apply_config(config)
 
+# --- Initialize OpenAI Client ---
+# Initialize AsyncOpenAI client if key exists
+openai_client = None
+if OPENAI_API_KEY:
+    try:
+        # Use the correct model name from config if needed during init, though usually not required here
+        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        logging.info("OpenAI client initialized.")
+    except Exception as e:
+        logging.error(f"Failed to initialize OpenAI client: {e}")
+else:
+    logging.warning("OpenAI client not initialized due to missing API key. Translation disabled.")
 
-logging.info(f"Using Language: {SELECTED_LANGUAGE}")
-logging.info(f"Dictation Trigger: {config.get('triggers', {}).get('dictation_button', 'middle')}") # Log the raw value from config
+logging.info(f"Using Source Language: {SELECTED_LANGUAGE}")
+# --- Log Target Language ---
+if TARGET_LANGUAGE:
+    logging.info(f"Translation Enabled: Target Language = {TARGET_LANGUAGE}, Model = {OPENAI_MODEL}")
+else:
+    logging.info("Translation Disabled (Target Language is None)")
+logging.info(f"Dictation Trigger: {config.get('triggers', {}).get('dictation_button', 'middle')}")
 if COMMAND_TRIGGER_BUTTON:
     mod_str = f" + {COMMAND_MODIFIER_KEY_STR}" if COMMAND_MODIFIER_KEY else ""
-    logging.info(f"Command Trigger: {config.get('triggers', {}).get('command_button')}{mod_str}") # Log the raw value from config
+    logging.info(f"Command Trigger: {config.get('triggers', {}).get('command_button')}{mod_str}")
 else:
     logging.info("Command Trigger: Disabled")
-
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -197,6 +229,7 @@ kb_controller = keyboard.Controller()
 # --- State for Dictation Typing Simulation ---
 last_simulated_text = "" # Store the transcript corresponding to the last simulation action
 typed_word_history = [] # Store history of typed words
+final_source_text = "" # Store final source text from dictation *before* potential translation
 
 # --- State for Command Mode ---
 current_command_transcript = "" # Store the transcript for command mode
@@ -638,27 +671,32 @@ def handle_dictation_interim(transcript):
     # last_simulated_text = transcript # DO NOT UPDATE STATE HERE
 
 def handle_dictation_final(final_transcript, history):
-    """Handles the final dictation transcript based on history and incoming transcript.
-    Calculates target state, determines diff from current state, executes, updates history.
-    Also hides the interim tooltip."""
-    logging.warning(f"RAW FINAL TRANSCRIPT RECEIVED: '{final_transcript}'")
+    """Handles the final dictation transcript segment based on history.
+    Calculates target state, determines diff from current state, executes typing, updates history.
+    Also hides the interim tooltip.
+
+    Returns:
+        tuple: (updated_history_list, final_text_string_typed)
+               The final_text_string_typed includes the trailing space if added.
+    """
+    logging.debug(f"Handling final dictation segment: '{final_transcript}'")
 
     # --- Hide the interim tooltip ---
-    # Use put_nowait as hiding is less critical if queue is full during shutdown
     try:
         tooltip_queue.put_nowait(("hide", None))
     except queue.Full:
         logging.warning("Tooltip queue full when trying to hide on final.")
 
     # --- Step A: Calculate Target Word List ---
-    target_words = [entry['text'] for entry in history]
+    target_words = [entry['text'] for entry in history] # Start with existing words
     logging.debug(f"Initial target_words from history: {target_words}")
 
     original_words = final_transcript.split()
     punctuation_to_strip = '.,!?;:'
-    
-    # Process the new transcript against the target list
+
+    # Process the new transcript segment against the target list
     for word in original_words:
+        if not word: continue
         cleaned_word = word.rstrip(punctuation_to_strip).lower()
 
         if cleaned_word == "back":
@@ -669,50 +707,48 @@ def handle_dictation_final(final_transcript, history):
                 logging.info(f"Processing 'back', but target_words already empty.")
         else:
             target_words.append(word) # Append original word with punctuation
-    
-    logging.debug(f"Final target_words after processing transcript: {target_words}")
+
+    logging.debug(f"Final target_words after processing segment: {target_words}")
 
     # --- Step B: Calculate Target Text ---
-    target_text = " ".join(target_words) + ' ' if target_words else ''
-    logging.debug(f"Calculated target_text: '{target_text}'")
+    target_text = " ".join(target_words) + (' ' if target_words else '') # Add trailing space
+    logging.debug(f"Calculated target_text (with space): '{target_text}'")
 
     # --- Step C: Calculate Current Text on Screen (Estimate from OLD history) ---
-    # We need the text *before* processing the current transcript's 'back' commands
-    current_text_estimate = " ".join([entry['text'] for entry in history]) + ' ' if history else ''
-    logging.debug(f"Estimated current text (from old history): '{current_text_estimate}'")
+    current_text_estimate = " ".join([entry['text'] for entry in history]) + (' ' if history else '')
+    logging.debug(f"Estimated current text (from old history, with space): '{current_text_estimate}'")
 
     # --- Step D: Calculate Diff ---
     common_prefix_len = 0
     min_len = min(len(current_text_estimate), len(target_text))
     while common_prefix_len < min_len and current_text_estimate[common_prefix_len] == target_text[common_prefix_len]:
         common_prefix_len += 1
-        
+
     backspaces_needed = len(current_text_estimate) - common_prefix_len
     text_to_type = target_text[common_prefix_len:]
-    
+
     logging.debug(f"Diff Calculation: Prefix={common_prefix_len}, Backspaces={backspaces_needed}, Type='{text_to_type}'")
 
     # --- Step E: Execute Typing Actions ---
-    # IMPORTANT: Order matters. Backspace first, then type.
     if backspaces_needed > 0:
         simulate_backspace(backspaces_needed)
-        
     if text_to_type:
         simulate_typing(text_to_type)
 
     # --- Step F: Update History to Match Target State ---
-    history.clear() 
-    if target_words: # Use the target_words list we built
+    new_history = []
+    if target_words:
         logging.debug(f"Rebuilding history with: {target_words}")
         for word in target_words:
-            if word: # Should not be necessary if split is good, but safe
+            if word:
                 length_with_space = len(word) + 1
                 entry = {"text": word, "length_with_space": length_with_space}
-                history.append(entry)
+                new_history.append(entry)
     else:
         logging.debug("History cleared as target_words is empty.")
 
-    return history # Return the new history state
+    # Return the updated history AND the final text string *as typed* (including space)
+    return new_history, target_text
 
 def handle_command_interim(transcript):
     """Displays interim command transcript (e.g., in a UI)."""
@@ -753,25 +789,89 @@ def undo_last_command():
     # TODO: Implement undo logic based on stored action
     pass
 
+# --- NEW/MODIFIED: Translation Function ---
+async def translate_and_type(text_to_translate, source_lang_code, target_lang_code):
+    """Translates text using OpenAI and types the result."""
+    global openai_client, OPENAI_MODEL # Use configured model
+    if not openai_client:
+        logging.error("OpenAI client not available. Cannot translate.")
+        simulate_typing(" [Translation Error: OpenAI not configured]")
+        return
+    if not text_to_translate:
+        logging.warning("No text provided for translation.")
+        return
+    if not source_lang_code or not target_lang_code:
+        logging.error(f"Missing source ({source_lang_code}) or target ({target_lang_code}) language for translation.")
+        simulate_typing(" [Translation Error: Language missing]")
+        return
+    if source_lang_code == target_lang_code:
+         logging.info("Source and target languages are the same, skipping translation call.")
+         return # No need to translate if languages match
+
+    # Get full language names for the prompt (optional, but potentially helpful for the model)
+    # Using TARGET_LANGUAGE_OPTIONS from systray might be fragile if systray isn't imported/run
+    # Let's stick to codes for now, or define a local map if needed.
+    source_lang_name = source_lang_code # Or lookup full name
+    target_lang_name = target_lang_code # Or lookup full name
+
+    logging.info(f"Requesting translation from '{source_lang_name}' to '{target_lang_name}' for: '{text_to_translate}' using model '{OPENAI_MODEL}'")
+    # Indicate translation is starting *after* the source text's trailing space
+    simulate_typing("-> ") # Add space after arrow
+
+    try:
+        prompt = f"Translate the following text accurately from {source_lang_name} to {target_lang_name}. Output only the translated text:\n\n{text_to_translate}"
+
+        response = await openai_client.chat.completions.create(
+            model=OPENAI_MODEL, # Use the model from config
+            messages=[
+                {"role": "system", "content": "You are an expert translation engine."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2, # Lower temperature for more direct translation
+            max_tokens=int(len(text_to_translate) * 2.5 + 50) # Generous token estimate
+        )
+
+        translated_text = response.choices[0].message.content.strip()
+        logging.info(f"Translation received: '{translated_text}'")
+
+        if translated_text:
+            # Type the translation, followed by a space for subsequent typing
+            simulate_typing(translated_text + " ")
+        else:
+            logging.warning("OpenAI returned an empty translation.")
+            simulate_typing("[Translation Empty] ")
+
+    except Exception as e:
+        logging.error(f"Error during OpenAI translation request: {e}", exc_info=True)
+        simulate_typing(f"[Translation Error: {type(e).__name__}] ")
+
+
 # --- Deepgram Event Handlers ---
 async def on_open(self, open, **kwargs):
     logging.info("Deepgram connection opened.")
 
 async def on_message(self, result, **kwargs):
-    global typed_word_history # Keep global here to update the list reference
+    global typed_word_history, final_source_text # Keep global here to update the list reference
     try:
         transcript = result.channel.alternatives[0].transcript
         if not transcript:
             return
 
-        if current_mode == "dictation":
+        if current_mode == "dictation": # Handles both dictation and dictation+translation
             if result.is_final:
                 final_part = transcript # Get the final utterance part
-                # Pass history in, get potentially modified history back
-                typed_word_history = handle_dictation_final(final_part, typed_word_history)
+                # Pass history in, get potentially modified history back AND the text typed
+                updated_history, text_typed_this_segment = handle_dictation_final(final_part, typed_word_history)
+                typed_word_history = updated_history # Update history state
+
+                # --- Accumulate the final source text ---
+                # We rebuild the full text from the *updated* history after processing the segment
+                final_source_text = " ".join([entry['text'] for entry in typed_word_history])
+                logging.debug(f"Dictation final source text updated: '{final_source_text}'")
             else:
-                # Interim handler doesn't need history
+                # Interim handler updates tooltip
                 handle_dictation_interim(transcript)
+
         elif current_mode == "command":
             if result.is_final:
                 handle_command_final(transcript)
@@ -803,32 +903,37 @@ async def on_unhandled(self, unhandled, **kwargs):
 
 # --- Pynput Listener Callbacks ---
 def on_click(x, y, button, pressed):
-    global current_mode, start_time, status_queue # Add status_queue
+    global current_mode, start_time, status_queue
+    global is_dictation_active, is_command_active # REMOVED is_interpreter_active
+    global transcription_active_event
+    global typed_word_history, final_source_text # Reset state vars
 
     trigger_mode = None
     active_event = None
     required_modifier = None
+    modifier_str = None # For logging
 
-    # Check for Dictation Trigger
+    # Determine which mode is being triggered, checking modifiers
     if button == DICTATION_TRIGGER_BUTTON:
-        # Ensure the command modifier (if any) is NOT pressed for dictation
-        if COMMAND_MODIFIER_KEY is None or COMMAND_MODIFIER_KEY not in modifier_keys_pressed:
+        # Ensure Command modifier (if any) is NOT pressed for dictation
+        is_command_modifier_pressed = (COMMAND_MODIFIER_KEY is not None and COMMAND_MODIFIER_KEY in modifier_keys_pressed)
+        if not is_command_modifier_pressed:
             trigger_mode = "dictation"
             active_event = is_dictation_active
         else:
-             logging.debug(f"Dictation button ({button}) pressed, but command modifier ({COMMAND_MODIFIER_KEY}) is also pressed. Ignoring.")
-             return # Ignore if command modifier is held
+             logging.debug(f"Dictation button ({button}) pressed, but command modifier ({COMMAND_MODIFIER_KEY_STR}) is also pressed. Ignoring.")
+             return
 
-    # Check for Command Trigger
     elif COMMAND_TRIGGER_BUTTON is not None and button == COMMAND_TRIGGER_BUTTON:
-        # Check if the required modifier key (if any) is pressed
         modifier_ok = (COMMAND_MODIFIER_KEY is None or COMMAND_MODIFIER_KEY in modifier_keys_pressed)
         if modifier_ok:
             trigger_mode = "command"
             active_event = is_command_active
+            required_modifier = COMMAND_MODIFIER_KEY
+            modifier_str = COMMAND_MODIFIER_KEY_STR
         else:
-            logging.debug(f"Command button ({button}) pressed, but required modifier ({COMMAND_MODIFIER_KEY}) is not pressed. Ignoring.")
-            return # Ignore if modifier is required but not held
+            logging.debug(f"Command button ({button}) pressed, but required modifier ({COMMAND_MODIFIER_KEY_STR}) is not pressed. Ignoring.")
+            return
 
     else:
         return # Ignore other button clicks
@@ -836,24 +941,27 @@ def on_click(x, y, button, pressed):
     if trigger_mode:
         if pressed:
             if not transcription_active_event.is_set(): # Start only if nothing else is active
-                mod_str = f" with {COMMAND_MODIFIER_KEY_STR} " if trigger_mode == "command" and COMMAND_MODIFIER_KEY else ""
-                logging.info(f"{trigger_mode.capitalize()} button pressed{mod_str}- starting mode.")
-                # Clear any potentially lingering state from other mode
+                mod_log_str = f" with {modifier_str} " if required_modifier else ""
+                logging.info(f"{trigger_mode.capitalize()} button pressed{mod_log_str}- starting mode.")
+                # Clear potentially lingering state
                 is_dictation_active.clear()
                 is_command_active.clear()
+                # --- Reset state specific to the mode being started ---
+                if trigger_mode == "dictation":
+                    typed_word_history.clear()
+                    final_source_text = ""
+                elif trigger_mode == "command":
+                    global current_command_transcript
+                    current_command_transcript = ""
+
                 # Set the active mode
                 active_event.set()
                 transcription_active_event.set()
                 current_mode = trigger_mode
                 start_time = time.time() # Record start time for duration check
-                if trigger_mode == "command":
-                    # TODO: Show command feedback UI
-                    pass
-                # DO NOT show tooltip here, wait for first interim result
 
-                # --- Show Status Indicator ---
+                # Show Status Indicator
                 try:
-                    # Show in "active" state immediately
                     status_queue.put_nowait(("state", {"state": "active", "pos": (x, y)}))
                 except queue.Full:
                     logging.warning("Status queue full when trying to show indicator.")
@@ -861,29 +969,24 @@ def on_click(x, y, button, pressed):
             else:
                 logging.warning(f"Attempted to start {trigger_mode} while already active ({current_mode})")
         else: # Button released
-            if active_event.is_set():
+            if active_event and active_event.is_set():
                 duration = time.time() - start_time if start_time else 0
                 logging.info(f"{trigger_mode.capitalize()} button released (duration: {duration:.2f}s). Stopping mode.")
                 # Clear events to signal stopping
                 active_event.clear()
                 transcription_active_event.clear() # Signal main loop to stop DG/Mic
 
-                # --- Hide Tooltip & Status Indicator ---
-                if trigger_mode == "dictation":
+                # Hide Tooltip & Status Indicator
+                if trigger_mode == "dictation": # Tooltip only for dictation
                     try: tooltip_queue.put_nowait(("hide", None))
                     except queue.Full: logging.warning("Tooltip queue full on release.")
                 try:
-                    # Hide status indicator (or set to idle if we want it persistent?)
-                    # Let's hide it for now.
                     status_queue.put_nowait(("state", {"state": "hidden"}))
                 except queue.Full:
                     logging.warning("Status queue full when trying to hide indicator.")
 
-                # Post-processing is handled in the main loop after stopping
-                if trigger_mode == "command":
-                     # TODO: Hide command feedback UI
-                     pass
-            # Don't reset current_mode here, main loop needs it for final processing
+                # Post-processing (like translation) is handled in the main loop after stopping
+                # Don't reset current_mode here, main loop needs it
 
 def on_press(key):
     global current_mode, modifier_keys_pressed
@@ -909,33 +1012,31 @@ def on_press(key):
 
 def on_release(key):
     """Callback for key release events."""
-    global modifier_keys_pressed, status_queue # Add status_queue
+    global modifier_keys_pressed, status_queue
+    global is_command_active, transcription_active_event # REMOVED is_interpreter_active
+
     # Track modifier key releases
     if key in modifier_keys_pressed:
         logging.debug(f"Modifier released: {key}")
         modifier_keys_pressed.discard(key)
 
-    # If a trigger button is released WHILE the modifier is still held,
-    # the on_click handler already dealt with stopping the mode.
-    # If the modifier key is released while the trigger button is still held,
-    # we might want to stop the mode (e.g., stop command mode if Shift is released).
-    # This requires checking the active mode and the specific modifier.
-    if current_mode == "command" and key == COMMAND_MODIFIER_KEY and transcription_active_event.is_set():
+    # If the command modifier key is released while the command trigger button is still held, stop command mode.
+    if key == COMMAND_MODIFIER_KEY and is_command_active.is_set():
          logging.info(f"Command modifier ({key}) released while command mode active. Stopping mode.")
          is_command_active.clear()
          transcription_active_event.clear() # Signal stop
-         # --- Hide Status Indicator ---
-         try:
-             status_queue.put_nowait(("state", {"state": "hidden"}))
-         except queue.Full:
-             logging.warning("Status queue full when trying to hide indicator on modifier release.")
-         # Tooltip hiding and post-processing will happen in the main loop's stop flow
+         # Hide Status Indicator
+         try: status_queue.put_nowait(("state", {"state": "hidden"}))
+         except queue.Full: logging.warning("Status queue full hiding indicator on cmd mod release.")
+         # Post-processing will happen in the main loop's stop flow
 
 
 # --- Main Application Logic ---
 async def main():
-    global start_time, current_mode, current_command_transcript, tooltip_queue, status_queue # Add status_queue
+    global start_time, current_mode, current_command_transcript, tooltip_queue, status_queue
     global config # Make main config global for reloading
+    global final_source_text # Access final dictation text
+    global typed_word_history # Access dictation history
 
     logging.info("Starting Vibe App...")
 
@@ -964,7 +1065,7 @@ async def main():
     # Initialize Deepgram Client with reduced verbosity
     try:
         config_dg = DeepgramClientOptions(verbose=logging.WARNING)
-        deepgram: DeepgramClient = DeepgramClient(API_KEY, config_dg)
+        deepgram: DeepgramClient = DeepgramClient(DEEPGRAM_API_KEY, config_dg)
     except Exception as e:
         logging.error(f"Failed to initialize Deepgram client: {e}")
         # No need to exit here, API key check already happened
@@ -986,6 +1087,13 @@ async def main():
             # Start Transcription Flow
             if transcription_active_event.is_set() and dg_connection is None:
                 logging.info(f"Activating {current_mode} mode...")
+                # Reset relevant state variables at the START of activation
+                if current_mode == "dictation":
+                    typed_word_history.clear()
+                    final_source_text = "" # Reset final source text accumulator
+                elif current_mode == "command":
+                    current_command_transcript = ""
+
                 try:
                     # 1. Get connection object
                     dg_connection = deepgram.listen.asyncwebsocket.v("1")
@@ -1000,14 +1108,18 @@ async def main():
                     dg_connection.on(LiveTranscriptionEvents.Close, on_close)
                     dg_connection.on(LiveTranscriptionEvents.Unhandled, on_unhandled)
 
-                    # 3. Define options using configured language
+                    # 3. Define options using configured SOURCE language
                     options = LiveOptions(
                         model="nova-2",
-                        language=SELECTED_LANGUAGE, # Use loaded language
+                        language=SELECTED_LANGUAGE, # Use SOURCE language
                         smart_format=True,
                         interim_results=True, utterance_end_ms="1000",
                         vad_events=True, endpointing=300,
-                        encoding="linear16", channels=1, sample_rate=16000
+                        encoding="linear16", channels=1, sample_rate=16000,
+                        # Keep word-level timestamps if handle_dictation_final relies on them implicitly
+                        # (Though current implementation seems okay without explicit timestamps)
+                        punctuate=True, # Enable punctuation
+                        numerals=True, # Enable number formatting
                     )
                     
                     # 4. Start connection
@@ -1053,34 +1165,30 @@ async def main():
                     # Buffered audio input is already running continuously
 
                 except Exception as e:
-                    logging.error(f"Failed to start Deepgram/Microphone/Monitor: {e}")
-                    # Don't stop buffered input here, it should run continuously
+                    logging.error(f"Failed to start Deepgram/Microphone: {e}")
                     # Reset state fully on failure
                     if dg_connection:
                        try: await dg_connection.finish()
-                       except Exception: pass # Ignore errors during cleanup
+                       except Exception: pass
                     is_dictation_active.clear()
                     is_command_active.clear()
                     transcription_active_event.clear()
                     current_mode = None
                     dg_connection = None
                     microphone = None
-                    # --- Hide Status Indicator on failure ---
+                    # Hide Status Indicator on failure
                     try: status_queue.put_nowait(("state", {"state": "hidden"}))
                     except queue.Full: pass
 
 
             # Stop Transcription Flow
             elif not transcription_active_event.is_set() and dg_connection is not None:
-                active_mode_on_stop = current_mode
+                active_mode_on_stop = current_mode # Capture mode *before* resetting
                 logging.info(f"Deactivating {active_mode_on_stop} mode...")
                 duration = time.time() - start_time if start_time else 0
-                start_time = None
+                start_time = None # Reset start time
 
-                # --- Stop Audio Monitor ---
-                # Don't stop the buffered input here, keep it running
-
-                # --- Ensure tooltip & status are hidden ---
+                # Ensure tooltip & status are hidden
                 try: tooltip_queue.put_nowait(("hide", None))
                 except queue.Full: logging.warning("Tooltip queue full on deactivate.")
                 try: status_queue.put_nowait(("state", {"state": "hidden"}))
@@ -1095,42 +1203,74 @@ async def main():
                 # 2. Stop Deepgram connection
                 if dg_connection:
                     try:
+                        # Wait briefly for any final messages from DG before finishing
+                        await asyncio.sleep(0.1)
                         await dg_connection.finish()
                         logging.info("Deepgram connection finished.")
                     except Exception as e:
                          logging.error(f"Error finishing deepgram connection: {e}")
                     dg_connection = None
 
-                # 3. Post-processing (check duration, handle final transcripts/commands)
+                # 3. Post-processing (check duration, handle final transcripts/commands, TRANSLATE)
+                translation_task = None # Initialize translation task placeholder
                 if active_mode_on_stop == "cancel":
                      logging.info("Command cancelled by user.")
                 elif duration >= MIN_DURATION_SEC:
                     if active_mode_on_stop == "dictation":
-                        # Final processing was handled by on_message with is_final
-                        # handle_final_dictation(final_dictation_text) # If we need separate final call
-                        pass 
+                        # Final source text is already in final_source_text (built by on_message)
+                        # Check if translation is needed
+                        if TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE and final_source_text:
+                            logging.info("Dictation finished, initiating translation...")
+                            # Create the translation task, but don't await it here
+                            # to allow state reset to happen quickly.
+                            translation_task = asyncio.create_task(
+                                translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE)
+                            )
+                        else:
+                            logging.info("Dictation finished. No translation needed (target lang same or none, or no text).")
+                            # Ensure the trailing space added by handle_dictation_final is kept if no translation
+                            # (It should already be typed)
+
                     elif active_mode_on_stop == "command":
                         execute_command(current_command_transcript)
                 else:
                     logging.info(f"Transcription duration ({duration:.2f}s) less than minimum ({MIN_DURATION_SEC}s), discarding.")
+                    # Clear history/text even if discarded
+                    if active_mode_on_stop == "dictation":
+                        typed_word_history.clear()
+                        final_source_text = ""
 
-                # 4. Reset state
+
+                # 4. Reset state (happens *before* awaiting translation)
                 current_mode = None
                 current_command_transcript = ""
-                last_simulated_text = "" # Reset dictation tracking
-                
+                # Don't reset final_source_text here if translation is pending
+                # typed_word_history is reset at the *start* of the next dictation
+
+                # 5. Await translation task if it was created
+                if translation_task:
+                    try:
+                        logging.debug("Waiting for translation task to complete...")
+                        await translation_task
+                        logging.debug("Translation task finished.")
+                    except Exception as e:
+                        logging.error(f"Error occurred during await of translation task: {e}", exc_info=True)
+
+
             # --- Check for Config Reload Event from Systray ---
             if systray_ui.config_reload_event.is_set():
                 logging.info("Detected config reload request from systray.")
-                old_language = SELECTED_LANGUAGE # Store language before reload
-                logging.debug(f"Language before reload: {old_language}")
+                old_source_language = SELECTED_LANGUAGE # Store language before reload
+                old_target_language = TARGET_LANGUAGE
+                logging.debug(f"Lang before reload: Source={old_source_language}, Target={old_target_language}")
+
                 config = load_config() # Reload the config dictionary
                 apply_config(config)  # Apply the new config to global vars
-                logging.debug(f"Language after applying new config: {SELECTED_LANGUAGE}")
+                logging.debug(f"Lang after applying new config: Source={SELECTED_LANGUAGE}, Target={TARGET_LANGUAGE}")
 
-                # Check if language changed and connection is active
-                language_changed = (SELECTED_LANGUAGE != old_language)
-                restart_dg_needed = (dg_connection is not None and language_changed)
+                # Check if source language changed and connection is active
+                source_language_changed = (SELECTED_LANGUAGE != old_source_language)
+                restart_dg_needed = (dg_connection is not None and source_language_changed)
 
                 # Notify UI components that need updating
                 if tooltip_mgr:
@@ -1140,9 +1280,9 @@ async def main():
                 systray_ui.config_reload_event.clear() # Clear the event AFTER processing
                 logging.debug("Config reload event cleared.")
 
-                # Restart Deepgram connection if language changed mid-session
+                # Restart Deepgram connection if source language changed mid-session
                 if restart_dg_needed:
-                    logging.info("Language changed mid-session, restarting Deepgram connection.")
+                    logging.info("Source language changed mid-session, restarting Deepgram connection.")
                     # Reset state and restart
                     is_dictation_active.clear()
                     is_command_active.clear()
@@ -1150,7 +1290,7 @@ async def main():
                     current_mode = None
                     dg_connection = None
                     microphone = None
-                    # --- Hide Status Indicator on restart ---
+                    # Hide Status Indicator on restart
                     try: status_queue.put_nowait(("state", {"state": "hidden"}))
                     except queue.Full: pass
 
@@ -1163,7 +1303,7 @@ async def main():
                  break
             # Audio monitor thread only runs when active, so no check here
 
-            await asyncio.sleep(0.05) # Slightly shorter sleep for potentially faster UI updates
+            await asyncio.sleep(0.05)
 
     except (asyncio.CancelledError, KeyboardInterrupt):
         logging.info("Main task cancelled or interrupted.")

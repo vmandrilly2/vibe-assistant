@@ -13,7 +13,9 @@ CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
   "general": {
     "min_duration_sec": 0.5,
-    "selected_language": "en-US"
+    "selected_language": "en-US",
+    "target_language": None, # Default: No translation
+    "openai_model": "gpt-4.1-nano" # Default model
   },
   "triggers": {
     "dictation_button": "middle",
@@ -63,15 +65,18 @@ exit_app_event = None # Placeholder for the event from main app
 BUTTON_OPTIONS = ["left", "right", "middle", "x1", "x2"]
 COMMAND_BUTTON_OPTIONS = BUTTON_OPTIONS + [None] # Add None option for command button
 MODIFIER_OPTIONS = ["shift", "ctrl", "alt", None] # Add None option for modifier
-LANGUAGE_OPTIONS = {
+# --- Language options now include "None" for target ---
+TARGET_LANGUAGE_OPTIONS = { # Use a separate dict to include None easily
+    None: "None (Dictation Only)",
     "en-US": "English (US)",
-    "en-GB": "English (UK)",
     "fr-FR": "French",
     "es-ES": "Spanish",
     "de-DE": "German",
     "zh": "Chinese (Mandarin)",
     # Add more languages as needed (ensure Deepgram supports them)
 }
+# Source languages don't need "None"
+SOURCE_LANGUAGE_OPTIONS = {k: v for k, v in TARGET_LANGUAGE_OPTIONS.items() if k is not None}
 
 # --- Helper Functions ---
 def create_image(width, height, color1, color2):
@@ -107,6 +112,7 @@ def update_general_setting_callback(icon, item, setting_key, value):
         config["general"] = {}
     config["general"][setting_key] = value
     save_config()
+    # No need to rebuild menu here, checked state handles visual update
 
 # --- Menu Callback Functions ---
 def on_exit_clicked(icon, item):
@@ -144,28 +150,47 @@ def update_trigger_setting_callback(icon, item, setting_key, value):
 
 # --- Functions to build the menu dynamically ---
 def build_general_menu():
-    # --- Language Submenu ---
-    current_lang = config.get("general", {}).get("selected_language", "en-US")
-    lang_items = []
-    for code, name in LANGUAGE_OPTIONS.items():
-        lang_items.append(
+    # --- Source Language Submenu ---
+    current_source_lang = config.get("general", {}).get("selected_language", "en-US")
+    source_lang_items = []
+    for code, name in SOURCE_LANGUAGE_OPTIONS.items(): # Use SOURCE_LANGUAGE_OPTIONS
+        source_lang_items.append(
             item(
-                name, # Display friendly name
+                name,
                 partial(update_general_setting_callback, setting_key='selected_language', value=code),
                 checked=lambda item, c=code: config.get("general", {}).get("selected_language") == c,
                 radio=True
             )
         )
-    lang_submenu = menu(*lang_items)
+    source_lang_submenu = menu(*source_lang_items)
 
-    # --- Min Duration (Example: Display only for now) ---
+    # --- Target Language Submenu ---
+    current_target_lang = config.get("general", {}).get("target_language") # Can be None
+    target_lang_items = []
+    for code, name in TARGET_LANGUAGE_OPTIONS.items(): # Use TARGET_LANGUAGE_OPTIONS
+        target_lang_items.append(
+            item(
+                name,
+                partial(update_general_setting_callback, setting_key='target_language', value=code),
+                checked=lambda item, c=code: config.get("general", {}).get("target_language") == c,
+                radio=True
+            )
+        )
+    target_lang_submenu = menu(*target_lang_items)
+
+    # --- Min Duration (Display only) ---
     min_dur = config.get("general", {}).get("min_duration_sec", "N/A")
-    # TODO: Add action to change min_duration (would likely need a text input dialog)
     min_dur_item = item(f'Min Duration (s): {min_dur}', None, enabled=False)
 
+    # --- OpenAI Model (Display only for now) ---
+    openai_model = config.get("general", {}).get("openai_model", "N/A")
+    model_item = item(f'Translation Model: {openai_model}', None, enabled=False) # TODO: Make configurable later?
+
     return [
-        item('Language', lang_submenu),
-        min_dur_item
+        item('Source Language', source_lang_submenu),
+        item('Target Language', target_lang_submenu), # Add Target Language submenu
+        min_dur_item,
+        model_item # Display the model being used
     ]
 
 def build_triggers_menu():

@@ -30,6 +30,8 @@ This file acts as both the project blueprint and a task manager. It outlines the
 *   [x] **`general`**:
     *   [x] `min_duration_sec`: (Float) Minimum recording duration (Default: 0.5).
     *   [x] `selected_language`: (String) SR language code (Default: "en-US").
+    *   [x] `target_language`: (String or `null`) Target language for optional translation after dictation (Default: `null`). If `null` or same as `selected_language`, translation is disabled.
+    *   [x] `openai_model`: (String) OpenAI model used for translation (Default: "gpt-4o-mini").
 *   [x] **`triggers`**:
     *   [x] `dictation_button`: (String) Mouse button for dictation ("left", "right", "middle", "x1", "x2") (Default: "middle").
     *   [x] `command_button`: (String) Mouse button for command (same options or `null`) (Default: `null`).
@@ -56,7 +58,9 @@ This file acts as both the project blueprint and a task manager. It outlines the
     *   [x] Create a systray icon (`pystray`).
     *   [x] Build a dynamic menu for configuration.
     *   [x] **General Settings:**
-        *   [x] Language selection submenu (dynamic options, checked state).
+        *   [x] Source Language selection submenu (dynamic options, checked state).
+        *   [x] Target Language selection submenu (dynamic options including "None", checked state).
+        *   [x] Display OpenAI Model (read-only for now).
         *   [ ] Min Duration setting (requires input mechanism).
     *   [x] **Trigger Settings:**
         *   [x] Dictation Button submenu (dynamic options, checked state).
@@ -85,24 +89,24 @@ This file acts as both the project blueprint and a task manager. It outlines the
     *   [x] Send buffered audio to Deepgram upon activation.
     *   [x] Continuously calculate RMS volume and send to status indicator queue.
 
-### Mode 1: Dictation
+### Mode 1: Dictation (with Optional Translation)
 
 *   [x] **Activation:** Hold Dictation trigger (`triggers.dictation_button` from config).
-*   [x] **Visual Feedback:** Show text tooltip and status icon on activation.
-*   [x] **Recording & Streaming:** Stream audio to Deepgram using the selected language (`general.selected_language`).
-*   [x] **Real-time Interim Feedback:** Display interim results in the tooltip.
-*   [x] **Real-time Typing Simulation (Final):** Type final results at the cursor (`pynput`).
+*   [x] **Visual Feedback:** Show text tooltip (source language) and status icon on activation.
+*   [x] **Recording & Streaming:** Stream audio to Deepgram using the selected source language (`general.selected_language`).
+*   [x] **Real-time Interim Feedback:** Display interim results (source language) in the tooltip.
+*   [x] **Real-time Typing Simulation (Final Source):** Type final results (source language) at the cursor (`pynput`), handling corrections.
 *   [x] **Correction Handling:** Handle Deepgram's real-time corrections via backspace simulation based on word history.
     *   [x] Implement `handle_dictation_final` logic comparing history and new transcript.
     *   [x] Implement special "back" word handling.
 *   [x] **Completion:** Release Dictation trigger.
 *   [x] **Cleanup:** Hide text tooltip and status icon on completion.
-*   [ ] **Optional AI Correction:** Implement post-processing step with AI review.
-    *   [ ] Add configuration flag to enable/disable.
-    *   [ ] Send final text to AI.
-    *   [ ] Implement UI/mechanism for user to accept/reject AI corrections.
-    *   [ ] Update text at cursor based on user decision.
-*   [x] **Filtering:** Discard transcription if duration < `general.min_duration_sec`.
+*   [x] **Optional Translation (Post-Dictation):**
+    *   [x] Check if `general.target_language` is set and different from `general.selected_language`.
+    *   [x] If true, send the final *source* text (after corrections) to OpenAI (`general.openai_model`).
+    *   [x] Type the translated text after the source text (e.g., preceded by " -> ").
+*   [ ] **Optional AI Correction (Source Text):** Implement post-processing step with AI review *before* translation. (Future enhancement)
+*   [x] **Filtering:** Discard transcription *and translation* if duration < `general.min_duration_sec`.
 
 ### Mode 2: Command (Partially Implemented)
 

@@ -724,13 +724,14 @@ async def on_unhandled(self, unhandled, **kwargs):
 
 # --- Pynput Listener Callbacks ---
 def on_click(x, y, button, pressed):
+    # --- Make sure status_mgr is accessible ---
     global current_mode, start_time, status_queue, ui_interaction_cancelled
     global is_dictation_active, is_command_active
     global transcription_active_event
     global typed_word_history, final_source_text
     global SELECTED_LANGUAGE, TARGET_LANGUAGE
-    # --- Access the new global ---
     global initial_activation_pos
+    global status_mgr # Ensure status_mgr is accessible
 
     trigger_mode = None
     active_event = None
@@ -742,16 +743,15 @@ def on_click(x, y, button, pressed):
         is_command_modifier_pressed = (COMMAND_MODIFIER_KEY is not None and COMMAND_MODIFIER_KEY in modifier_keys_pressed)
         if not is_command_modifier_pressed:
             trigger_mode = "dictation"; active_event = is_dictation_active
-        else: return # Ignore if modifier pressed
-
+        else: return
     elif COMMAND_TRIGGER_BUTTON is not None and button == COMMAND_TRIGGER_BUTTON:
         modifier_ok = (COMMAND_MODIFIER_KEY is None or COMMAND_MODIFIER_KEY in modifier_keys_pressed)
         if modifier_ok:
             trigger_mode = "command"; active_event = is_command_active
             required_modifier = COMMAND_MODIFIER_KEY; modifier_str = COMMAND_MODIFIER_KEY_STR
-        else: return # Ignore if modifier not pressed
+        else: return
     else:
-        return # Ignore other buttons
+        return
 
     if trigger_mode:
         if pressed:
@@ -760,40 +760,59 @@ def on_click(x, y, button, pressed):
             if not transcription_active_event.is_set():
                 mod_log_str = f" with {modifier_str} " if required_modifier else ""
                 logging.info(f"{trigger_mode.capitalize()} button pressed{mod_log_str}- starting mode.")
-                # Clear state...
                 is_dictation_active.clear(); is_command_active.clear()
                 if trigger_mode == "dictation": typed_word_history.clear(); final_source_text = ""
                 elif trigger_mode == "command": global current_command_transcript; current_command_transcript = ""
-                # Set events...
                 active_event.set(); transcription_active_event.set()
                 current_mode = trigger_mode
                 start_time = time.time()
-                # --- Store initial position ---
                 initial_activation_pos = (x, y)
                 logging.debug(f"Stored initial activation position: {initial_activation_pos}")
-
-                # Show Status Indicator using the STORED initial position
                 try:
-                    status_data = {
-                        "state": "active",
-                        # --- Send the stored initial position ---
-                        "pos": initial_activation_pos,
-                        "source_lang": SELECTED_LANGUAGE,
-                        "target_lang": TARGET_LANGUAGE
-                    }
+                    status_data = {"state": "active", "pos": initial_activation_pos,
+                                   "source_lang": SELECTED_LANGUAGE, "target_lang": TARGET_LANGUAGE}
                     status_queue.put_nowait(("state", status_data))
                 except queue.Full: logging.warning("Status queue full showing indicator.")
                 except Exception as e: logging.error(f"Error sending initial state to status indicator: {e}")
             else: logging.warning(f"Attempted start {trigger_mode} while already active.")
         else: # Button released
-            if active_event and active_event.is_set():
-                # --- FIX: Remove 'self' check, check 'start_time' directly ---
+            # --- Check for Hover Selection FIRST ---
+            hover_lang_type = None
+            hover_lang_code = None
+            # Check if status_mgr exists and has the hover attributes
+            if status_mgr and hasattr(status_mgr, 'hovering_over_lang_type') and hasattr(status_mgr, 'hovering_over_lang_code'):
+                hover_lang_type = status_mgr.hovering_over_lang_type
+                hover_lang_code = status_mgr.hovering_over_lang_code
+
+            if hover_lang_type and hover_lang_code is not None: # Check if hover was active
+                logging.info(f"Trigger release over language option: Type={hover_lang_type}, Code={hover_lang_code}. Selecting language.")
+                # Send action to main thread via the action queue
+                try:
+                    ui_action_queue.put_nowait(("select_language", {"type": hover_lang_type, "lang": hover_lang_code}))
+                except queue.Full:
+                    logging.warning(f"Action queue full sending hover language selection ({hover_lang_type}={hover_lang_code}).")
+                
+                # Signal cancellation of normal dictation/command flow
+                ui_interaction_cancelled = True
+                logging.debug("Set ui_interaction_cancelled flag due to hover selection.")
+
+                # Explicitly hide indicator and clear events (as normal flow is skipped)
+                try: status_queue.put_nowait(("state", {"state": "hidden", "source_lang": "", "target_lang": ""}))
+                except queue.Full: pass
+                if active_event: active_event.clear()
+                transcription_active_event.clear()
+                current_mode = None # Prevent stop flow from running
+                initial_activation_pos = None # Clear initial pos
+
+                # We return here because the language selection handles UI updates implicitly
+                return
+
+            # --- If not selecting language via hover, proceed with normal release ---
+            elif active_event and active_event.is_set():
                 duration = time.time() - start_time if 'start_time' in globals() and start_time else 0
-                # --- END FIX ---
-                logging.info(f"{trigger_mode.capitalize()} button released (duration: {duration:.2f}s). Stopping mode (pending cancellation check).")
+                logging.info(f"{trigger_mode.capitalize()} button released (duration: {duration:.2f}s). Stopping mode normally.")
                 active_event.clear()
                 transcription_active_event.clear()
-                # --- Reset initial position on release ---
                 initial_activation_pos = None
 
 def on_press(key):
@@ -891,6 +910,7 @@ async def main():
     global ui_interaction_cancelled, config, SELECTED_LANGUAGE, TARGET_LANGUAGE
     # --- Ensure initial_activation_pos is accessible if needed, though mainly set/used in on_click ---
     global initial_activation_pos
+    global status_mgr # Ensure it's global
 
     logging.info("Starting Vibe App...")
     # --- Initialize Systray ---

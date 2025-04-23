@@ -1,8 +1,8 @@
 {
   "general": {
     "min_duration_sec": 0.5,
-    "selected_language": "fr-FR",
-    "target_language": "en-US",
+    "selected_language": "en-US",
+    "target_language": "fr-FR",
     "openai_model": "gpt-4.1-nano"
   },
   "triggers": {

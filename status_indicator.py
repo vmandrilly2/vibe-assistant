@@ -29,6 +29,12 @@ class StatusIndicatorManager:
         # --- Popups ---
         self.source_popup = None
         self.target_popup = None
+        # --- Store labels within popups ---
+        self.source_popup_labels = {} # {lang_code: label_widget}
+        self.target_popup_labels = {} # {lang_code: label_widget}
+        # --- Track currently hovered lang code ---
+        self.hovering_over_lang_type = None # 'source' or 'target'
+        self.hovering_over_lang_code = None # The actual code (e.g., 'en-US')
 
         # Icon drawing properties
         self.icon_base_width = 24 # Original icon width
@@ -182,31 +188,44 @@ class StatusIndicatorManager:
             self.current_state = target_state # Now update the instance state
 
         # --- Apply Changes and Redraw ---
-        # Redraw if flag is set OR if the state actually changed this cycle
         if (needs_redraw or state_actually_changed) and self.root and not self._stop_event.is_set():
-            # --- Position window FIRST if needed ---
-            # This ensures geometry is set before drawing/deiconifying
             if position_needs_update and self.initial_pos:
                 self._position_window(self.initial_pos)
-            
-            # --- Draw based on the NEW current_state ---
             self._draw_icon()
-
-            # --- Show or Hide ---
             if self.current_state == "hidden":
                 self.root.withdraw()
             else:
-                # Ensure it's visible if not hidden (covers activation case)
                 self.root.deiconify()
 
-        # --- Check Popups (Based on updated last_hover_pos) ---
-        # Only check if the indicator should be visible
+        # --- Check Popups and Hovered Label (Based on updated last_hover_pos) ---
+        self.hovering_over_lang_type = None # Reset hover state each cycle
+        self.hovering_over_lang_code = None
         if self.root and not self._stop_event.is_set() and self.current_state != "hidden":
             try:
-                # Create popups if needed
-                self._check_hover_and_update_popups(self.last_hover_pos[0], self.last_hover_pos[1])
-                # Destroy popups if needed
-                self._check_and_destroy_popups(self.last_hover_pos[0], self.last_hover_pos[1])
+                mx, my = self.last_hover_pos
+                # --- Check and Create Popups ---
+                self._check_hover_and_update_popups(mx, my) # Creates popups if needed
+
+                # --- Check if Hovering Over Specific Label ---
+                if self.source_popup and self._is_point_over_popup(mx, my, self.source_popup):
+                    for code, label in self.source_popup_labels.items():
+                        if self._is_point_over_widget(mx, my, label):
+                            self.hovering_over_lang_type = "source"
+                            self.hovering_over_lang_code = code
+                            # logging.debug(f"Hovering over source label: {code}") # Optional log
+                            break # Found hover, no need to check others in this popup
+                # Check target popup only if not hovering source label
+                if self.target_popup and not self.hovering_over_lang_code and self._is_point_over_popup(mx, my, self.target_popup):
+                     for code, label in self.target_popup_labels.items():
+                         if self._is_point_over_widget(mx, my, label):
+                             self.hovering_over_lang_type = "target"
+                             self.hovering_over_lang_code = code
+                             # logging.debug(f"Hovering over target label: {code}") # Optional log
+                             break
+
+                # --- Check and Destroy Popups if mouse moved away ---
+                self._check_and_destroy_popups(mx, my)
+
             except tk.TclError: pass
             except Exception as e: logging.error(f"Error during hover/popup check: {e}", exc_info=True)
 
@@ -216,7 +235,6 @@ class StatusIndicatorManager:
              except tk.TclError: logging.warning("StatusIndicator root destroyed before rescheduling.")
              except Exception as e: logging.error(f"Error rescheduling StatusIndicator check: {e}")
 
-    # --- ADDED HELPER for clarity ---
     def _check_and_destroy_popups(self, mouse_x, mouse_y):
         """Checks if mouse is away from popups or their areas and destroys them."""
         if not (self.source_popup or self.target_popup): return # Skip if no popups exist
@@ -315,8 +333,7 @@ class StatusIndicatorManager:
     def _create_lang_popup(self, lang_type):
         """Creates and displays the language selection popup directly above the corresponding text area."""
         other_type = "target" if lang_type == "source" else "source"
-        self._destroy_lang_popup(other_type)
-        self._destroy_lang_popup(lang_type)
+        self._destroy_lang_popup(other_type); self._destroy_lang_popup(lang_type)
 
         if not self.root or not self.canvas or self._stop_event.is_set() or not self.root.winfo_exists():
             return
@@ -337,6 +354,8 @@ class StatusIndicatorManager:
         popup.overrideredirect(True); popup.wm_attributes("-topmost", True)
         popup.config(bg=self.popup_bg, relief=tk.SOLID, borderwidth=1)
 
+        # --- Store labels for hover check ---
+        current_popup_labels = {}
         lang_dict = self.pref_src_langs if lang_type == "source" else self.pref_tgt_langs
         for lang_code, lang_name in lang_dict.items():
             display_name = lang_name if lang_code is not None else "None"
@@ -344,77 +363,59 @@ class StatusIndicatorManager:
             label.pack(fill=tk.X)
             label.bind("<Enter>", partial(self._on_popup_label_enter, label=label))
             label.bind("<Leave>", partial(self._on_popup_label_leave, label=label))
+            # --- Keep the regular ButtonRelease binding too ---
             label.bind("<ButtonRelease-1>", partial(self._on_popup_label_release, lang_type=lang_type, lang_code=lang_code))
+            # Store label reference
+            current_popup_labels[lang_code] = label
 
+        # Assign to instance variable after loop
+        if lang_type == "source":
+             self.source_popup_labels = current_popup_labels
+        else:
+             self.target_popup_labels = current_popup_labels
+
+        # --- Positioning Logic (unchanged) ---
         try:
-            popup.update_idletasks() # Calculate popup size needed first
-            self.canvas.update_idletasks() # Ensure canvas size/pos is current
-
-            canvas_x = self.canvas.winfo_rootx()
-            canvas_y = self.canvas.winfo_rooty()
-            logging.debug(f"Popup '{lang_type}': Canvas root coords: ({canvas_x}, {canvas_y})") # Keep
-
-            # Calculate absolute screen coordinates for the language area bbox
-            # bbox_rel = (x0, y0, x1, y1) relative to canvas
-            bbox_abs_x0 = canvas_x + bbox_rel[0]
-            bbox_abs_y0 = canvas_y + bbox_rel[1]
-            bbox_abs_x1 = canvas_x + bbox_rel[2]
-            bbox_abs_y1 = canvas_y + bbox_rel[3]
-            logging.debug(f"Popup '{lang_type}': Absolute bbox for tag '{tag_name}': ({bbox_abs_x0}, {bbox_abs_y0}, {bbox_abs_x1}, {bbox_abs_y1})") # Keep
-
-            popup_height = popup.winfo_reqheight()
-            popup_width = popup.winfo_reqwidth()
-            logging.debug(f"Popup '{lang_type}': Required size: {popup_width}x{popup_height}") # Keep
-
-            # --- Calculate position ABOVE the text area ---
-            popup_x = bbox_abs_x0 # Align left edge with the language area's left edge
-            popup_y = bbox_abs_y0 - popup_height - 2 # Position above the top edge with a small gap
-            logging.debug(f"Popup '{lang_type}': Calculated initial coords: ({popup_x}, {popup_y})") # Keep
-
-            # --- Screen Bounds Check (Simplified) ---
-            screen_width = self.root.winfo_screenwidth()
-            screen_height = self.root.winfo_screenheight()
+            popup.update_idletasks(); self.canvas.update_idletasks()
+            canvas_x = self.canvas.winfo_rootx(); canvas_y = self.canvas.winfo_rooty()
+            # logging.debug(f"Popup '{lang_type}': Canvas root coords: ({canvas_x}, {canvas_y})")
+            bbox_abs_x0 = canvas_x + bbox_rel[0]; bbox_abs_y0 = canvas_y + bbox_rel[1]
+            bbox_abs_x1 = canvas_x + bbox_rel[2]; bbox_abs_y1 = canvas_y + bbox_rel[3]
+            # logging.debug(f"Popup '{lang_type}': Absolute bbox for tag '{tag_name}': ({bbox_abs_x0}, {bbox_abs_y0}, {bbox_abs_x1}, {bbox_abs_y1})")
+            popup_height = popup.winfo_reqheight(); popup_width = popup.winfo_reqwidth()
+            # logging.debug(f"Popup '{lang_type}': Required size: {popup_width}x{popup_height}")
+            popup_x = bbox_abs_x0; popup_y = bbox_abs_y0 - popup_height - 2
+            # logging.debug(f"Popup '{lang_type}': Calculated initial coords: ({popup_x}, {popup_y})")
+            screen_width = self.root.winfo_screenwidth(); screen_height = self.root.winfo_screenheight()
             adjusted = False
-
-            # Adjust X if needed
             if popup_x < 0: popup_x = 0; adjusted = True
             if popup_x + popup_width > screen_width: popup_x = screen_width - popup_width; adjusted = True
-
-            # Adjust Y: Prioritize placing above. If it goes off top, place below.
             if popup_y < 0:
-                popup_y = bbox_abs_y1 + 2 # Place below bottom edge
-                adjusted = True
-                # If placing below STILL goes off screen, move it up just enough to fit
-                if popup_y + popup_height > screen_height:
-                    popup_y = screen_height - popup_height
-                    adjusted = True # Indicate further adjustment
-
-            # (No need to check if original 'above' position went off bottom,
-            #  as the 'below' check handles cases where 'above' wasn't feasible anyway)
-
-            if adjusted:
-                logging.debug(f"Popup '{lang_type}': Adjusted coords for screen bounds: ({popup_x}, {popup_y})")
-
+                popup_y = bbox_abs_y1 + 2; adjusted = True
+                if popup_y + popup_height > screen_height: popup_y = screen_height - popup_height; adjusted = True
+            # if adjusted: logging.debug(f"Popup '{lang_type}': Adjusted coords: ({popup_x}, {popup_y})")
             popup.geometry(f"+{popup_x}+{popup_y}")
-            logging.info(f"Popup for {lang_type} positioned at +{popup_x}+{popup_y}") # Use INFO for final position
+            # logging.info(f"Popup for {lang_type} positioned at +{popup_x}+{popup_y}")
 
         except tk.TclError as e:
             logging.warning(f"Could not get geometry for precise popup positioning: {e}.")
             try: popup.destroy(); return
             except: pass
 
-        # Store reference
+        # Store popup reference
         if lang_type == "source": self.source_popup = popup
         else: self.target_popup = popup
-        # logging.debug(f"Popup created for {lang_type}") # Keep less noisy
+        # logging.debug(f"Popup created for {lang_type}")
 
     def _destroy_lang_popup(self, lang_type):
         """Destroys the specified language popup if it exists."""
         popup = None
         if lang_type == "source" and self.source_popup:
             popup = self.source_popup; self.source_popup = None
+            self.source_popup_labels.clear() # Clear label dict
         elif lang_type == "target" and self.target_popup:
             popup = self.target_popup; self.target_popup = None
+            self.target_popup_labels.clear() # Clear label dict
         if popup:
             try:
                 if self.root and self.root.winfo_exists(): popup.destroy()#; logging.debug(f"Popup destroyed for {lang_type}")
@@ -517,4 +518,24 @@ class StatusIndicatorManager:
 
         # Destroy BOTH popups immediately after selection
         self._destroy_lang_popup("source")
-        self._destroy_lang_popup("target") 
+        self._destroy_lang_popup("target")
+
+    # --- NEW HELPER: Check if point is over a specific widget ---
+    def _is_point_over_widget(self, point_x, point_y, widget):
+        """Checks if screen coordinates (point_x, point_y) are over the given widget."""
+        if not widget or not widget.winfo_exists():
+             return False
+        try:
+            widget_x = widget.winfo_rootx()
+            widget_y = widget.winfo_rooty()
+            widget_width = widget.winfo_width()
+            widget_height = widget.winfo_height()
+
+            return (widget_x <= point_x < widget_x + widget_width and
+                    widget_y <= point_y < widget_y + widget_height)
+        except tk.TclError:
+             # logging.debug("TclError checking widget hover (transient?)")
+             return False
+        except Exception as e:
+             logging.error(f"Error checking hover for widget: {e}", exc_info=True)
+             return False 

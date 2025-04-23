@@ -499,12 +499,11 @@ class StatusIndicatorManager:
             while not self.queue.empty():
                 command, data = self.queue.get_nowait()
                 if command == "volume":
-                    if self.current_state == "active":
-                        new_volume = data
-                        # Only redraw if volume changed significantly
-                        if abs(new_volume - self.current_volume) > 0.02:
-                             self.current_volume = new_volume
-                             needs_redraw = True
+                    new_volume = data
+                    # Only redraw if volume changed significantly
+                    if abs(new_volume - self.current_volume) > 0.02:
+                         self.current_volume = new_volume
+                         needs_redraw = True
                 elif command == "state":
                     target_state = data.get("state", "hidden")
                     pos = data.get("pos", self.last_pos)

@@ -1122,11 +1122,11 @@ def on_press(key):
     global modifier_keys_pressed, status_queue
     global is_command_active, transcription_active_event
     global modifier_log_buffer, modifier_log_last_time
-    # Track modifier key presses
+    # Only log the first press (not repeats)
     if key in PYNPUT_MODIFIER_MAP.values() and key is not None:
-        modifier_log_buffer.append(f"[{key} pressed]")
-        # Do NOT flush here; let the main loop handle it
-        modifier_keys_pressed.add(key)
+        if key not in modifier_keys_pressed:
+            modifier_log_buffer.append(f"[{key} pressed]")
+            modifier_keys_pressed.add(key)
 
     try:
         # --- Handle Esc during Command mode ---
@@ -1166,9 +1166,9 @@ def on_release(key):
     global modifier_keys_pressed, status_queue
     global is_command_active, transcription_active_event
     global modifier_log_buffer, modifier_log_last_time
+    # Only log the release if the key was pressed
     if key in modifier_keys_pressed:
         modifier_log_buffer.append(f"[{key} released]")
-        # Do NOT flush here; let the main loop handle it
         modifier_keys_pressed.discard(key)
 
     # If the command modifier key is released while command mode is active

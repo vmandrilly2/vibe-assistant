@@ -1116,6 +1116,12 @@ def on_click(x, y, button, pressed):
         # Always clear the event to signal the main loop stop flow
         transcription_active_event.clear()
         initial_activation_pos = None
+        # --- Explicitly hide the UI on any release ---
+        try:
+            status_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}
+            status_queue.put_nowait(("state", status_data))
+        except Exception as e:
+            logging.warning(f"Failed to send UI hide message on button release: {e}")
 
 
 def on_press(key):

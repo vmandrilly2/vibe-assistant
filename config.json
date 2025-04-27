@@ -1,10 +1,18 @@
 {
   "general": {
     "min_duration_sec": 0.5,
-    "selected_language": "fr-FR",
-    "target_language": "fr-FR",
+    "selected_language": "zh",
+    "target_language": null,
     "openai_model": "gpt-4.1-nano",
-    "active_mode": "Dictation"
+    "active_mode": "Dictation",
+    "recent_source_languages": [
+      "zh",
+      "en-US",
+      "fr-FR"
+    ],
+    "recent_target_languages": [
+      null
+    ]
   },
   "triggers": {
     "dictation_button": "middle",

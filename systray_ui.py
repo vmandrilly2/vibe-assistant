@@ -15,7 +15,10 @@ DEFAULT_CONFIG = {
     "min_duration_sec": 0.5,
     "selected_language": "en-US",
     "target_language": None, # Default: No translation
-    "openai_model": "gpt-4.1-nano" # Default model
+    "openai_model": "gpt-4.1-nano", # Default model
+    "active_mode": "Dictation", # Added default active mode
+    "recent_source_languages": [], # Added for tracking
+    "recent_target_languages": []  # Added for tracking
   },
   "triggers": {
     "dictation_button": "middle",
@@ -47,7 +50,24 @@ def load_config():
             with open(CONFIG_FILE, 'r') as f:
                 loaded_config = json.load(f)
                 logging.info(f"Loaded configuration from {CONFIG_FILE} for systray.")
-                # TODO: Add validation/merging with defaults
+                # --- Merge with defaults for missing keys/sections (similar to vibe_app.py) --- >
+                for section, defaults in DEFAULT_CONFIG.items():
+                    if section not in loaded_config:
+                        loaded_config[section] = defaults
+                        logging.debug(f"Systray added missing section: {section}")
+                    elif isinstance(defaults, dict):
+                        for key, default_value in defaults.items():
+                            if key not in loaded_config[section]:
+                                loaded_config[section][key] = default_value
+                                logging.debug(f"Systray added missing key: {section}.{key}")
+                # Ensure recent lists exist even if loading an old config
+                if "recent_source_languages" not in loaded_config.get("general", {}):
+                    loaded_config.setdefault("general", {})["recent_source_languages"] = []
+                    logging.debug("Systray added missing recent_source_languages")
+                if "recent_target_languages" not in loaded_config.get("general", {}):
+                     loaded_config.setdefault("general", {})["recent_target_languages"] = []
+                     logging.debug("Systray added missing recent_target_languages")
+
                 return loaded_config
         except (json.JSONDecodeError, IOError) as e:
             logging.error(f"Error reading/decoding {CONFIG_FILE}: {e}. Using default config.")
@@ -64,21 +84,22 @@ exit_app_event = None # Placeholder for the event from main app
 # --- Define Language Lists ---
 
 # Preferred languages for SOURCE menu
-PREFERRED_SOURCE_LANGUAGES = {
-    "en-US": "English (US)",
-    "fr-FR": "French",
-    # Add other frequently used SOURCE languages here
-}
+# --- REMOVED PREFERRED LISTS - Will be dynamic now ---
+# PREFERRED_SOURCE_LANGUAGES = {
+#     "en-US": "English (US)",
+#     "fr-FR": "French",
+#     # Add other frequently used SOURCE languages here
+# }
 
 # Preferred languages for TARGET menu (can include None)
-PREFERRED_TARGET_LANGUAGES = {
-    None: "Aucune (Dictée seulement)", # Keep None easily accessible
-    "en-US": "English (US)",
-    "fr-FR": "French",
-    "ko-KR": "Korean",
-    "ja-JP": "Japanese",
-    # Add other frequently used TARGET languages here
-}
+# PREFERRED_TARGET_LANGUAGES = {
+#     None: "Aucune (Dictée seulement)", # Keep None easily accessible
+#     "en-US": "English (US)",
+#     "fr-FR": "French",
+#     "ko-KR": "Korean",
+#     "ja-JP": "Japanese",
+#     # Add other frequently used TARGET languages here
+# }
 
 # Comprehensive list (ensure codes are valid for Deepgram/OpenAI)
 # Add more as needed, cross-reference with Deepgram/OpenAI documentation
@@ -103,17 +124,18 @@ ALL_LANGUAGES = {
 
 # Calculate 'Other' SOURCE languages dynamically
 # Sort alphabetically by language name for the 'Other' menu
-OTHER_SOURCE_LANGUAGES = {
-    k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
-    if k not in PREFERRED_SOURCE_LANGUAGES
-}
+# --- REMOVED OTHER LISTS - Will be calculated in build_menu ---
+# OTHER_SOURCE_LANGUAGES = {
+#     k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
+#     if k not in PREFERRED_SOURCE_LANGUAGES
+# }
 
 # Calculate 'Other' TARGET languages dynamically (excluding None and preferred ones)
 # Sort alphabetically by language name for the 'Other' menu
-OTHER_TARGET_LANGUAGES = {
-    k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
-    if k not in PREFERRED_TARGET_LANGUAGES # Exclude preferred targets (None is handled separately)
-}
+# OTHER_TARGET_LANGUAGES = {
+#     k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
+#     if k not in PREFERRED_TARGET_LANGUAGES # Exclude preferred targets (None is handled separately)
+# }
 
 
 # Define valid options for triggers (no change)
@@ -155,8 +177,30 @@ def update_general_setting_callback(icon, item, setting_key, value):
     if "general" not in config:
         config["general"] = {}
     config["general"][setting_key] = value
+
+    # --- Update Recent List when language is changed --- >
+    MAX_RECENT_LANGS = 10 # Max languages to store in recent list
+    if setting_key == 'selected_language':
+        recent_list_key = "recent_source_languages"
+        recent_list = config['general'].get(recent_list_key, [])
+        if value in recent_list: recent_list.remove(value)
+        recent_list.insert(0, value)
+        config['general'][recent_list_key] = recent_list[:MAX_RECENT_LANGS]
+        logging.debug(f"Systray updated recent source: {config['general'][recent_list_key]}")
+    elif setting_key == 'target_language':
+        recent_list_key = "recent_target_languages"
+        recent_list = config['general'].get(recent_list_key, [])
+        if value in recent_list: recent_list.remove(value)
+        recent_list.insert(0, value)
+        config['general'][recent_list_key] = recent_list[:MAX_RECENT_LANGS]
+        logging.debug(f"Systray updated recent target: {config['general'][recent_list_key]}")
+    # --- End Update Recent List ---
+
     save_config()
-    # No need to rebuild menu here, checked state handles visual update
+    # Need to rebuild menu here because the recent items have changed
+    # We cannot rely only on checked state as the items themselves change
+    icon.menu = build_menu()
+    icon.update_menu()
 
 # --- Menu Callback Functions ---
 def on_exit_clicked(icon, item):
@@ -194,70 +238,99 @@ def update_trigger_setting_callback(icon, item, setting_key, value):
 
 # --- Functions to build the menu dynamically ---
 def build_general_menu():
-    # --- Build "Other Languages" Submenus ---
-    # Submenu for OTHER SOURCE languages
-    other_source_submenu = menu(*[
-        item(
+    MAX_RECENT_DISPLAY = 3 # How many recent languages to show directly
+
+    general_cfg = config.get("general", {})
+    recent_source_codes = general_cfg.get("recent_source_languages", [])[:MAX_RECENT_DISPLAY]
+    recent_target_codes = general_cfg.get("recent_target_languages", [])[:MAX_RECENT_DISPLAY]
+
+    # --- Helper to create item with check --- >
+    def create_lang_item(lang_type, code):
+        setting_key = 'selected_language' if lang_type == 'source' else 'target_language'
+        name = ALL_LANGUAGES.get(code, f"Unknown ({code})")
+        return item(
             name,
-            partial(update_general_setting_callback, setting_key='selected_language', value=code),
-            checked=lambda item, c=code: config.get("general", {}).get("selected_language") == c,
+            partial(update_general_setting_callback, setting_key=setting_key, value=code),
+            checked=lambda item, c=code: general_cfg.get(setting_key) == c,
             radio=True
-        ) for code, name in OTHER_SOURCE_LANGUAGES.items() # Use OTHER_SOURCE_LANGUAGES
-    ])
+        )
 
-    # Submenu for OTHER TARGET languages
-    other_target_submenu = menu(*[
-        item(
-            name,
-            partial(update_general_setting_callback, setting_key='target_language', value=code),
-            checked=lambda item, c=code: config.get("general", {}).get("target_language") == c,
-            radio=True
-        ) for code, name in OTHER_TARGET_LANGUAGES.items() # Use OTHER_TARGET_LANGUAGES
-    ])
-
-
-    # --- Source Language Menu ---
+    # --- Source Language Menu --- >
     source_lang_items = []
-    # Add preferred SOURCE languages first
-    for code, name in PREFERRED_SOURCE_LANGUAGES.items(): # Use PREFERRED_SOURCE_LANGUAGES
-        source_lang_items.append(
+    # Add recent SOURCE languages first
+    for code in recent_source_codes:
+        source_lang_items.append(create_lang_item('source', code))
+
+    # Define 'Other' source languages
+    other_source_langs = {
+        k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
+        if k not in recent_source_codes # Exclude recent ones shown above
+    }
+
+    # Build 'Other' source submenu
+    if other_source_langs:
+        other_source_submenu = menu(*[
             item(
                 name,
                 partial(update_general_setting_callback, setting_key='selected_language', value=code),
-                checked=lambda item, c=code: config.get("general", {}).get("selected_language") == c,
+                checked=lambda item, c=code: general_cfg.get("selected_language") == c,
                 radio=True
-            )
-        )
-    # Add separator and 'Other' submenu if there are other source languages
-    if OTHER_SOURCE_LANGUAGES:
-        source_lang_items.append(menu.SEPARATOR)
+            ) for code, name in other_source_langs.items()
+        ])
+        if recent_source_codes: # Add separator only if recent items exist
+             source_lang_items.append(menu.SEPARATOR)
         source_lang_items.append(item('Autres langues', other_source_submenu))
+    elif not recent_source_codes:
+        # Fallback if no recent and no other (shouldn't happen with ALL_LANGUAGES)
+        source_lang_items.append(item("No languages available", None, enabled=False))
 
-    # --- Target Language Menu ---
+    # --- Target Language Menu --- >
     target_lang_items = []
-    # Add preferred TARGET languages (which includes None)
-    for code, name in PREFERRED_TARGET_LANGUAGES.items(): # Use PREFERRED_TARGET_LANGUAGES
-         target_lang_items.append(
-            item(
-                name, # Name already includes "Aucune..." for None
-                partial(update_general_setting_callback, setting_key='target_language', value=code),
-                # Adjust checked function slightly for None vs code comparison
-                checked=lambda item, c=code: config.get("general", {}).get("target_language") == c,
-                radio=True
-            )
+    # Always add "None" first
+    target_lang_items.append(
+        item(
+            "Aucune (Dictée seulement)", # Explicit name for None
+            partial(update_general_setting_callback, setting_key='target_language', value=None),
+            checked=lambda item: general_cfg.get("target_language") is None,
+            radio=True
         )
-    # Add separator and 'Other' submenu if there are other target languages
-    if OTHER_TARGET_LANGUAGES:
-        target_lang_items.append(menu.SEPARATOR)
+    )
+
+    # Add recent TARGET languages (excluding None if it was somehow added to recent list)
+    for code in recent_target_codes:
+        if code is not None:
+             target_lang_items.append(create_lang_item('target', code))
+
+    # Define 'Other' target languages
+    other_target_langs = {
+        k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
+        if k not in recent_target_codes # Exclude recent codes
+        # Note: `k is not None` check isn't strictly needed here as None isn't in ALL_LANGUAGES
+    }
+
+    # Build 'Other' target submenu
+    if other_target_langs:
+        other_target_submenu = menu(*[
+            item(
+                name,
+                partial(update_general_setting_callback, setting_key='target_language', value=code),
+                checked=lambda item, c=code: general_cfg.get("target_language") == c,
+                radio=True
+            ) for code, name in other_target_langs.items()
+        ])
+        if recent_target_codes or target_lang_items: # Add separator if None or recent items exist
+             target_lang_items.append(menu.SEPARATOR)
         target_lang_items.append(item('Autres langues', other_target_submenu))
+    elif len(target_lang_items) <= 1: # Only "None" is present
+        target_lang_items.append(item("No other languages", None, enabled=False))
 
 
-    # --- Min Duration (Display only) ---
-    min_dur = config.get("general", {}).get("min_duration_sec", "N/A")
+    # --- Min Duration (Display only) --- >
+    min_dur = general_cfg.get("min_duration_sec", "N/A")
     min_dur_item = item(f'Min Duration (s): {min_dur}', None, enabled=False)
 
-    # --- OpenAI Model (Display only for now) ---
-    openai_model = config.get("general", {}).get("openai_model", "N/A")
+    # --- OpenAI Model (Display only for now) --- >
+    openai_model = general_cfg.get("openai_model", "N/A")
     model_item = item(f'Translation Model: {openai_model}', None, enabled=False)
 
     return [

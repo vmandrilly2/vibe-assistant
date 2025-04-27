@@ -38,13 +38,16 @@ from deepgram import (
 
 # --- Configuration Loading ---
 CONFIG_FILE = "config.json"
+LOG_DIR = "logs" # Define log directory
 DEFAULT_CONFIG = {
   "general": {
     "min_duration_sec": 0.5,
     "selected_language": "en-US",
     "target_language": None,
     "openai_model": "gpt-4.1-nano",
-    "active_mode": "Dictation" # Add default active mode
+    "active_mode": "Dictation", # Added default active mode
+    "recent_source_languages": [], # Added for tracking
+    "recent_target_languages": []  # Added for tracking
   },
   "triggers": {
     "dictation_button": "middle",
@@ -210,9 +213,21 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 loaded_config = json.load(f)
-                # Basic validation/merging with defaults for missing keys could be added here
-                # For now, assume the structure is correct if the file loads
-                logging.info(f"Loaded configuration from {CONFIG_FILE}")
+                # --- Merge with defaults for missing keys/sections --- >
+                for section, defaults in DEFAULT_CONFIG.items():
+                    if section not in loaded_config:
+                        loaded_config[section] = defaults
+                    elif isinstance(defaults, dict):
+                        for key, default_value in defaults.items():
+                            if key not in loaded_config[section]:
+                                loaded_config[section][key] = default_value
+                # Ensure recent lists exist even if loading an old config
+                if "recent_source_languages" not in loaded_config.get("general", {}):
+                    loaded_config.setdefault("general", {})["recent_source_languages"] = []
+                if "recent_target_languages" not in loaded_config.get("general", {}):
+                     loaded_config.setdefault("general", {})["recent_target_languages"] = []
+
+                logging.info(f"Loaded and merged configuration from {CONFIG_FILE}")
                 return loaded_config
         except json.JSONDecodeError as e:
             logging.error(f"Error decoding {CONFIG_FILE}: {e}. Using default config.")
@@ -1079,14 +1094,13 @@ def on_click(x, y, button, pressed):
     else:
         # Only process release if a transcription was active
         if not transcription_active_event.is_set():
-             # logging.debug("Button released but no transcription active.") # Can be noisy
              return
 
         # Check hover state from status manager
         hover_mode = None
         hover_lang_type = None
         hover_lang_code = None
-        if status_mgr and hasattr(status_mgr, 'hovering_over_mode_name'): # Check attributes exist
+        if status_mgr and hasattr(status_mgr, 'hovering_over_mode_name'):
             hover_mode = status_mgr.hovering_over_mode_name
             hover_lang_type = status_mgr.hovering_over_lang_type
             hover_lang_code = status_mgr.hovering_over_lang_code
@@ -1096,32 +1110,38 @@ def on_click(x, y, button, pressed):
             logging.info(f"Trigger release over mode option: {hover_mode}. Selecting mode.")
             try: ui_action_queue.put_nowait(("select_mode", hover_mode))
             except queue.Full: logging.warning(f"Action queue full sending hover mode selection ({hover_mode}).")
-            ui_interaction_cancelled = True # Set flag for main loop to skip action
+            ui_interaction_cancelled = True # Signal cancellation of normal stop flow
             logging.debug("Set ui_interaction_cancelled flag due to mode hover selection.")
+            # --- Send selection confirmation to StatusIndicator for blink ---
+            try:
+                 selection_data = {"type": "mode", "value": hover_mode}
+                 status_queue.put_nowait(("selection_made", selection_data))
+            except queue.Full: logging.warning("Status queue full sending selection confirmation.")
+            # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
+            return # Exit callback early
 
         # --- Check for Language Selection SECOND ---
         elif hover_lang_type and hover_lang_code is not None:
             logging.info(f"Trigger release over language option: Type={hover_lang_type}, Code={hover_lang_code}. Selecting language.")
             try: ui_action_queue.put_nowait(("select_language", {"type": hover_lang_type, "lang": hover_lang_code}))
             except queue.Full: logging.warning(f"Action queue full sending hover language selection ({hover_lang_type}={hover_lang_code}).")
-            ui_interaction_cancelled = True # Set flag for main loop to skip action
+            ui_interaction_cancelled = True # Signal cancellation of normal stop flow
             logging.debug("Set ui_interaction_cancelled flag due to language hover selection.")
+            # --- Send selection confirmation to StatusIndicator for blink ---
+            try:
+                 selection_data = {"type": "language", "lang_type": hover_lang_type, "value": hover_lang_code}
+                 status_queue.put_nowait(("selection_made", selection_data))
+            except queue.Full: logging.warning("Status queue full sending selection confirmation.")
+            # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
+            return # Exit callback early
 
-        # --- Signal Transcription Stop ---
-        # This happens whether it was a hover-selection or a normal release.
-        # The main loop will decide whether to perform the action based on ui_interaction_cancelled.
+        # --- Signal Transcription Stop (Normal Release - No Hover Selection) ---
         duration = time.time() - start_time if 'start_time' in globals() and start_time else 0
-        if not ui_interaction_cancelled:
-             logging.info(f"Trigger button released (duration: {duration:.2f}s). Stopping mode {ACTIVE_MODE} normally.")
-        # Always clear the event to signal the main loop stop flow
+        logging.info(f"Trigger button released (duration: {duration:.2f}s). Stopping mode {ACTIVE_MODE} normally.")
+        # Clear the event to signal the main loop stop flow
         transcription_active_event.clear()
         initial_activation_pos = None
-        # --- Explicitly hide the UI on any release ---
-        try:
-            status_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}
-            status_queue.put_nowait(("state", status_data))
-        except Exception as e:
-            logging.warning(f"Failed to send UI hide message on button release: {e}")
+        # --- REMOVED explicit hide message sending - main loop handles this ---
 
 
 def on_press(key):
@@ -1226,9 +1246,12 @@ async def main():
     logging.info("Tooltip Manager started.")
 
     # --- Start Status Indicator Manager ---
+    # Pass the config, full language maps, and available modes
     status_mgr = StatusIndicatorManager(status_queue, ui_action_queue,
-                                        PREFERRED_SOURCE_LANGUAGES, PREFERRED_TARGET_LANGUAGES,
-                                        AVAILABLE_MODES) # Pass modes dict
+                                        config=config, # Pass the whole config dict
+                                        all_languages=ALL_LANGUAGES,
+                                        all_languages_target=ALL_LANGUAGES_TARGET,
+                                        available_modes=AVAILABLE_MODES)
     status_mgr.start()
     logging.info("Status Indicator Manager started.")
 
@@ -1283,27 +1306,36 @@ async def main():
                 if action_command == "select_language":
                     lang_type = action_data.get("type"); new_lang = action_data.get("lang")
                     config_key = "selected_language" if lang_type == "source" else "target_language"
+                    recent_list_key = "recent_source_languages" if lang_type == "source" else "recent_target_languages"
+
                     if "general" not in config: config["general"] = {}
-                    current_value = config["general"].get(config_key)
-                    if new_lang != current_value:
-                         config["general"][config_key] = new_lang
-                         logging.info(f"UI selected {lang_type} language: {new_lang}. Updating config.")
-                         save_config_local(config); apply_config(config)
-                         # Force redraw of status indicator only if idle
-                         if status_mgr and status_mgr.thread.is_alive() and not transcription_active_event.is_set():
-                              try: status_mgr.queue.put_nowait(("state", {"state": "idle", "mode": ACTIVE_MODE, "source_lang": SELECTED_LANGUAGE, "target_lang": TARGET_LANGUAGE}))
-                              except queue.Full: pass
-                elif action_command == "select_mode":
-                    new_mode = action_data
-                    if new_mode in AVAILABLE_MODES and new_mode != ACTIVE_MODE:
-                         if "general" not in config: config["general"] = {}
-                         config["general"]["active_mode"] = new_mode
-                         logging.info(f"UI selected mode: {new_mode}. Updating config.")
-                         save_config_local(config); apply_config(config)
-                         # Force redraw of status indicator only if idle
-                         if status_mgr and status_mgr.thread.is_alive() and not transcription_active_event.is_set():
-                              try: status_mgr.queue.put_nowait(("state", {"state": "idle", "mode": ACTIVE_MODE, "source_lang": SELECTED_LANGUAGE, "target_lang": TARGET_LANGUAGE}))
-                              except queue.Full: pass
+                    config["general"][config_key] = new_lang
+
+                    # --- Update Recent Language List --- >
+                    recent_list = config["general"].get(recent_list_key, [])
+                    # Remove if exists
+                    if new_lang in recent_list:
+                        recent_list.remove(new_lang)
+                    # Insert at beginning
+                    recent_list.insert(0, new_lang)
+                    # Keep only the last, say, 10 used (adjust as needed)
+                    MAX_RECENT_LANGS = 10
+                    config["general"][recent_list_key] = recent_list[:MAX_RECENT_LANGS]
+                    # --- End Update Recent Language List ---
+
+                    logging.info(f"UI selected {lang_type} language: {new_lang}. Updating config.")
+                    save_config_local(config); apply_config(config); ui_interaction_cancelled = True
+                    # No need to restart DG here, apply_config updates globals used by next activation
+
+                elif action_command == "select_mode": # Handle mode selection
+                    new_mode = action_data # Data is just the mode name string
+                    if "general" not in config: config["general"] = {}
+                    config["general"]["active_mode"] = new_mode
+                    logging.info(f"UI selected mode: {new_mode}. Updating config.")
+                    save_config_local(config)
+                    apply_config(config) # Apply changes (might affect status bar display)
+                    ui_interaction_cancelled = True # Cancel current action if any
+
             except queue.Empty: pass
             except Exception as e: logging.error(f"Error processing UI action queue: {e}", exc_info=True)
 
@@ -1457,10 +1489,6 @@ async def main():
                 old_source = SELECTED_LANGUAGE
                 config = load_config(); apply_config(config); tooltip_mgr.reload_config()
                 systray_ui.config_reload_event.clear()
-                # Force redraw if idle
-                if status_mgr and status_mgr.thread.is_alive() and not transcription_active_event.is_set():
-                    try: status_mgr.queue.put_nowait(("state", {"state": "idle", "mode": ACTIVE_MODE, "source_lang": SELECTED_LANGUAGE, "target_lang": TARGET_LANGUAGE}))
-                    except queue.Full: pass
                 # Restart DG if source language changed while active
                 if dg_connection and SELECTED_LANGUAGE != old_source:
                      logging.info("Source language changed while active, restarting DG...")
@@ -1532,6 +1560,26 @@ systray_ui.exit_app_event = threading.Event() # Create event in main module
 
 # --- Copy Preferred Languages (Temporary Solution) ---
 # Ideally, move these to a shared constants/config module later
+# --- ADD ALL_LANGUAGES definition --- >
+ALL_LANGUAGES = {
+    "en-US": "English (US)",
+    "en-GB": "English (UK)",
+    "fr-FR": "French",
+    "es-ES": "Spanish",
+    "de-DE": "German",
+    "it-IT": "Italian",
+    "pt-PT": "Portuguese",
+    "pt-BR": "Portuguese (Brazil)",
+    "ru-RU": "Russian",
+    "zh": "Chinese (Mandarin)",
+    "ko-KR": "Korean",
+    "ja-JP": "Japanese",
+    "hi-IN": "Hindi",
+    "ar": "Arabic",
+    "nl-NL": "Dutch",
+    # Add more as needed
+}
+
 PREFERRED_SOURCE_LANGUAGES = {
     "en-US": "English (US)",
     "fr-FR": "French",
@@ -1543,7 +1591,23 @@ PREFERRED_TARGET_LANGUAGES = {
 }
 # Add more preferred languages here if needed
 
+# --- Derive ALL_LANGUAGES_TARGET --- >
+# Create a version of ALL_LANGUAGES suitable for target selection (includes None)
+ALL_LANGUAGES_TARGET = {None: "Aucune"} # Start with None
+ALL_LANGUAGES_TARGET.update(ALL_LANGUAGES) # Use the ALL_LANGUAGES defined above
+
+# --- Define Available Modes --- >
+AVAILABLE_MODES = {
+    "Dictation": "Dictation Mode",
+    "Keyboard": "Keyboard Input Mode",
+    # Add "Command" later if needed
+}
+
 if __name__ == "__main__":
+    # Ensure logs directory exists
+    if not os.path.exists(LOG_DIR):
+        os.makedirs(LOG_DIR)
+
     # API Key check moved earlier, before main()
     # Check if config loading failed catastrophically (though load_config tries to return defaults)
     if config is None:

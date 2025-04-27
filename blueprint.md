@@ -140,3 +140,19 @@ This file acts as both the project blueprint and a task manager. It outlines the
 
 *   [x] Primarily interact via simulating keyboard input (`pynput`).
 *   [ ] Allow executing defined system actions in command mode (requires implementation).
+
+## Ideal UI Interaction Flow (Status Indicator & Menus)
+
+* **Press the mouse middle button:**
+    * Show the microphone/status indicator with sound level feedback.
+* **Hover the microphone:**
+    * Display the main menus (mode, source language, target language) as popups around or near the indicator.
+* **Hover a menu:**
+    * Show the options for that menu (e.g., list of modes, list of languages) as a submenu or popup.
+* **Hover an option:**
+    * Highlight the option under the cursor.
+* **Release the button while hovering an option:**
+    * Select this option, update the relevant setting, and apply the new settings immediately.
+    * The UI should then hide or return to the idle state.
+
+This flow ensures that the UI is only hidden after a selection is made, and that menus/options are always accessible while the button is held and the cursor is over the indicator or its menus.

@@ -17,11 +17,13 @@ DEFAULT_MODES = {
 
 class StatusIndicatorManager:
     """Manages a Tkinter status icon window (mode + mic icon + volume + languages)."""
-    def __init__(self, q, action_q, pref_src_langs, pref_tgt_langs, available_modes=None):
+    def __init__(self, q, action_q, config, all_languages, all_languages_target, available_modes=None):
         self.queue = q
         self.action_queue = action_q
-        self.pref_src_langs = pref_src_langs
-        self.pref_tgt_langs = pref_tgt_langs
+        # --- Store config and language maps --- >
+        self.config = config # Store the full config dict
+        self.all_languages = all_languages
+        self.all_languages_target = all_languages_target # Includes None
         # Use provided modes or default
         self.available_modes = available_modes if available_modes is not None else DEFAULT_MODES
         self.root = None
@@ -79,12 +81,16 @@ class StatusIndicatorManager:
         self.bg_color = "#FEFEFE" # Use a near-white color for transparency key
         self.popup_bg = "#E0E0E0" # Background for popup
         self.popup_fg = "#000000"
-        self.popup_highlight_bg = "#B0B0B0" # Highlight for popup items
+        self.popup_highlight_bg = "#ADD8E6" # Light Blue for better visibility
 
         # Font object with increased size
         self.text_font_size = 12 # Increased font size
         self.text_font = tkFont.Font(family="Arial", size=self.text_font_size)
         self.popup_font = tkFont.Font(family="Arial", size=10)
+        # --- Menus only enabled after hovering mic ---
+        self.menus_enabled = False
+        # --- Track if mic has been hovered since activation ---
+        self.mic_hovered_since_activation = False
 
     def start(self):
         self.thread.start()
@@ -134,143 +140,130 @@ class StatusIndicatorManager:
         if self._stop_event.is_set():
             self._cleanup_tk()
             return
-
-        # --- Flags to determine action after processing queue ---
         needs_redraw = False
         position_needs_update = False
-        target_state = self.current_state # Start with current state
-
-        # --- Process Queue ---
+        target_state = self.current_state
         try:
             while not self.queue.empty():
                 command, data = self.queue.get_nowait()
-
                 if command == "volume":
                     new_volume = data
                     if abs(new_volume - self.current_volume) > 0.02:
                         self.current_volume = new_volume
-                        # Mark for redraw only if visible and active
                         if self.current_state == "active":
                             needs_redraw = True
-
                 elif command == "state":
-                    # Update target_state immediately for this iteration
                     target_state = data.get("state", "hidden")
-                    pos = data.get("pos") # Initial position (only provided on activation)
+                    pos = data.get("pos")
                     rcvd_source_lang = data.get("source_lang", "")
                     rcvd_target_lang = data.get("target_lang", None)
-                    rcvd_mode = data.get("mode", self.current_mode) # Get current mode
-
-                    # --- Store initial position if activating ---
+                    rcvd_mode = data.get("mode", self.current_mode)
                     if target_state != "hidden" and self.current_state == "hidden":
                         if pos:
                             self.initial_pos = pos
                             logging.debug(f"StatusIndicator stored initial position: {self.initial_pos}")
-                            position_needs_update = True # Signal to position window later
+                            position_needs_update = True
+                            self.menus_enabled = False
+                            self.mic_hovered_since_activation = False
                         else:
                             logging.warning("StatusIndicator activated but received no initial position!")
-                    
-                    # --- Clear initial position if hiding ---
                     elif target_state == "hidden":
-                         self.initial_pos = None
-
-                    # --- Update languages ---
-                    # Check if languages actually changed
+                        self.initial_pos = None
+                        self.menus_enabled = False
+                        self.mic_hovered_since_activation = False
                     if rcvd_source_lang != self.source_lang or rcvd_target_lang != self.target_lang:
                         self.source_lang = rcvd_source_lang
                         self.target_lang = rcvd_target_lang
-                        # Mark for redraw if languages changed while visible
                         if self.current_state != "hidden":
                             needs_redraw = True
-                    
-                    # --- Update Mode ---
                     if rcvd_mode != self.current_mode:
                         self.current_mode = rcvd_mode
                         if self.current_state != "hidden":
                              needs_redraw = True
-                    
-                    # Mark for redraw if the state itself changed
                     if target_state != self.current_state:
                         logging.debug(f"StatusIndicator received state change: {self.current_state} -> {target_state}, Mode: {self.current_mode}")
                         needs_redraw = True
                         if target_state == "active":
-                             self.current_volume = 0.0 # Reset volume on becoming active
+                             self.current_volume = 0.0
                         elif target_state == "hidden":
-                             # Destroy popups when becoming hidden
                              self._destroy_lang_popup("source")
                              self._destroy_lang_popup("target")
-                             self._destroy_mode_popup() # Also destroy mode popup
-
-
+                             self._destroy_mode_popup()
                 elif command == "check_hover_position":
-                    self.last_hover_pos = data # Update last known hover position
-
+                    self.last_hover_pos = data
+                elif command == "selection_made":
+                    logging.debug(f"StatusIndicator received selection_made command: {data}")
+                    # Initiate blink, then hide
+                    self._blink_and_hide(data)
+                    # Set target state to hidden to prevent further actions until hide completes
+                    target_state = "hidden"
+                    needs_redraw = False # Prevent normal redraw during blink
+                    state_actually_changed = False # Prevent normal state update logic
                 elif command == "stop":
                     logging.debug("Received stop command in StatusIndicator queue.")
                     self._stop_event.set()
-
         except queue.Empty: pass
         except tk.TclError as e:
             if not self._stop_event.is_set(): logging.warning(f"StatusIndicator Tkinter error processing queue: {e}.")
             self._stop_event.set(); self._cleanup_tk(); return
         except Exception as e:
             logging.error(f"Error processing StatusIndicator queue: {e}", exc_info=True)
-
-
-        # --- Update State AFTER processing the whole queue for this cycle ---
         state_actually_changed = (target_state != self.current_state)
         if state_actually_changed:
-            self.current_state = target_state # Now update the instance state
+            self.current_state = target_state
 
-        # --- Apply Changes and Redraw ---
-        if (needs_redraw or state_actually_changed) and self.root and not self._stop_event.is_set():
+        # --- Check if menus need enabling (based on mic hover) --- -> Moved before redraw
+        menus_were_just_enabled = False
+        if self.current_state != "hidden" and not self.mic_hovered_since_activation:
+            mx, my = self.last_hover_pos
+            mic_hover = self._is_point_over_mic(mx, my) # Check hover based on CURRENT draw state
+            if mic_hover:
+                 self.mic_hovered_since_activation = True
+                 self.menus_enabled = True
+                 menus_were_just_enabled = True # Signal redraw is needed
+                 logging.debug("Mic hovered for the first time after activation: menus now enabled.")
+
+        # --- Apply Changes and Redraw --- -> Redraw if state changed OR menus were just enabled
+        if (needs_redraw or state_actually_changed or menus_were_just_enabled) and self.root and not self._stop_event.is_set():
             if position_needs_update and self.initial_pos:
                 self._position_window(self.initial_pos)
-            self._draw_icon()
+            self._draw_icon() # Draw icon based on potentially updated menus_enabled state
             if self.current_state == "hidden":
                 self.root.withdraw()
             else:
                 self.root.deiconify()
 
-        # --- Check Popups and Hovered Label (Based on updated last_hover_pos) ---
-        self.hovering_over_lang_type = None # Reset hover state each cycle
+        # --- Check Popups and Hovered Label ---
+        self.hovering_over_lang_type = None
         self.hovering_over_lang_code = None
-        self.hovering_over_mode_name = None # Reset mode hover state
+        self.hovering_over_mode_name = None
         if self.root and not self._stop_event.is_set() and self.current_state != "hidden":
             try:
                 mx, my = self.last_hover_pos
-                # --- Check and Create Popups ---
-                self._check_hover_and_update_popups(mx, my) # Creates popups if needed
-
+                # REMOVED: Logic to enable menus here - moved earlier
+                # --- Only allow popups if menus_enabled ---
+                if self.menus_enabled:
+                    self._check_hover_and_update_popups(mx, my)
                 # --- Check if Hovering Over Specific Label ---
-                # Mode Popup Check
-                if self.mode_popup and self._is_point_over_popup(mx, my, self.mode_popup):
-                    for mode_name, label in self.mode_popup_labels.items():
-                         if self._is_point_over_widget(mx, my, label):
-                             self.hovering_over_mode_name = mode_name
-                             break # Found hover
-
-                # Source Language Popup Check (only if not hovering mode)
-                elif not self.hovering_over_mode_name and self.source_popup and self._is_point_over_popup(mx, my, self.source_popup):
-                    for code, label in self.source_popup_labels.items():
-                        if self._is_point_over_widget(mx, my, label):
-                            self.hovering_over_lang_type = "source"
-                            self.hovering_over_lang_code = code
-                            # logging.debug(f"Hovering over source label: {code}") # Optional log
-                            break # Found hover, no need to check others in this popup
-
-                # Target Language Popup Check (only if not hovering mode or source)
-                elif not self.hovering_over_mode_name and not self.hovering_over_lang_code and self.target_popup and self._is_point_over_popup(mx, my, self.target_popup):
-                     for code, label in self.target_popup_labels.items():
-                         if self._is_point_over_widget(mx, my, label):
-                             self.hovering_over_lang_type = "target"
-                             self.hovering_over_lang_code = code
-                             # logging.debug(f"Hovering over target label: {code}") # Optional log
-                             break
-
-                # --- Check and Destroy Popups if mouse moved away ---
+                if self.menus_enabled:
+                    if self.mode_popup and self._is_point_over_popup(mx, my, self.mode_popup):
+                        for mode_name, label in self.mode_popup_labels.items():
+                             if self._is_point_over_widget(mx, my, label):
+                                 self.hovering_over_mode_name = mode_name
+                                 break
+                    elif not self.hovering_over_mode_name and self.source_popup and self._is_point_over_popup(mx, my, self.source_popup):
+                        for code, label in self.source_popup_labels.items():
+                            if self._is_point_over_widget(mx, my, label):
+                                self.hovering_over_lang_type = "source"
+                                self.hovering_over_lang_code = code
+                                break
+                    elif not self.hovering_over_mode_name and not self.hovering_over_lang_code and self.target_popup and self._is_point_over_popup(mx, my, self.target_popup):
+                         for code, label in self.target_popup_labels.items():
+                             if self._is_point_over_widget(mx, my, label):
+                                 self.hovering_over_lang_type = "target"
+                                 self.hovering_over_lang_code = code
+                                 break
                 self._check_and_destroy_popups(mx, my)
-
             except tk.TclError: pass
             except Exception as e: logging.error(f"Error during hover/popup check: {e}", exc_info=True)
 
@@ -281,10 +274,12 @@ class StatusIndicatorManager:
              except Exception as e: logging.error(f"Error rescheduling StatusIndicator check: {e}")
 
     def _check_and_destroy_popups(self, mouse_x, mouse_y):
-        """Checks if mouse is away from popups or their areas and destroys them."""
+        """Checks if mouse is away from popups or their areas or the mic icon and destroys them."""
         # Include mode popup check
         if not (self.source_popup or self.target_popup or self.mode_popup): return
 
+        # Check all relevant hover states first
+        is_over_mic = self._is_point_over_mic(mouse_x, mouse_y)
         is_over_mode_area = self._is_point_over_tag(mouse_x, mouse_y, "mode_area")
         is_over_source_area = self._is_point_over_tag(mouse_x, mouse_y, "source_lang_area")
         is_over_target_area = self._is_point_over_tag(mouse_x, mouse_y, "target_lang_area")
@@ -292,16 +287,24 @@ class StatusIndicatorManager:
         is_over_source_popup = self._is_point_over_popup(mouse_x, mouse_y, self.source_popup)
         is_over_target_popup = self._is_point_over_popup(mouse_x, mouse_y, self.target_popup)
 
-        # Destroy popups if mouse is not over their trigger area or the popup itself
-        if self.mode_popup and not is_over_mode_area and not is_over_mode_popup:
+        # --- Add Logging ---
+        # Log hover states periodically for debugging (reduce frequency if too noisy)
+        # if time.time() % 1 < 0.1: # Log roughly once per second
+        #     logging.debug(f"Popup destroy check: mic={is_over_mic}, "
+        #                   f"mode_area={is_over_mode_area}, src_area={is_over_source_area}, tgt_area={is_over_target_area}, "
+        #                   f"mode_pop={is_over_mode_popup}, src_pop={is_over_source_popup}, tgt_pop={is_over_target_popup}")
+
+        # --- Refined Destruction Logic ---
+        # Destroy popups if mouse is not over the mic OR its trigger area OR the popup itself
+        if self.mode_popup and not is_over_mode_area and not is_over_mode_popup and not is_over_mic:
+            # logging.debug("Destroying mode popup (reason: outside assembly)")
             self._destroy_mode_popup()
-        # Check language popups only if NOT hovering over the mode area or mode popup
-        # (prevents language popups closing if mouse briefly leaves lang area towards mode area)
-        if not is_over_mode_area and not is_over_mode_popup:
-            if self.source_popup and not is_over_source_area and not is_over_source_popup:
-                self._destroy_lang_popup("source")
-            if self.target_popup and not is_over_target_area and not is_over_target_popup:
-                self._destroy_lang_popup("target")
+        if self.source_popup and not is_over_source_area and not is_over_source_popup and not is_over_mic:
+            # logging.debug("Destroying source popup (reason: outside assembly)")
+            self._destroy_lang_popup("source")
+        if self.target_popup and not is_over_target_area and not is_over_target_popup and not is_over_mic:
+            # logging.debug("Destroying target popup (reason: outside assembly)")
+            self._destroy_lang_popup("target")
 
     def _cleanup_tk(self):
         logging.debug("Executing StatusIndicator _cleanup_tk.")
@@ -343,105 +346,81 @@ class StatusIndicatorManager:
             return
         try:
             self.canvas.delete("all")
-            # Use self.current_state which is now guaranteed to be updated
-            # logging.debug(f"[DrawIcon] Drawing State: {self.current_state}, Source: '{self.source_lang}', Target: '{self.target_lang}', Volume: {self.current_volume:.2f}")
 
             if self.current_state == "hidden":
-                # logging.debug("[DrawIcon] State is hidden, returning.")
                 return
 
-            # Define common drawing params
+            # --- Define common drawing params ---
             text_y = self.icon_height / 2
             text_bg_color = "#FFFFFF"
             text_padding_x = 3
             text_padding_y = 2
             bg_y0 = text_y - (self.text_font_size / 1.5) - text_padding_y
             bg_y1 = text_y + (self.text_font_size / 1.5) + text_padding_y
-            icon_x_offset = 0 # Initial default
 
-            # --- Draw Mode Text (Left of Mic, IF active) ---
-            if self.current_state in ["idle", "active"]:
+            # --- Determine initial icon position and visibility of text areas ---
+            icon_x_offset = 0
+            draw_text_areas = self.menus_enabled # Text areas only drawn if menus are enabled
+
+            # --- Draw Mode Text (Left of Mic, only if menus enabled) ---
+            if draw_text_areas:
                 current_x = 0 # Start from left edge
-                mode_text = self.current_mode # Display the short name (e.g., "Dictation", "Keyboard")
+                mode_text = self.current_mode
                 mode_width = self.text_font.measure(mode_text)
-                mode_bg_x0 = current_x # Start at edge
-                mode_bg_x1 = current_x + mode_width + text_padding_x * 2 # Add padding on both sides
+                mode_bg_x0 = current_x
+                mode_bg_x1 = current_x + mode_width + text_padding_x * 2
                 self.canvas.create_rectangle(mode_bg_x0, bg_y0, mode_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("mode_area",))
-                # Center text within its background area
                 self.canvas.create_text(current_x + text_padding_x, text_y, text=mode_text, anchor=tk.W, font=self.text_font, fill=self.mode_text_color, tags=("mode_area",))
-                # Update icon offset based on the space taken by the mode text + padding
-                icon_x_offset = mode_bg_x1 + self.padding
+                icon_x_offset = mode_bg_x1 + self.padding # Update icon offset
+            else:
+                # Center the mic icon horizontally if text areas are not shown
+                icon_x_offset = (self.canvas_width - self.icon_base_width) / 2
 
-            # --- Draw Microphone Icon (Using updated icon_x_offset) ---
-            # Moved calculations here, AFTER icon_x_offset is potentially updated
+            # --- Draw Microphone Icon (Using potentially updated icon_x_offset) ---
             w, h = self.icon_base_width, self.icon_height
             body_w = w * 0.6; body_h = h * 0.6; body_x = icon_x_offset + (w - body_w) / 2; body_y = h * 0.1
             stand_h = h * 0.2; stand_y = body_y + body_h; stand_w = w * 0.2; stand_x = icon_x_offset + (w - stand_w) / 2
             base_h = h * 0.1; base_y = stand_y + stand_h; base_w = w * 0.8; base_x = icon_x_offset + (w - base_w) / 2
-            # Draw the icon components
             self.canvas.create_rectangle(stand_x, stand_y, stand_x + stand_w, stand_y + stand_h, fill=self.mic_stand_color, outline="")
             self.canvas.create_rectangle(base_x, base_y, base_x + base_w, base_y + base_h, fill=self.mic_stand_color, outline="")
             mic_body = self.canvas.create_rectangle(body_x, body_y, body_x + body_w, body_y + body_h, fill=self.mic_body_color, outline=self.mic_stand_color)
 
-            # --- Draw Volume/Idle Indicator based on MODE ---
-            # REMOVED idle indicator circle:
-            # if self.current_state == "idle":
-            #     idle_r = body_w * 0.2; idle_cx = body_x + body_w / 2; idle_cy = body_y + body_h / 2
-            #     self.canvas.create_oval(idle_cx - idle_r, idle_cy - idle_r, idle_cx + idle_r, idle_cy + idle_r, fill=self.idle_indicator_color, outline="")
-
+            # --- Draw Volume Indicator (if active) ---
             if self.current_state == "active":
-                 # Select volume color based on current mode
-                 volume_color = self.dictation_volume_color # Default
-                 if self.current_mode == "Keyboard": # Match the key used in AVAILABLE_MODES
-                     volume_color = self.keyboard_volume_color
-                 # elif self.current_mode == "Command": # Example for future
-                 #     volume_color = self.command_volume_color
-
+                 volume_color = self.dictation_volume_color
+                 if self.current_mode == "Keyboard": volume_color = self.keyboard_volume_color
                  fill_h = body_h * self.current_volume
                  fill_y = body_y + body_h - fill_h
                  if fill_h > 0:
-                    # Ensure volume fill is drawn within the mic body bounds
-                    vol_x0 = body_x
-                    vol_y0 = max(body_y, fill_y) # Clamp top
-                    vol_x1 = body_x + body_w
-                    vol_y1 = body_y + body_h
-                    if vol_y0 < vol_y1: # Only draw if height is positive
-                         self.canvas.create_rectangle(vol_x0, vol_y0, vol_x1, vol_y1, fill=volume_color, outline="")
+                    vol_x0 = body_x; vol_y0 = max(body_y, fill_y); vol_x1 = body_x + body_w; vol_y1 = body_y + body_h
+                    if vol_y0 < vol_y1: self.canvas.create_rectangle(vol_x0, vol_y0, vol_x1, vol_y1, fill=volume_color, outline="")
 
-            # --- Draw Language Text (Right of Mic, IF active and source exists) ---
-            if self.current_state in ["idle", "active"] and self.source_lang:
-                current_x = icon_x_offset + self.icon_base_width + self.padding # Start AFTER mic icon now
+            # --- Draw Language Text (Right of Mic, only if menus enabled and source exists) ---
+            if draw_text_areas and self.source_lang:
+                # Start AFTER the mic icon (whose position depends on whether mode text was drawn)
+                current_x = icon_x_offset + self.icon_base_width + self.padding
 
-                # 1. Draw Source Language (Always Active Color)
+                # 1. Draw Source Language
                 src_text = self.source_lang; src_width = self.text_font.measure(src_text)
-                src_bg_x0 = current_x # Start text area edge
-                src_bg_x1 = current_x + src_width + text_padding_x * 2 # Add padding
+                src_bg_x0 = current_x; src_bg_x1 = current_x + src_width + text_padding_x * 2
                 self.canvas.create_rectangle(src_bg_x0, bg_y0, src_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("source_lang_area",))
-                # Center text
                 self.canvas.create_text(current_x + text_padding_x, text_y, text=src_text, anchor=tk.W, font=self.text_font, fill=self.text_color, tags=("source_lang_area",))
-                current_x = src_bg_x1 # Move to end of source area
+                current_x = src_bg_x1
 
-                # 2. Always Draw Arrow and Target Language Area
+                # 2. Draw Arrow and Target Language Area
                 arrow_text = " > "; arrow_width = self.text_font.measure(arrow_text)
-                arrow_x = current_x + self.padding // 2 # Position arrow with some padding
+                arrow_x = current_x + self.padding // 2
                 self.canvas.create_text(arrow_x, text_y, text=arrow_text, anchor=tk.W, font=self.text_font, fill=self.text_color)
-                current_x = arrow_x + arrow_width + self.padding // 2 # Update current_x after arrow
+                current_x = arrow_x + arrow_width + self.padding // 2
 
-                # Determine target text and color
                 is_target_active = self.target_lang and self.target_lang != self.source_lang
                 tgt_text = self.target_lang if is_target_active else "None"
                 tgt_color = self.text_color if is_target_active else self.inactive_text_color
                 tgt_width = self.text_font.measure(tgt_text)
-
-                # Draw target background and text (always tagged for hover)
-                tgt_bg_x0 = current_x # Start target area edge
-                tgt_bg_x1 = current_x + tgt_width + text_padding_x * 2 # Add padding
+                tgt_bg_x0 = current_x; tgt_bg_x1 = current_x + tgt_width + text_padding_x * 2
                 self.canvas.create_rectangle(tgt_bg_x0, bg_y0, tgt_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("target_lang_area",))
-                # Center text
                 self.canvas.create_text(current_x + text_padding_x, text_y, text=tgt_text, anchor=tk.W, font=self.text_font, fill=tgt_color, tags=("target_lang_area",))
-                # logging.debug(f"[DrawIcon] Drawn target: '{tgt_text}' at ({current_x}, {text_y})")
 
-            # else: logging.debug(f"[DrawIcon] Skipping text draw.")
         except tk.TclError as e: logging.warning(f"Error drawing status icon: {e}"); self._stop_event.set()
         except Exception as e: logging.error(f"Unexpected error drawing status icon: {e}", exc_info=True)
 
@@ -455,6 +434,7 @@ class StatusIndicatorManager:
         if not self.root or not self.canvas or self._stop_event.is_set() or not self.root.winfo_exists():
             return
 
+        MAX_RECENT_DISPLAY = 3 # Max recent languages for popup
         tag_name = "source_lang_area" if lang_type == "source" else "target_lang_area"
 
         try:
@@ -473,10 +453,26 @@ class StatusIndicatorManager:
 
         # --- Store labels for hover check ---
         current_popup_labels = {}
-        lang_dict = self.pref_src_langs if lang_type == "source" else self.pref_tgt_langs
-        for lang_code, lang_name in lang_dict.items():
-            display_name = lang_name if lang_code is not None else "None"
-            label = tk.Label(popup, text=display_name, font=self.popup_font, bg=self.popup_bg, fg=self.popup_fg, padx=5, pady=2, anchor=tk.W)
+
+        # --- Determine which languages to show --- >
+        languages_to_show = {}
+        if lang_type == "source":
+            recent_codes = self.config.get("general", {}).get("recent_source_languages", [])[:MAX_RECENT_DISPLAY]
+            for code in recent_codes:
+                if code in self.all_languages:
+                     languages_to_show[code] = self.all_languages[code]
+        else: # Target language
+            # Always add None first
+            languages_to_show[None] = self.all_languages_target[None]
+            recent_codes = self.config.get("general", {}).get("recent_target_languages", [])[:MAX_RECENT_DISPLAY]
+            for code in recent_codes:
+                 # Don't add None again if it's somehow in recent list
+                 if code is not None and code in self.all_languages_target:
+                     languages_to_show[code] = self.all_languages_target[code]
+
+        # --- Create labels based on the filtered list --- >
+        for lang_code, lang_name in languages_to_show.items():
+            label = tk.Label(popup, text=lang_name, font=self.popup_font, bg=self.popup_bg, fg=self.popup_fg, padx=5, pady=2, anchor=tk.W)
             label.pack(fill=tk.X)
             label.bind("<Enter>", partial(self._on_popup_label_enter, label=label))
             label.bind("<Leave>", partial(self._on_popup_label_leave, label=label))
@@ -709,14 +705,22 @@ class StatusIndicatorManager:
     def _on_popup_label_enter(self, event, label):
         """Highlights the label when mouse enters."""
         try: # Add try-except for robustness during shutdown
+            label_text = label.cget('text') # Get text for logging
+            logging.debug(f"Hover Enter: '{label_text}'") # Add log
             label.config(bg=self.popup_highlight_bg)
+            label.update_idletasks() # Force visual update
         except tk.TclError: pass
+        except Exception as e: logging.error(f"Error in _on_popup_label_enter: {e}", exc_info=True)
 
     def _on_popup_label_leave(self, event, label):
         """Unhighlights the label when mouse leaves."""
         try:
+            label_text = label.cget('text') # Get text for logging
+            logging.debug(f"Hover Leave: '{label_text}'") # Add log
             label.config(bg=self.popup_bg)
+            label.update_idletasks() # Force visual update
         except tk.TclError: pass
+        except Exception as e: logging.error(f"Error in _on_popup_label_leave: {e}", exc_info=True)
 
     def _on_popup_label_release(self, event, lang_type, lang_code):
         """Handles click release on a language label in the popup."""
@@ -749,4 +753,102 @@ class StatusIndicatorManager:
              return False
         except Exception as e:
              logging.error(f"Error checking hover for widget: {e}", exc_info=True)
-             return False 
+             return False
+
+    # --- Add helper to check if mouse is over mic icon ---
+    def _is_point_over_mic(self, point_x, point_y):
+        """Checks hover over mic icon, calculating offset based on current menu visibility."""
+        if not self.canvas or not self.root or not self.root.winfo_exists():
+            return False
+        try:
+            # Calculate correct icon offset based on whether menus are currently enabled (drawn)
+            if self.menus_enabled:
+                icon_x_offset = self.mode_text_width_estimate + self.padding
+            else:
+                icon_x_offset = (self.canvas_width - self.icon_base_width) / 2
+
+            # Use this calculated offset for bounding box check
+            w, h = self.icon_base_width, self.icon_height
+            mic_x0 = icon_x_offset
+            mic_y0 = 0
+            mic_x1 = icon_x_offset + w
+            mic_y1 = h
+            canvas_x = self.canvas.winfo_rootx()
+            canvas_y = self.canvas.winfo_rooty()
+            abs_x0 = canvas_x + mic_x0
+            abs_y0 = canvas_y + mic_y0
+            abs_x1 = canvas_x + mic_x1
+            abs_y1 = canvas_y + mic_y1
+            return (abs_x0 <= point_x < abs_x1 and abs_y0 <= point_y < abs_y1)
+        except Exception as e:
+            # Log error if calculation fails unexpectedly
+            logging.error(f"Error in _is_point_over_mic check: {e}", exc_info=True)
+            return False 
+
+    # --- NEW: Blink Effect ---    
+    def _blink_and_hide(self, selection_details):
+        """ Briefly highlights the selection or whole window, then hides. """
+        if not self.root or not self.root.winfo_exists() or self._stop_event.is_set():
+            return
+
+        # Simple blink: Change canvas background briefly
+        blink_color = "#FFFF00" # Yellow blink
+        original_color = self.bg_color
+        blink_duration_ms = 150
+        hide_delay_ms = 50
+
+        try:
+            # Step 1: Change color
+            if self.canvas:
+                self.canvas.config(bg=blink_color)
+            self.root.config(bg=blink_color) # Change root too for full effect
+            self.root.attributes("-transparentcolor", blink_color) # Update transparent color
+
+            # Step 2: Schedule color reset after blink_duration_ms
+            self.root.after(blink_duration_ms, lambda:
+                self._reset_blink_and_schedule_hide(original_color, hide_delay_ms))
+
+        except tk.TclError as e:
+            logging.warning(f"TclError during blink start: {e}. Hiding immediately.")
+            self._hide_after_blink() # Attempt immediate hide
+        except Exception as e:
+            logging.error(f"Error starting blink effect: {e}")
+            self._hide_after_blink() # Attempt immediate hide
+
+    def _reset_blink_and_schedule_hide(self, original_color, hide_delay_ms):
+        """ Resets color after blink and schedules the final hide action. """
+        if not self.root or not self.root.winfo_exists() or self._stop_event.is_set():
+            return
+        try:
+            if self.canvas:
+                self.canvas.config(bg=original_color)
+            self.root.config(bg=original_color)
+            self.root.attributes("-transparentcolor", original_color)
+
+            # Step 3: Schedule the actual hide after hide_delay_ms
+            self.root.after(hide_delay_ms, self._hide_after_blink)
+
+        except tk.TclError as e:
+            logging.warning(f"TclError during blink reset/hide schedule: {e}. Hiding immediately.")
+            self._hide_after_blink() # Attempt immediate hide
+        except Exception as e:
+            logging.error(f"Error resetting blink/scheduling hide: {e}")
+            self._hide_after_blink() # Attempt immediate hide
+
+    def _hide_after_blink(self):
+        """ Performs the actual hiding of the window and state cleanup. """
+        if not self.root or not self.root.winfo_exists() or self._stop_event.is_set():
+            return
+        try:
+            logging.debug("Hiding StatusIndicator after blink/selection.")
+            self.root.withdraw()
+            self.current_state = "hidden"
+            self.menus_enabled = False
+            self.mic_hovered_since_activation = False
+            self._destroy_lang_popup("source")
+            self._destroy_lang_popup("target")
+            self._destroy_mode_popup()
+        except tk.TclError as e:
+            logging.warning(f"TclError during final hide: {e}.")
+        except Exception as e:
+            logging.error(f"Error during final hide: {e}") 

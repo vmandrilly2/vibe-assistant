@@ -1,0 +1,52 @@
+{
+  "language_names": {
+    "en-US": "英语（美国）",
+    "en-GB": "英语（英国）",
+    "fr-FR": "法语",
+    "es-ES": "西班牙语",
+    "de-DE": "德语",
+    "it-IT": "意大利语",
+    "pt-PT": "葡萄牙语",
+    "pt-BR": "葡萄牙语（巴西）",
+    "ru-RU": "俄语",
+    "zh": "中文（普通话）",
+    "ko-KR": "韩语",
+    "ja-JP": "日语",
+    "hi-IN": "印地语",
+    "ar": "阿拉伯语",
+    "nl-NL": "荷兰语",
+    "none": "无（仅听写）"
+  },
+  "mode_names": {
+    "Dictation": "听写模式",
+    "Keyboard": "键盘模式"
+  },
+  "systray": {
+    "title": "Vibe 助手",
+    "menu": {
+      "mode": "模式",
+      "source_language": "源语言",
+      "target_language": "目标语言",
+      "customization": "自定义",
+      "triggers": "触发器",
+      "tooltip": "工具提示",
+      "min_duration": "最短持续时间（秒）：{value}",
+      "translation_model": "翻译模型：{value}",
+      "dictation_button": "听写按钮",
+      "command_button": "命令按钮",
+      "command_modifier": "命令修饰键",
+      "tooltip_transparency": "透明度：{value}",
+      "tooltip_background": "背景：{value}",
+      "tooltip_text_color": "文本颜色：{value}",
+      "tooltip_font": "字体：{value}",
+      "tooltip_font_size": "字体大小：{value}",
+      "other_languages": "其他语言",
+      "no_other_languages": "无其他可用语言",
+      "reload_config": "重新加载配置",
+      "exit": "退出"
+    }
+  },
+  "status_indicator": {
+      "none_target": "无"
+  }
+} 

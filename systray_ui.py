@@ -130,6 +130,30 @@ ALL_LANGUAGES = {
     # Add many more here...
 }
 
+# --- NEW: Native Language Names Dictionary ---
+# Store the name of the language *in that language*.
+# Use ALL_LANGUAGES as a basis, add native names where known.
+# Fallback will be the English name from ALL_LANGUAGES if native is missing.
+NATIVE_LANGUAGE_NAMES = {
+    "en-US": "English (US)",
+    "en-GB": "English (UK)",
+    "fr-FR": "Français",
+    "es-ES": "Español",
+    "de-DE": "Deutsch",
+    "it-IT": "Italiano",
+    "pt-PT": "Português",
+    "pt-BR": "Português (Brasil)",
+    "ru-RU": "Русский",
+    "zh": "中文 (普通话)", # Simplified Chinese (Mandarin)
+    "ko-KR": "한국어",
+    "ja-JP": "日本語",
+    "hi-IN": "हिन्दी",
+    "ar": "العربية",
+    "nl-NL": "Nederlands",
+    # Add more as needed
+}
+
+
 # Calculate 'Other' SOURCE languages dynamically
 # Sort alphabetically by language name for the 'Other' menu
 # --- REMOVED OTHER LISTS - Will be calculated in build_menu ---
@@ -308,11 +332,14 @@ def build_language_source_menu():
     # --- Helper to create item with check --- >
     def create_lang_item(lang_type, code):
         setting_key = 'selected_language' # Hardcoded for source
-        # --- Translate language name --- >
-        default_name = ALL_LANGUAGES.get(code, f"Unknown ({code})") # Keep original lookup as fallback
-        name = _(f"language_names.{code}", default=default_name)
+        # --- MODIFIED: Use NATIVE name for source language --- >
+        # Fallback chain: Native Name -> English Name (from ALL_LANGUAGES) -> Code itself
+        english_name = ALL_LANGUAGES.get(code, code) # Get English name or code as fallback
+        native_name = NATIVE_LANGUAGE_NAMES.get(code, english_name) # Get native name, fallback to English/code
+        # --- Use native_name directly, no translation ---
+        # --- END MODIFIED --- >
         return item(
-            name,
+            native_name, # Use the (potentially native) name
             partial(update_general_setting_callback, setting_key=setting_key, value=code),
             checked=lambda item, c=code: general_cfg.get(setting_key) == c,
             radio=True
@@ -324,6 +351,7 @@ def build_language_source_menu():
         source_lang_items.append(create_lang_item('source', code))
 
     # Define 'Other' source languages (filter out current source lang)
+    # Sort based on English name for consistency in the "Other" list
     other_source_langs = {
         k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
         if k not in recent_source_codes and k != current_source_lang # Exclude recent AND current
@@ -331,15 +359,21 @@ def build_language_source_menu():
 
     # Build 'Other' source submenu
     if other_source_langs:
-        other_source_submenu = menu(*[
-            # --- Translate language name --- >
-            item(
-                _(f"language_names.{code}", default=name),
-                partial(update_general_setting_callback, setting_key='selected_language', value=code),
-                checked=lambda item, c=code: general_cfg.get("selected_language") == c, # Check against the actual current lang
-                radio=True
-            ) for code, name in other_source_langs.items()
-        ])
+        other_source_submenu_items = []
+        for code, english_name in other_source_langs.items(): # Iterate using English names for sorting
+            # --- MODIFIED: Use NATIVE name for display --- >
+            native_name = NATIVE_LANGUAGE_NAMES.get(code, english_name) # Get native name, fallback to English/code
+            # --- Use native_name directly, no translation ---
+            other_source_submenu_items.append(
+                item(
+                    native_name, # Use the (potentially native) name
+                    partial(update_general_setting_callback, setting_key='selected_language', value=code),
+                    checked=lambda item, c=code: general_cfg.get("selected_language") == c, # Check against the actual current lang
+                    radio=True
+                )
+            )
+            # --- END MODIFIED --- >
+        other_source_submenu = menu(*other_source_submenu_items)
         if recent_source_codes: # Add separator only if recent items exist
              source_lang_items.append(menu.SEPARATOR)
         # --- Translate "Other languages" --- >

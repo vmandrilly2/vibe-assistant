@@ -8,6 +8,16 @@ import time # Need time for precise timestamps
 import i18n # Import the module
 from i18n import _ # Import the get_translation alias
 
+# --- Import Language Maps from Systray (Temporary Solution) --- >
+# Ideally, move these to a shared constants/config file later
+try:
+    from systray_ui import ALL_LANGUAGES, NATIVE_LANGUAGE_NAMES
+except ImportError as e:
+    logging.error(f"Could not import language lists from systray_ui: {e}. Using fallbacks.")
+    # Fallback definitions in case systray_ui is not available or has issues
+    ALL_LANGUAGES = {"en-US": "English (US)", "fr-FR": "French"} # Minimal fallback
+    NATIVE_LANGUAGE_NAMES = {"en-US": "English (US)", "fr-FR": "Français"} # Minimal fallback
+
 # --- Define Mode Constants (can be shared with vibe_app.py) ---
 # It's slightly redundant defining them here and in vibe_app.py,
 # but keeps the StatusIndicator self-contained regarding display names.
@@ -251,9 +261,10 @@ class StatusIndicatorManager:
             for code in recent_codes:
                 # Add only if it exists in the full list AND is not the currently selected one
                 if code in self.all_languages and code != current_source_lang:
-                    # --- Translate name --- >
-                    default_name = self.all_languages.get(code, code) # Fallback to code
-                    langs_to_display.append((code, _(f"language_names.{code}", default=default_name)))
+                    # --- Use NATIVE name for source --- >
+                    english_name = ALL_LANGUAGES.get(code, code) # Fallback to English/code
+                    native_name = NATIVE_LANGUAGE_NAMES.get(code, english_name) # Fallback to Native/English/code
+                    langs_to_display.append((code, native_name))
         else: # Target language
             # Add "None" first
             # --- Translate "None" --- >
@@ -534,9 +545,9 @@ class StatusIndicatorManager:
             # Language Text
             if draw_text_areas and self.source_lang:
                 current_x = icon_x_offset + self.icon_base_width
-                # --- Translate source lang name --- >
-                default_src_name = self.all_languages.get(self.source_lang, self.source_lang) # Fallback to code
-                src_text = _(f"language_names.{self.source_lang}", default=default_src_name)
+                # --- Use NATIVE name for source --- >
+                english_name_src = ALL_LANGUAGES.get(self.source_lang, self.source_lang) # Fallback
+                src_text = NATIVE_LANGUAGE_NAMES.get(self.source_lang, english_name_src) # Native name
                 # --- END MODIFIED --- >
                 src_width = tkFont.Font(family="Segoe UI", size=self.text_font_size).measure(src_text)
                 src_bg_x0 = current_x; src_bg_x1 = current_x + src_width + text_padding_x * 2

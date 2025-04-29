@@ -1,0 +1,52 @@
+{
+  "language_names": {
+    "en-US": "Английский (США)",
+    "en-GB": "Английский (Великобритания)",
+    "fr-FR": "Французский",
+    "es-ES": "Испанский",
+    "de-DE": "Немецкий",
+    "it-IT": "Итальянский",
+    "pt-PT": "Португальский",
+    "pt-BR": "Португальский (Бразилия)",
+    "ru-RU": "Русский",
+    "zh": "Китайский (Мандарин)",
+    "ko-KR": "Корейский",
+    "ja-JP": "Японский",
+    "hi-IN": "Хинди",
+    "ar": "Арабский",
+    "nl-NL": "Голландский",
+    "none": "Нет (Только диктовка)"
+  },
+  "mode_names": {
+    "Dictation": "Режим диктовки",
+    "Keyboard": "Режим клавиатуры"
+  },
+  "systray": {
+    "title": "Vibe Ассистент",
+    "menu": {
+      "mode": "Режим",
+      "source_language": "Исходный язык",
+      "target_language": "Целевой язык",
+      "customization": "Настройка",
+      "triggers": "Триггеры",
+      "tooltip": "Подсказка",
+      "min_duration": "Мин. длительность (с): {value}",
+      "translation_model": "Модель перевода: {value}",
+      "dictation_button": "Кнопка диктовки",
+      "command_button": "Кнопка команды",
+      "command_modifier": "Модификатор команды",
+      "tooltip_transparency": "Прозрачность: {value}",
+      "tooltip_background": "Фон: {value}",
+      "tooltip_text_color": "Цвет текста: {value}",
+      "tooltip_font": "Шрифт: {value}",
+      "tooltip_font_size": "Размер шрифта: {value}",
+      "other_languages": "Другие языки",
+      "no_other_languages": "Нет других доступных языков",
+      "reload_config": "Перезагрузить конфиг",
+      "exit": "Выход"
+    }
+  },
+  "status_indicator": {
+      "none_target": "Нет"
+  }
+} 

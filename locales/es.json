@@ -1,0 +1,52 @@
+{
+  "language_names": {
+    "en-US": "Inglés (EE. UU.)",
+    "en-GB": "Inglés (RU)",
+    "fr-FR": "Francés",
+    "es-ES": "Español",
+    "de-DE": "Alemán",
+    "it-IT": "Italiano",
+    "pt-PT": "Portugués",
+    "pt-BR": "Portugués (Brasil)",
+    "ru-RU": "Ruso",
+    "zh": "Chino (Mandarín)",
+    "ko-KR": "Coreano",
+    "ja-JP": "Japonés",
+    "hi-IN": "Hindi",
+    "ar": "Árabe",
+    "nl-NL": "Holandés",
+    "none": "Ninguno (Solo dictado)"
+  },
+  "mode_names": {
+    "Dictation": "Modo Dictado",
+    "Keyboard": "Modo Teclado"
+  },
+  "systray": {
+    "title": "Asistente Vibe",
+    "menu": {
+      "mode": "Modo",
+      "source_language": "Idioma Origen",
+      "target_language": "Idioma Destino",
+      "customization": "Personalización",
+      "triggers": "Disparadores",
+      "tooltip": "Información sobre herramientas",
+      "min_duration": "Duración Mín (s): {value}",
+      "translation_model": "Modelo Traducción: {value}",
+      "dictation_button": "Botón Dictado",
+      "command_button": "Botón Comando",
+      "command_modifier": "Modificador Comando",
+      "tooltip_transparency": "Transparencia: {value}",
+      "tooltip_background": "Fondo: {value}",
+      "tooltip_text_color": "Color Texto: {value}",
+      "tooltip_font": "Fuente: {value}",
+      "tooltip_font_size": "Tamaño Fuente: {value}",
+      "other_languages": "Otros idiomas",
+      "no_other_languages": "No hay otros idiomas disponibles",
+      "reload_config": "Recargar Config",
+      "exit": "Salir"
+    }
+  },
+  "status_indicator": {
+      "none_target": "Ninguno"
+  }
+} 

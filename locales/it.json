@@ -1,0 +1,52 @@
+{
+  "language_names": {
+    "en-US": "Inglese (US)",
+    "en-GB": "Inglese (UK)",
+    "fr-FR": "Francese",
+    "es-ES": "Spagnolo",
+    "de-DE": "Tedesco",
+    "it-IT": "Italiano",
+    "pt-PT": "Portoghese",
+    "pt-BR": "Portoghese (Brasile)",
+    "ru-RU": "Russo",
+    "zh": "Cinese (Mandarino)",
+    "ko-KR": "Coreano",
+    "ja-JP": "Giapponese",
+    "hi-IN": "Hindi",
+    "ar": "Arabo",
+    "nl-NL": "Olandese",
+    "none": "Nessuna (Solo dettatura)"
+  },
+  "mode_names": {
+    "Dictation": "Modalità Dettatura",
+    "Keyboard": "Modalità Tastiera"
+  },
+  "systray": {
+    "title": "Assistente Vibe",
+    "menu": {
+      "mode": "Modalità",
+      "source_language": "Lingua Sorgente",
+      "target_language": "Lingua Destinazione",
+      "customization": "Personalizzazione",
+      "triggers": "Attivatori",
+      "tooltip": "Tooltip",
+      "min_duration": "Durata Min (s): {value}",
+      "translation_model": "Modello Traduzione: {value}",
+      "dictation_button": "Pulsante Dettatura",
+      "command_button": "Pulsante Comando",
+      "command_modifier": "Modificatore Comando",
+      "tooltip_transparency": "Trasparenza: {value}",
+      "tooltip_background": "Sfondo: {value}",
+      "tooltip_text_color": "Colore Testo: {value}",
+      "tooltip_font": "Carattere: {value}",
+      "tooltip_font_size": "Dimensione Carattere: {value}",
+      "other_languages": "Altre lingue",
+      "no_other_languages": "Nessun'altra lingua disponibile",
+      "reload_config": "Ricarica Config",
+      "exit": "Esci"
+    }
+  },
+  "status_indicator": {
+      "none_target": "Nessuna"
+  }
+} 

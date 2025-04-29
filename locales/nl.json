@@ -1,0 +1,52 @@
+{
+  "language_names": {
+    "en-US": "Engels (VS)",
+    "en-GB": "Engels (VK)",
+    "fr-FR": "Frans",
+    "es-ES": "Spaans",
+    "de-DE": "Duits",
+    "it-IT": "Italiaans",
+    "pt-PT": "Portugees",
+    "pt-BR": "Portugees (Brazilië)",
+    "ru-RU": "Russisch",
+    "zh": "Chinees (Mandarijn)",
+    "ko-KR": "Koreaans",
+    "ja-JP": "Japans",
+    "hi-IN": "Hindi",
+    "ar": "Arabisch",
+    "nl-NL": "Nederlands",
+    "none": "Geen (Alleen dictaat)"
+  },
+  "mode_names": {
+    "Dictation": "Dicteermodus",
+    "Keyboard": "Toetsenbordmodus"
+  },
+  "systray": {
+    "title": "Vibe Assistent",
+    "menu": {
+      "mode": "Modus",
+      "source_language": "Brontaal",
+      "target_language": "Doeltaal",
+      "customization": "Aanpassing",
+      "triggers": "Triggers",
+      "tooltip": "Tooltip",
+      "min_duration": "Min. duur (s): {value}",
+      "translation_model": "Vertaalmodel: {value}",
+      "dictation_button": "Dicteerknop",
+      "command_button": "Commandoknop",
+      "command_modifier": "Commando-modifier",
+      "tooltip_transparency": "Transparantie: {value}",
+      "tooltip_background": "Achtergrond: {value}",
+      "tooltip_text_color": "Tekstkleur: {value}",
+      "tooltip_font": "Lettertype: {value}",
+      "tooltip_font_size": "Lettergrootte: {value}",
+      "other_languages": "Andere talen",
+      "no_other_languages": "Geen andere talen beschikbaar",
+      "reload_config": "Config herladen",
+      "exit": "Afsluiten"
+    }
+  },
+  "status_indicator": {
+      "none_target": "Geen"
+  }
+} 

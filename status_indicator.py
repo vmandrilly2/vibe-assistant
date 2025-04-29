@@ -241,13 +241,23 @@ class StatusIndicatorManager:
         if self.root and not self._stop_event.is_set() and self.current_state != "hidden":
             try:
                 mx, my = self.last_hover_pos
-                # REMOVED: Logic to enable menus here - moved earlier
-                # --- Only allow popups if menus_enabled ---
+                # --- Only allow popups if menus_enabled --- >
                 if self.menus_enabled:
                     self._check_hover_and_update_popups(mx, my)
+
                 # --- Check if Hovering Over Specific Label --- >
                 newly_hovered_label = None
+                is_mouse_over_interactive_area = False # Flag to track hover over any relevant part
+
                 if self.menus_enabled:
+                    # Check hover over main indicator areas first
+                    is_mouse_over_interactive_area = (
+                        self._is_point_over_mic(mx, my) or
+                        self._is_point_over_tag(mx, my, "mode_area") or
+                        self._is_point_over_tag(mx, my, "source_lang_area") or
+                        self._is_point_over_tag(mx, my, "target_lang_area")
+                    )
+
                     popup_dicts = [
                         (self.mode_popup, self.mode_popup_labels),
                         (self.source_popup, self.source_popup_labels),
@@ -255,6 +265,7 @@ class StatusIndicatorManager:
                     ]
                     for popup, label_dict in popup_dicts:
                         if popup and self._is_point_over_popup(mx, my, popup):
+                            is_mouse_over_interactive_area = True # Also interactive if over popup
                             for key, label in label_dict.items():
                                 if self._is_point_over_widget(mx, my, label):
                                     newly_hovered_label = label
@@ -263,30 +274,53 @@ class StatusIndicatorManager:
                                     elif popup is self.source_popup: self.hovering_over_lang_type = "source"; self.hovering_over_lang_code = key
                                     elif popup is self.target_popup: self.hovering_over_lang_type = "target"; self.hovering_over_lang_code = key
                                     break # Found the hovered label in this popup
-                            if newly_hovered_label: break # Found the hovered label, stop checking other popups
+                            # No need to break outer loop here, check all popups just in case of overlap?
+                            # Let's break, assuming popups don't overlap significantly where it matters.
+                            if newly_hovered_label: break
+                    # If still no specific label found, but over a popup, ensure hover state is cleared
+                    # This seems less relevant now we check is_mouse_over_interactive_area
 
-                # --- Update Label Highlighting --- >
-                # If a new label is hovered
-                if newly_hovered_label and newly_hovered_label != self.currently_hovered_label:
-                    # Unhighlight previous label if there was one
-                    if self.currently_hovered_label and self.currently_hovered_label.winfo_exists():
-                        try: self.currently_hovered_label.config(bg=self.popup_bg)
-                        except tk.TclError: pass # Ignore error if widget destroyed
-                    # Highlight the new label
-                    try:
-                        newly_hovered_label.config(bg=self.popup_highlight_bg)
-                        self.currently_hovered_label = newly_hovered_label
-                    except tk.TclError: # Handle case where widget is destroyed between check and config
+                # --- Update Label Highlighting (only if menus are enabled) --- >
+                if self.menus_enabled:
+                    # If a new label is hovered
+                    if newly_hovered_label and newly_hovered_label != self.currently_hovered_label:
+                        # Unhighlight previous label if there was one
+                        if self.currently_hovered_label and self.currently_hovered_label.winfo_exists():
+                            try: self.currently_hovered_label.config(bg=self.popup_bg)
+                            except tk.TclError: pass # Ignore error if widget destroyed
+                        # Highlight the new label
+                        try:
+                            newly_hovered_label.config(bg=self.popup_highlight_bg)
+                            self.currently_hovered_label = newly_hovered_label
+                        except tk.TclError: # Handle case where widget is destroyed between check and config
+                            self.currently_hovered_label = None
+                    # If mouse moved off the previously hovered label and not onto a new one
+                    elif not newly_hovered_label and self.currently_hovered_label:
+                        if self.currently_hovered_label.winfo_exists():
+                            try: self.currently_hovered_label.config(bg=self.popup_bg)
+                            except tk.TclError: pass
                         self.currently_hovered_label = None
-                # If mouse moved off the previously hovered label and not onto a new one
-                elif not newly_hovered_label and self.currently_hovered_label:
-                    if self.currently_hovered_label.winfo_exists():
-                        try: self.currently_hovered_label.config(bg=self.popup_bg)
-                        except tk.TclError: pass
+
+                # --- Disable Menus if Mouse Left Interactive Area --- >
+                if self.menus_enabled and not is_mouse_over_interactive_area:
+                    logging.debug("Mouse left interactive area. Disabling menus and destroying popups.")
+                    self.menus_enabled = False
+                    self.mic_hovered_since_activation = False # Allow re-enabling on mic hover
+                    needs_redraw = True # Redraw without text areas
+                    self._destroy_mode_popup()
+                    self._destroy_lang_popup("source")
+                    self._destroy_lang_popup("target")
+                    # Reset hover states immediately
+                    self.hovering_over_lang_type = None
+                    self.hovering_over_lang_code = None
+                    self.hovering_over_mode_name = None
+                    if self.currently_hovered_label and self.currently_hovered_label.winfo_exists():
+                         try: self.currently_hovered_label.config(bg=self.popup_bg)
+                         except tk.TclError: pass
                     self.currently_hovered_label = None
 
-                # --- Destroy Popups Check (after processing hover) --- >
-                self._check_and_destroy_popups(mx, my)
+                # --- Destroy Popups Check (Redundant now? Keep for safety?) --- >
+                # self._check_and_destroy_popups(mx, my) # Maybe disable this now?
 
             except tk.TclError: pass
             except Exception as e: logging.error(f"Error during hover/popup check: {e}", exc_info=True)

@@ -62,10 +62,10 @@ class StatusIndicatorManager:
         self.mode_text_width_estimate = 80
         # Increase text width estimate for languages
         self.lang_text_width_estimate = 120 # Increased estimate
-        self.padding = 5
+        self.padding = 0 # No padding between elements
         # Update canvas width calculation
-        self.canvas_width = (self.mode_text_width_estimate + self.padding +
-                             self.icon_base_width + self.padding +
+        self.canvas_width = (self.mode_text_width_estimate +
+                             self.icon_base_width +
                              self.lang_text_width_estimate)
 
         # Colors
@@ -250,11 +250,12 @@ class StatusIndicatorManager:
                 is_mouse_over_interactive_area = False # Flag to track hover over any relevant part
 
                 if self.menus_enabled:
-                    # Check hover over main indicator areas first
+                    # Check hover over main indicator areas first (including the arrow)
                     is_mouse_over_interactive_area = (
                         self._is_point_over_mic(mx, my) or
                         self._is_point_over_tag(mx, my, "mode_area") or
                         self._is_point_over_tag(mx, my, "source_lang_area") or
+                        self._is_point_over_tag(mx, my, "arrow_area") or # Add arrow_area check
                         self._is_point_over_tag(mx, my, "target_lang_area")
                     )
 
@@ -331,39 +332,6 @@ class StatusIndicatorManager:
              except tk.TclError: logging.warning("StatusIndicator root destroyed before rescheduling.")
              except Exception as e: logging.error(f"Error rescheduling StatusIndicator check: {e}")
 
-    def _check_and_destroy_popups(self, mouse_x, mouse_y):
-        """Checks if mouse is away from popups or their areas or the mic icon and destroys them."""
-        # Include mode popup check
-        if not (self.source_popup or self.target_popup or self.mode_popup): return
-
-        # Check all relevant hover states first
-        is_over_mic = self._is_point_over_mic(mouse_x, mouse_y)
-        is_over_mode_area = self._is_point_over_tag(mouse_x, mouse_y, "mode_area")
-        is_over_source_area = self._is_point_over_tag(mouse_x, mouse_y, "source_lang_area")
-        is_over_target_area = self._is_point_over_tag(mouse_x, mouse_y, "target_lang_area")
-        is_over_mode_popup = self._is_point_over_popup(mouse_x, mouse_y, self.mode_popup)
-        is_over_source_popup = self._is_point_over_popup(mouse_x, mouse_y, self.source_popup)
-        is_over_target_popup = self._is_point_over_popup(mouse_x, mouse_y, self.target_popup)
-
-        # --- Add Logging ---
-        # Log hover states periodically for debugging (reduce frequency if too noisy)
-        # if time.time() % 1 < 0.1: # Log roughly once per second
-        #     logging.debug(f"Popup destroy check: mic={is_over_mic}, "
-        #                   f"mode_area={is_over_mode_area}, src_area={is_over_source_area}, tgt_area={is_over_target_area}, "
-        #                   f"mode_pop={is_over_mode_popup}, src_pop={is_over_source_popup}, tgt_pop={is_over_target_popup}")
-
-        # --- Refined Destruction Logic ---
-        # Destroy popups if mouse is not over the mic OR its trigger area OR the popup itself
-        if self.mode_popup and not is_over_mode_area and not is_over_mode_popup and not is_over_mic:
-            # logging.debug("Destroying mode popup (reason: outside assembly)")
-            self._destroy_mode_popup()
-        if self.source_popup and not is_over_source_area and not is_over_source_popup and not is_over_mic:
-            # logging.debug("Destroying source popup (reason: outside assembly)")
-            self._destroy_lang_popup("source")
-        if self.target_popup and not is_over_target_area and not is_over_target_popup and not is_over_mic:
-            # logging.debug("Destroying target popup (reason: outside assembly)")
-            self._destroy_lang_popup("target")
-
     def _cleanup_tk(self):
         logging.debug("Executing StatusIndicator _cleanup_tk.")
         if self.root:
@@ -418,7 +386,7 @@ class StatusIndicatorManager:
 
             # --- Determine fixed icon position and visibility of text areas --- >
             # ALWAYS calculate icon's horizontal starting position assuming mode text space exists
-            icon_x_offset = self.mode_text_width_estimate + self.padding
+            icon_x_offset = self.mode_text_width_estimate
             draw_text_areas = self.menus_enabled
 
             # --- Draw Mode Text (Left of Mic, only if menus enabled) --- >
@@ -454,7 +422,7 @@ class StatusIndicatorManager:
             # --- Draw Language Text (Right of Mic, only if menus enabled and source exists) ---
             if draw_text_areas and self.source_lang:
                 # Start AFTER the mic icon (whose position depends on whether mode text was drawn)
-                current_x = icon_x_offset + self.icon_base_width + self.padding
+                current_x = icon_x_offset + self.icon_base_width
 
                 # 1. Draw Source Language
                 src_text = self.source_lang; src_width = self.text_font.measure(src_text)
@@ -463,11 +431,12 @@ class StatusIndicatorManager:
                 self.canvas.create_text(current_x + text_padding_x, text_y, text=src_text, anchor=tk.W, font=self.text_font, fill=self.text_color, tags=("source_lang_area",))
                 current_x = src_bg_x1
 
-                # 2. Draw Arrow and Target Language Area
-                arrow_text = " > "; arrow_width = self.text_font.measure(arrow_text)
-                arrow_x = current_x + self.padding // 2
-                self.canvas.create_text(arrow_x, text_y, text=arrow_text, anchor=tk.W, font=self.text_font, fill=self.text_color)
-                current_x = arrow_x + arrow_width + self.padding // 2
+                # 2. Draw Arrow and Target Language Area (immediately after source) --- >
+                arrow_text = ">"; arrow_width = self.text_font.measure(arrow_text)
+                arrow_x = current_x # Arrow starts right after source bg
+                # Add tag="arrow_area" to the arrow text
+                self.canvas.create_text(arrow_x, text_y, text=arrow_text, anchor=tk.W, font=self.text_font, fill=self.text_color, tags=("arrow_area",))
+                current_x = arrow_x + arrow_width # Update current_x to end of arrow
 
                 is_target_active = self.target_lang and self.target_lang != self.source_lang
                 tgt_text = self.target_lang if is_target_active else "None"
@@ -505,7 +474,7 @@ class StatusIndicatorManager:
 
         popup = tk.Toplevel(self.root)
         popup.overrideredirect(True); popup.wm_attributes("-topmost", True)
-        popup.config(bg=self.popup_bg, relief=tk.SOLID, borderwidth=1)
+        popup.config(bg=self.popup_bg, relief=tk.SOLID, borderwidth=0) # No border
 
         # --- Store labels for hover check ---
         current_popup_labels = {}
@@ -553,14 +522,14 @@ class StatusIndicatorManager:
             # logging.debug(f"Popup '{lang_type}': Absolute bbox for tag '{tag_name}': ({bbox_abs_x0}, {bbox_abs_y0}, {bbox_abs_x1}, {bbox_abs_y1})")
             popup_height = popup.winfo_reqheight(); popup_width = popup.winfo_reqwidth()
             # logging.debug(f"Popup '{lang_type}': Required size: {popup_width}x{popup_height}")
-            popup_x = bbox_abs_x0; popup_y = bbox_abs_y0 - popup_height - 2
+            popup_x = bbox_abs_x0; popup_y = bbox_abs_y0 - popup_height
             # logging.debug(f"Popup '{lang_type}': Calculated initial coords: ({popup_x}, {popup_y})")
             screen_width = self.root.winfo_screenwidth(); screen_height = self.root.winfo_screenheight()
             adjusted = False
             if popup_x < 0: popup_x = 0; adjusted = True
             if popup_x + popup_width > screen_width: popup_x = screen_width - popup_width; adjusted = True
             if popup_y < 0:
-                popup_y = bbox_abs_y1 + 2; adjusted = True
+                popup_y = bbox_abs_y1; adjusted = True
                 if popup_y + popup_height > screen_height: popup_y = screen_height - popup_height; adjusted = True
             # if adjusted: logging.debug(f"Popup '{lang_type}': Adjusted coords: ({popup_x}, {popup_y})")
             popup.geometry(f"+{popup_x}+{popup_y}")
@@ -616,7 +585,7 @@ class StatusIndicatorManager:
 
         popup = tk.Toplevel(self.root)
         popup.overrideredirect(True); popup.wm_attributes("-topmost", True)
-        popup.config(bg=self.popup_bg, relief=tk.SOLID, borderwidth=1)
+        popup.config(bg=self.popup_bg, relief=tk.SOLID, borderwidth=0) # No border
 
         # --- Store labels for hover check ---
         self.mode_popup_labels = {} # Clear previous labels
@@ -635,13 +604,13 @@ class StatusIndicatorManager:
             canvas_x = self.canvas.winfo_rootx(); canvas_y = self.canvas.winfo_rooty()
             bbox_abs_x0 = canvas_x + bbox_rel[0]; bbox_abs_y0 = canvas_y + bbox_rel[1]
             popup_height = popup.winfo_reqheight(); popup_width = popup.winfo_reqwidth()
-            popup_x = bbox_abs_x0; popup_y = bbox_abs_y0 - popup_height - 2 # Position above
+            popup_x = bbox_abs_x0; popup_y = bbox_abs_y0 - popup_height
             screen_width = self.root.winfo_screenwidth(); screen_height = self.root.winfo_screenheight()
             adjusted = False
             if popup_x < 0: popup_x = 0; adjusted = True
             if popup_x + popup_width > screen_width: popup_x = screen_width - popup_width; adjusted = True
             if popup_y < 0: # If above screen, place below
-                popup_y = canvas_y + bbox_rel[3] + 2 # Below the mode text area
+                popup_y = canvas_y + bbox_rel[3] # Below the mode text area
                 adjusted = True
                 if popup_y + popup_height > screen_height: popup_y = screen_height - popup_height; adjusted = True
 
@@ -818,7 +787,7 @@ class StatusIndicatorManager:
             return False
         try:
             # ALWAYS Calculate correct icon offset assuming mode text space exists
-            icon_x_offset = self.mode_text_width_estimate + self.padding
+            icon_x_offset = self.mode_text_width_estimate
 
             # Use this calculated offset for bounding box check
             w, h = self.icon_base_width, self.icon_height

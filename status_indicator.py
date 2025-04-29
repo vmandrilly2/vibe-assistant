@@ -199,7 +199,13 @@ class StatusIndicatorManager:
             logging.warning("Attempted to update content of non-existent mode popup.")
             return
 
-        modes_to_display = list(self.available_modes.items()) # List of (mode_name, display_name)
+        # Filter out the current mode before displaying options
+        current_mode_name = self.current_mode
+        modes_to_display = [
+            (mode_name, display_name)
+            for mode_name, display_name in self.available_modes.items()
+            if mode_name != current_mode_name
+        ]
 
         # Clear old data for labels associated with *this* popup type
         keys_to_remove = [k for k, v in self.label_data.items() if v.get("popup") == self.mode_popup]
@@ -232,9 +238,12 @@ class StatusIndicatorManager:
         # --- Determine which languages to show --- >
         langs_to_display = [] # List of (lang_code, display_name)
         if lang_type == "source":
+            # Get current source language to exclude it from the popup list
+            current_source_lang = self.source_lang # Access the instance variable
             recent_codes = self.config.get("general", {}).get("recent_source_languages", [])[:MAX_RECENT_LANG_DISPLAY]
             for code in recent_codes:
-                if code in self.all_languages:
+                # Add only if it exists in the full list AND is not the currently selected one
+                if code in self.all_languages and code != current_source_lang:
                      langs_to_display.append((code, self.all_languages[code]))
         else: # Target language
             # Add "None" first

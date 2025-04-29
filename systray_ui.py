@@ -236,18 +236,53 @@ def update_trigger_setting_callback(icon, item, setting_key, value):
     # icon.menu = build_menu()
     # icon.update_menu()
 
-# --- Functions to build the menu dynamically ---
-def build_general_menu():
-    MAX_RECENT_DISPLAY = 3 # How many recent languages to show directly
+# --- Callback for Mode Selection ---
+def update_mode_setting_callback(icon, item, value):
+    """Callback to update the active mode in config."""
+    logging.debug(f"Updating active mode: {value}")
+    if "general" not in config:
+        config["general"] = {}
+    config["general"]["active_mode"] = value
+    save_config() # Save the updated config
+    # No need to rebuild menu here, checked state handles visual update
 
+# --- Functions to build the menu dynamically ---
+def build_mode_menu():
+    """Builds the Mode selection submenu."""
+    general_cfg = config.get("general", {})
+    current_mode = general_cfg.get("active_mode", "Dictation") # Default to Dictation if missing
+
+    # --- Get AVAILABLE_MODES from vibe_app constants if possible, or define locally ---
+    # For now, let's define it locally, mirroring vibe_app.py and status_indicator.py
+    # Consider a shared constants file later.
+    AVAILABLE_MODES = {
+        "Dictation": "Dictation Mode",
+        "Keyboard": "Keyboard Input Mode"
+        # Add "Command" later if desired
+    }
+
+    mode_items = []
+    for mode_name, display_name in AVAILABLE_MODES.items():
+        mode_items.append(
+            item(
+                display_name, # Use the descriptive name
+                partial(update_mode_setting_callback, value=mode_name),
+                checked=lambda item, m=mode_name: current_mode == m,
+                radio=True
+            )
+        )
+    return menu(*mode_items)
+
+def build_language_source_menu():
+    """Builds the Langue Source submenu (extracted logic)."""
+    MAX_RECENT_DISPLAY = 3 # How many recent languages to show directly
     general_cfg = config.get("general", {})
     current_source_lang = general_cfg.get("selected_language") # Get current source language
     recent_source_codes = [code for code in general_cfg.get("recent_source_languages", []) if code != current_source_lang][:MAX_RECENT_DISPLAY] # Filter out current
-    recent_target_codes = general_cfg.get("recent_target_languages", [])[:MAX_RECENT_DISPLAY]
 
     # --- Helper to create item with check --- >
     def create_lang_item(lang_type, code):
-        setting_key = 'selected_language' if lang_type == 'source' else 'target_language'
+        setting_key = 'selected_language' # Hardcoded for source
         name = ALL_LANGUAGES.get(code, f"Unknown ({code})")
         return item(
             name,
@@ -256,7 +291,6 @@ def build_general_menu():
             radio=True
         )
 
-    # --- Source Language Menu --- >
     source_lang_items = []
     # Add recent SOURCE languages first (already filtered)
     for code in recent_source_codes:
@@ -285,7 +319,25 @@ def build_general_menu():
         # Fallback if only the current language was available (and thus filtered out)
         source_lang_items.append(item("No other languages available", None, enabled=False))
 
-    # --- Target Language Menu --- >
+    return menu(*source_lang_items)
+
+def build_language_target_menu():
+    """Builds the Langue Cible submenu (extracted logic)."""
+    MAX_RECENT_DISPLAY = 3 # How many recent languages to show directly
+    general_cfg = config.get("general", {})
+    recent_target_codes = general_cfg.get("recent_target_languages", [])[:MAX_RECENT_DISPLAY]
+
+    # --- Helper to create item with check --- >
+    def create_lang_item(lang_type, code):
+        setting_key = 'target_language' # Hardcoded for target
+        name = ALL_LANGUAGES.get(code, f"Unknown ({code})") # Use ALL_LANGUAGES for name lookup
+        return item(
+            name,
+            partial(update_general_setting_callback, setting_key=setting_key, value=code),
+            checked=lambda item, c=code: general_cfg.get(setting_key) == c,
+            radio=True
+        )
+
     target_lang_items = []
     # Always add "None" first
     target_lang_items.append(
@@ -328,6 +380,12 @@ def build_general_menu():
     elif len(target_lang_items) <= 1: # Only "None" is present
         target_lang_items.append(item("No other languages", None, enabled=False))
 
+    return menu(*target_lang_items)
+
+# Renamed from build_general_menu -> builds the content of "Personnalisation"
+def build_personalisation_submenu_content():
+    general_cfg = config.get("general", {})
+
     # --- Min Duration (Display only) --- >
     min_dur = general_cfg.get("min_duration_sec", "N/A")
     min_dur_item = item(f'Min Duration (s): {min_dur}', None, enabled=False)
@@ -336,9 +394,11 @@ def build_general_menu():
     openai_model = general_cfg.get("openai_model", "N/A")
     model_item = item(f'Translation Model: {openai_model}', None, enabled=False)
 
+    # --- Return list including submenus for triggers and tooltip ---
     return [
-        item('Langue Source', menu(*source_lang_items)),
-        item('Langue Cible', menu(*target_lang_items)),
+        item('Déclencheurs', menu(*build_triggers_menu())), # Move triggers here
+        item('Info-bulle', menu(*build_tooltip_menu())), # Move tooltip here
+        menu.SEPARATOR,
         min_dur_item,
         model_item
     ]
@@ -411,14 +471,16 @@ def build_tooltip_menu():
     ]
 
 def build_menu():
-    """Builds the main systray menu structure."""
+    """Builds the main systray menu structure (reorganized)."""
     return menu(
-        item('Général', menu(*build_general_menu())), # Changed name slightly
-        item('Déclencheurs', menu(*build_triggers_menu())), # Changed name slightly
-        item('Info-bulle', menu(*build_tooltip_menu())), # Changed name slightly
+        item('Mode', build_mode_menu()), # New Mode menu at the root
+        item('Langue Source', build_language_source_menu()), # Langue Source at the root
+        item('Langue Cible', build_language_target_menu()), # Langue Cible at the root
         menu.SEPARATOR,
-        item('Recharger Config', on_reload_config_clicked), # Changed name slightly
-        item('Quitter', on_exit_clicked) # Changed name slightly
+        item('Personnalisation', menu(*build_personalisation_submenu_content())), # Renamed from "Général"
+        menu.SEPARATOR,
+        item('Recharger Config', on_reload_config_clicked), # Kept at root
+        item('Quitter', on_exit_clicked) # Kept at root
     )
 
 # --- Main Systray Function ---

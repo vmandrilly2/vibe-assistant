@@ -73,6 +73,8 @@ class StatusIndicatorManager:
         # --- Track currently hovered lang code --- > (Renamed for clarity)
         self.hovered_label_widget = None # Track the specific label widget being hovered
         self.hovered_data = None # {type: ..., value: ...} corresponding to hovered_label_widget
+        # --- NEW: Connection Status --- >
+        self.connection_status = "ok" # ok, error
 
         # Icon drawing properties
         self.icon_base_width = 24 # Original icon width
@@ -94,6 +96,8 @@ class StatusIndicatorManager:
         self.dictation_volume_color = "#FF0000" # Red for Dictation volume
         self.keyboard_volume_color = "#0000FF" # Blue for Keyboard volume
         self.command_volume_color = "#008000" # Green for Command volume (placeholder)
+        # --- NEW: Error Color --- >
+        self.mic_error_color = "#FF6347" # Tomato red for error state
         # self.idle_indicator_color = "#ADD8E6" # REMOVED - No longer needed
         self.text_color = "#333333" # Color for language text
         self.inactive_text_color = "#AAAAAA" # Lighter gray for inactive target lang
@@ -341,6 +345,15 @@ class StatusIndicatorManager:
                         needs_redraw = True
                         if target_state == "active": self.current_volume = 0.0
                         # Hiding handled above
+                # --- NEW: Handle Connection Status Update --- >
+                elif command == "connection_update":
+                    new_status = data.get("status", "ok")
+                    if new_status != self.connection_status:
+                        self.connection_status = new_status
+                        logging.debug(f"StatusIndicator connection status updated: {self.connection_status}")
+                        # Redraw needed only if the indicator is currently visible
+                        if self.current_state != "hidden":
+                            needs_redraw = True
                 elif command == "check_hover_position":
                     self.last_hover_pos = data
                 elif command == "selection_made":
@@ -531,10 +544,14 @@ class StatusIndicatorManager:
             base_h = h * 0.1; base_y = stand_y + stand_h; base_w = w * 0.8; base_x = icon_x_offset + (w - base_w) / 2
             self.canvas.create_rectangle(stand_x, stand_y, stand_x + stand_w, stand_y + stand_h, fill=self.mic_stand_color, outline="")
             self.canvas.create_rectangle(base_x, base_y, base_x + base_w, base_y + base_h, fill=self.mic_stand_color, outline="")
-            mic_body = self.canvas.create_rectangle(body_x, body_y, body_x + body_w, body_y + body_h, fill=self.mic_body_color, outline=self.mic_stand_color)
+            # --- MODIFIED: Use error color if connection status is error --- >
+            current_mic_body_color = self.mic_error_color if self.connection_status == "error" else self.mic_body_color
+            mic_body = self.canvas.create_rectangle(body_x, body_y, body_x + body_w, body_y + body_h, fill=current_mic_body_color, outline=self.mic_stand_color)
+            # --- End Modified --- >
 
             # Volume Indicator
-            if self.current_state == "active":
+            # --- MODIFIED: Don't draw volume indicator if connection status is error --- >
+            if self.current_state == "active" and self.connection_status == "ok":
                  volume_color = self.dictation_volume_color
                  if self.current_mode == "Keyboard": volume_color = self.keyboard_volume_color
                  fill_h = body_h * self.current_volume; fill_y = body_y + body_h - fill_h

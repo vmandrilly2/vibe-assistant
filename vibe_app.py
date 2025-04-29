@@ -375,7 +375,8 @@ stream_handler.setFormatter(log_formatter)
 
 # File Handler (logs to vibe_app.log in the same directory)
 try:
-    file_handler = logging.FileHandler("vibe_app.log", mode='w')
+    # --- MODIFICATION: Add encoding='utf-8' ---
+    file_handler = logging.FileHandler("vibe_app.log", mode='w', encoding='utf-8')
     file_handler.setFormatter(log_formatter)
 except Exception as e:
     print(f"Error setting up file logging: {e}")
@@ -1020,6 +1021,14 @@ async def translate_and_type(text_to_translate, source_lang_code, target_lang_co
 # --- Deepgram Event Handlers ---
 async def on_open(self, open, **kwargs):
     logging.info("Deepgram connection opened.")
+    # --- NEW: Update status indicator to OK --- >
+    try:
+        if status_mgr and status_mgr.thread.is_alive():
+            status_mgr.queue.put_nowait(("connection_update", {"status": "ok"}))
+    except queue.Full:
+        logging.warning("Status queue full sending connection_update=ok on open.")
+    except Exception as e:
+        logging.error(f"Error sending status update on DG open: {e}")
 
 async def on_message(self, result, **kwargs):
     global typed_word_history, final_source_text, final_keyboard_input_text # Add final_keyboard_input_text
@@ -1027,6 +1036,8 @@ async def on_message(self, result, **kwargs):
     global last_interim_transcript # REMOVED final_processed_this_session
     try:
         transcript = result.channel.alternatives[0].transcript
+        # --- NEW: Log the raw transcript with representation ---
+        logging.debug(f"Raw transcript received: {transcript!r}") # Use !r to see representation
         if not transcript:
             return
 
@@ -1079,6 +1090,14 @@ async def on_utterance_end(self, utterance_end, **kwargs):
 
 async def on_error(self, error, **kwargs):
     logging.error(f"Deepgram Handled Error: {error}")
+    # --- NEW: Update status indicator to ERROR --- >
+    try:
+        if status_mgr and status_mgr.thread.is_alive():
+            status_mgr.queue.put_nowait(("connection_update", {"status": "error"}))
+    except queue.Full:
+        logging.warning("Status queue full sending connection_update=error on DG error.")
+    except Exception as e:
+        logging.error(f"Error sending status update on DG error: {e}")
 
 async def on_close(self, close, **kwargs):
     logging.info("Deepgram connection closed.")
@@ -1458,6 +1477,13 @@ async def main():
             # --- Start Transcription Flow --- >
             # Only start if the event is set AND we are not in the process of stopping
             if transcription_active_event.is_set() and not is_stopping and dg_connection is None:
+                # --- NEW: Set status to OK *before* attempting connection --- >
+                try:
+                    if status_mgr and status_mgr.thread.is_alive():
+                        status_mgr.queue.put_nowait(("connection_update", {"status": "ok"}))
+                except queue.Full: logging.warning("Status queue full setting status to OK before connect.")
+                except Exception as e: logging.error(f"Error setting status to OK before connect: {e}")
+                # --- End New --- >
                 logging.info(f"Activating transcription in {ACTIVE_MODE} mode...")
                 # Clear state based on ACTIVE_MODE
                 if ACTIVE_MODE == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""

@@ -93,6 +93,10 @@ TOOLTIP_FONT_FAMILY = "Arial"
 TOOLTIP_FONT_SIZE = 10
 ACTIVE_MODE = MODE_DICTATION # Initialize with default
 
+# --- NEW: State Variables for Dictation Flow ---
+last_interim_transcript = "" # Store the most recent interim result
+final_processed_this_session = False # Flag to ensure final processing happens only once
+
 # --- Pynput Mappings ---
 PYNPUT_BUTTON_MAP = {
     "left": mouse.Button.left,
@@ -1019,6 +1023,8 @@ async def on_open(self, open, **kwargs):
 
 async def on_message(self, result, **kwargs):
     global typed_word_history, final_source_text, final_keyboard_input_text # Add final_keyboard_input_text
+    # --- ADDED GLOBALS ---
+    global last_interim_transcript, final_processed_this_session
     try:
         transcript = result.channel.alternatives[0].transcript
         if not transcript:
@@ -1027,12 +1033,26 @@ async def on_message(self, result, **kwargs):
         # Determine action based on the globally set ACTIVE_MODE
         if ACTIVE_MODE == MODE_DICTATION:
             if result.is_final:
-                final_part = transcript
-                updated_history, text_typed_this_segment = handle_dictation_final(final_part, typed_word_history)
-                typed_word_history = updated_history
-                final_source_text = " ".join([entry['text'] for entry in typed_word_history])
-                logging.debug(f"Dictation final source text updated: '{final_source_text}'")
+                # --- ADDED CHECK for final processed flag ---
+                if not final_processed_this_session:
+                    logging.debug(f"Processing final dictation result: '{transcript}'")
+                    final_part = transcript
+                    # Note: handle_dictation_final expects the final segment transcript
+                    updated_history, text_typed_this_segment = handle_dictation_final(final_part, typed_word_history)
+                    typed_word_history = updated_history
+                    final_source_text = " ".join([entry['text'] for entry in typed_word_history])
+                    logging.debug(f"Dictation final source text updated: '{final_source_text}'")
+
+                    # --- Mark as processed and clear interim ---
+                    final_processed_this_session = True
+                    last_interim_transcript = ""
+                    logging.debug("Marked final transcript as processed for this session.")
+                else:
+                    logging.debug(f"Ignoring redundant final transcript for this session: '{transcript}'")
             else:
+                # --- Update last interim transcript ---
+                last_interim_transcript = transcript
+                # --- Call interim handler (as before) ---
                 handle_dictation_interim(transcript)
 
         elif ACTIVE_MODE == MODE_KEYBOARD:
@@ -1080,6 +1100,8 @@ def on_click(x, y, button, pressed):
     global SELECTED_LANGUAGE, TARGET_LANGUAGE, ACTIVE_MODE
     global initial_activation_pos
     global status_mgr
+    # --- ADDED GLOBALS ---
+    global last_interim_transcript, final_processed_this_session
 
     # Determine trigger based only on DICTATION_TRIGGER_BUTTON for now
     is_primary_trigger = (button == DICTATION_TRIGGER_BUTTON)
@@ -1094,7 +1116,11 @@ def on_click(x, y, button, pressed):
         if not transcription_active_event.is_set():
             logging.info(f"Trigger button pressed - starting mode: {ACTIVE_MODE}.")
             # Clear specific state based on ACTIVE_MODE
-            if ACTIVE_MODE == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
+            if ACTIVE_MODE == MODE_DICTATION:
+                typed_word_history.clear()
+                final_source_text = ""
+                last_interim_transcript = "" # Reset interim transcript
+                final_processed_this_session = False # Reset final processing flag
             elif ACTIVE_MODE == MODE_KEYBOARD: final_keyboard_input_text = ""
             # elif ACTIVE_MODE == MODE_COMMAND: current_command_transcript = ""
 

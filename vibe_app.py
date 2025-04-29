@@ -1024,7 +1024,7 @@ async def on_open(self, open, **kwargs):
 async def on_message(self, result, **kwargs):
     global typed_word_history, final_source_text, final_keyboard_input_text # Add final_keyboard_input_text
     # --- ADDED GLOBALS ---
-    global last_interim_transcript, final_processed_this_session
+    global last_interim_transcript # REMOVED final_processed_this_session
     try:
         transcript = result.channel.alternatives[0].transcript
         if not transcript:
@@ -1033,22 +1033,17 @@ async def on_message(self, result, **kwargs):
         # Determine action based on the globally set ACTIVE_MODE
         if ACTIVE_MODE == MODE_DICTATION:
             if result.is_final:
-                # --- ADDED CHECK for final processed flag ---
-                if not final_processed_this_session:
-                    logging.debug(f"Processing final dictation result: '{transcript}'")
-                    final_part = transcript
-                    # Note: handle_dictation_final expects the final segment transcript
-                    updated_history, text_typed_this_segment = handle_dictation_final(final_part, typed_word_history)
-                    typed_word_history = updated_history
-                    final_source_text = " ".join([entry['text'] for entry in typed_word_history])
-                    logging.debug(f"Dictation final source text updated: '{final_source_text}'")
+                # --- REMOVED CHECK for final processed flag ---
+                logging.debug(f"Processing final dictation result: '{transcript}'")
+                final_part = transcript
+                # Note: handle_dictation_final expects the final segment transcript
+                updated_history, text_typed_this_segment = handle_dictation_final(final_part, typed_word_history)
+                typed_word_history = updated_history
+                final_source_text = " ".join([entry['text'] for entry in typed_word_history])
+                logging.debug(f"Dictation final source text updated: '{final_source_text}'")
 
-                    # --- Mark as processed and clear interim ---
-                    final_processed_this_session = True
-                    last_interim_transcript = ""
-                    logging.debug("Marked final transcript as processed for this session.")
-                else:
-                    logging.debug(f"Ignoring redundant final transcript for this session: '{transcript}'")
+                # --- REMOVED flag setting and log message ---
+                last_interim_transcript = "" # Clear interim after processing a final part
             else:
                 # --- Update last interim transcript ---
                 last_interim_transcript = transcript
@@ -1094,14 +1089,14 @@ async def on_unhandled(self, unhandled, **kwargs):
 # --- Pynput Listener Callbacks ---
 def on_click(x, y, button, pressed):
     # Use transcription_active_event as the main gatekeeper
-    global start_time, status_queue, ui_interaction_cancelled
+    global start_time, status_queue, ui_interaction_cancelled, ui_action_queue # ADDED ui_action_queue
     global transcription_active_event # Use this event
     global typed_word_history, final_source_text, final_keyboard_input_text
     global SELECTED_LANGUAGE, TARGET_LANGUAGE, ACTIVE_MODE
     global initial_activation_pos
     global status_mgr
     # --- ADDED GLOBALS ---
-    global last_interim_transcript, final_processed_this_session
+    global last_interim_transcript # REMOVED final_processed_this_session
 
     # Determine trigger based only on DICTATION_TRIGGER_BUTTON for now
     is_primary_trigger = (button == DICTATION_TRIGGER_BUTTON)
@@ -1120,15 +1115,29 @@ def on_click(x, y, button, pressed):
                 typed_word_history.clear()
                 final_source_text = ""
                 last_interim_transcript = "" # Reset interim transcript
-                final_processed_this_session = False # Reset final processing flag
+                # final_processed_this_session = False # REMOVED - No longer used
             elif ACTIVE_MODE == MODE_KEYBOARD: final_keyboard_input_text = ""
             # elif ACTIVE_MODE == MODE_COMMAND: current_command_transcript = ""
 
-            # Set general active flag
+            # Set general active flag and time/pos
             transcription_active_event.set()
             start_time = time.time()
             initial_activation_pos = (x, y)
             logging.debug(f"Stored initial activation position: {initial_activation_pos}")
+
+            # --- Send START command to main loop's queue --- >
+            try:
+                ui_action_queue.put_nowait(("start_transcription", None))
+                logging.debug("Sent start_transcription command to main loop queue.")
+            except queue.Full:
+                logging.error("UI Action Queue full! Cannot send start_transcription command.")
+                # If queue is full, something is wrong, maybe clear the event?
+                transcription_active_event.clear()
+                start_time = None
+                initial_activation_pos = None
+                return
+
+            # --- Send status update to indicator AFTER sending start command ---
             try:
                 # Send current ACTIVE_MODE to status indicator
                 status_data = {"state": "active", "pos": initial_activation_pos,
@@ -1492,6 +1501,10 @@ async def main():
                         # else: # Optional: Log if trying to send when not connected
                         #    logging.debug("Attempted to send mic data while DG not connected.")
                     microphone = Microphone(logging_send_wrapper)
+
+                    # --- REMOVED DELAY --- >
+                    # await asyncio.sleep(0.1) # 100ms delay
+
                     microphone.start()
                     logging.info("Deepgram connection and microphone started.")
 

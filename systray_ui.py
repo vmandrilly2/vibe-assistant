@@ -232,12 +232,14 @@ def update_general_setting_callback(icon, item, setting_key, value):
     if setting_key == 'selected_language':
         logging.info(f"Systray source language changed to {value}. Reloading translations.")
         old_lang = i18n.get_current_language()
+        logging.debug(f"Language BEFORE load_translations: {old_lang}")
         load_translations(value)
-        logging.debug(f"i18n language after load_translations: {i18n.get_current_language()} (was {old_lang})")
+        new_lang = i18n.get_current_language()
+        logging.debug(f"Language AFTER load_translations: {new_lang} (requested {value})")
         # Log a sample translation retrieval
         sample_key = 'systray.menu.exit'
         sample_translation = _(sample_key)
-        logging.debug(f"Sample translation for '{sample_key}' in {i18n.get_current_language()}: '{sample_translation}'")
+        logging.debug(f"Sample translation for '{sample_key}' AFTER load in callback ({new_lang}): '{sample_translation}'")
 
     save_config()
     # Need to rebuild menu here because the recent items have changed
@@ -541,10 +543,26 @@ def build_tooltip_menu():
     ]
 
 def build_menu():
-    """Builds the main systray menu structure (reorganized)."""
+    """Builds the main systray menu structure, showing current source language."""
+    current_build_lang = i18n.get_current_language()
+    logging.debug(f"Starting build_menu. Current i18n lang: {current_build_lang}")
+
+    # --- Get Current Source Language Name for Display ---
+    general_cfg = config.get("general", {})
+    current_source_lang_code = general_cfg.get("selected_language", "N/A")
+    # Use native name logic
+    english_name = ALL_LANGUAGES.get(current_source_lang_code, current_source_lang_code)
+    native_name = NATIVE_LANGUAGE_NAMES.get(current_source_lang_code, english_name)
+    current_source_lang_display_name = native_name if current_source_lang_code != "N/A" else "N/A"
+
+    # --- Combine base label with current language ---
+    source_lang_label_base = _('systray.menu.source_language', default='Langue Source')
+    source_lang_menu_text = f"{source_lang_label_base}: {current_source_lang_display_name}"
+
     return menu(
         item(_('systray.menu.mode', default='Mode'), build_mode_menu()),
-        item(_('systray.menu.source_language', default='Langue Source'), build_language_source_menu()),
+        # --- Use the combined text for the menu item --- >
+        item(source_lang_menu_text, build_language_source_menu()),
         item(_('systray.menu.target_language', default='Langue Cible'), build_language_target_menu()),
         menu.SEPARATOR,
         item(_('systray.menu.customization', default='Personnalisation'), menu(*build_personalisation_submenu_content())),
@@ -555,25 +573,60 @@ def build_menu():
 
 # --- Main Systray Function ---
 def run_systray(exit_event_arg):
-    """Runs the systray icon loop."""
-    global exit_app_event # Allow modification of the global placeholder
-    exit_app_event = exit_event_arg # Store the passed event
+    """Runs the systray icon loop with config reload watching."""
+    global exit_app_event, config, icon # Add config and icon to globals used here
+    exit_app_event = exit_event_arg
     logging.info(f"Initializing systray UI... Exit event set: {exit_app_event is not None}")
 
     try:
-        # Create a placeholder icon image
-        # You might want to replace this with an actual .ico file later
         image = create_image(64, 64, 'black', 'red')
-
-        # --- Translate icon title --- >
         icon_title = _('systray.title', default="Vibe Assistant")
         icon = pystray.Icon("vibe_assistant", image, icon_title, menu=build_menu())
-        logging.info("Running systray icon...")
-        icon.run() # This blocks until icon.stop() is called
+
+        logging.info("Starting systray icon detached...")
+        icon.run_detached() # Use run_detached instead of run
+
+        # --- Watcher Loop ---
+        while not exit_app_event.is_set():
+            # Wait for the config reload event, with a timeout to allow checking exit event
+            event_set = config_reload_event.wait(timeout=1.0) # Wait for 1 second
+
+            if event_set:
+                logging.info("Systray detected config reload event.")
+                config_reload_event.clear() # Clear the event
+
+                # Reload config and translations within systray thread
+                try:
+                    config = load_config() # Reload config to get new language
+                    new_lang = config.get("general", {}).get("selected_language")
+                    logging.info(f"Systray reloading translations for: {new_lang}")
+                    load_translations(new_lang)
+
+                    # Rebuild and update the menu
+                    icon.menu = build_menu()
+                    icon.update_menu()
+                    logging.info("Systray menu rebuilt and updated.")
+
+                    # Update icon title too, in case it uses translations
+                    new_icon_title = _('systray.title', default="Vibe Assistant")
+                    if icon.title != new_icon_title:
+                        icon.title = new_icon_title
+                        logging.info(f"Systray icon title updated to: {icon.title}")
+
+                except Exception as e:
+                    logging.error(f"Error during systray config/menu reload: {e}", exc_info=True)
+
+        # --- Exit ---
+        logging.info("Systray watcher loop exiting. Stopping icon...")
+        icon.stop()
         logging.info("Systray icon stopped.")
 
     except Exception as e:
         logging.error(f"Error running systray: {e}", exc_info=True)
+        # Ensure icon is stopped even on error
+        if 'icon' in locals() and icon and icon.visible:
+            try: icon.stop()
+            except: pass # Ignore errors stopping potentially broken icon
 
 # --- Entry Point (if run directly, for testing) ---
 if __name__ == "__main__":

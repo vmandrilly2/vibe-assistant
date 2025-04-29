@@ -382,25 +382,23 @@ class StatusIndicatorManager:
             bg_y0 = text_y - (self.text_font_size / 1.5) - text_padding_y
             bg_y1 = text_y + (self.text_font_size / 1.5) + text_padding_y
 
-            # --- Determine initial icon position and visibility of text areas ---
-            icon_x_offset = 0
-            draw_text_areas = self.menus_enabled # Text areas only drawn if menus are enabled
+            # --- Determine fixed icon position and visibility of text areas --- >
+            # ALWAYS calculate icon's horizontal starting position assuming mode text space exists
+            icon_x_offset = self.mode_text_width_estimate + self.padding
+            draw_text_areas = self.menus_enabled
 
-            # --- Draw Mode Text (Left of Mic, only if menus enabled) ---
+            # --- Draw Mode Text (Left of Mic, only if menus enabled) --- >
             if draw_text_areas:
-                current_x = 0 # Start from left edge
+                # Draw within the allocated space (0 to self.mode_text_width_estimate)
                 mode_text = self.current_mode
-                mode_width = self.text_font.measure(mode_text)
-                mode_bg_x0 = current_x
-                mode_bg_x1 = current_x + mode_width + text_padding_x * 2
-                self.canvas.create_rectangle(mode_bg_x0, bg_y0, mode_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("mode_area",))
-                self.canvas.create_text(current_x + text_padding_x, text_y, text=mode_text, anchor=tk.W, font=self.text_font, fill=self.mode_text_color, tags=("mode_area",))
-                icon_x_offset = mode_bg_x1 + self.padding # Update icon offset
-            else:
-                # Center the mic icon horizontally if text areas are not shown
-                icon_x_offset = (self.canvas_width - self.icon_base_width) / 2
+                # Draw background rectangle for the mode area tag
+                self.canvas.create_rectangle(0, bg_y0, self.mode_text_width_estimate, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("mode_area",))
+                # Position text inside the background area (e.g., left-aligned with padding)
+                text_x = 0 + text_padding_x
+                self.canvas.create_text(text_x, text_y, text=mode_text, anchor=tk.W, font=self.text_font, fill=self.mode_text_color, tags=("mode_area",))
+            # No 'else' needed here for icon_x_offset calculation
 
-            # --- Draw Microphone Icon (Using potentially updated icon_x_offset) ---
+            # --- Draw Microphone Icon (Using the ALWAYS fixed icon_x_offset) --- >
             w, h = self.icon_base_width, self.icon_height
             body_w = w * 0.6; body_h = h * 0.6; body_x = icon_x_offset + (w - body_w) / 2; body_y = h * 0.1
             stand_h = h * 0.2; stand_y = body_y + body_h; stand_w = w * 0.2; stand_x = icon_x_offset + (w - stand_w) / 2
@@ -781,15 +779,12 @@ class StatusIndicatorManager:
 
     # --- Add helper to check if mouse is over mic icon ---
     def _is_point_over_mic(self, point_x, point_y):
-        """Checks hover over mic icon, calculating offset based on current menu visibility."""
+        """Checks hover over mic icon, always calculating offset assuming menu space exists."""
         if not self.canvas or not self.root or not self.root.winfo_exists():
             return False
         try:
-            # Calculate correct icon offset based on whether menus are currently enabled (drawn)
-            if self.menus_enabled:
-                icon_x_offset = self.mode_text_width_estimate + self.padding
-            else:
-                icon_x_offset = (self.canvas_width - self.icon_base_width) / 2
+            # ALWAYS Calculate correct icon offset assuming mode text space exists
+            icon_x_offset = self.mode_text_width_estimate + self.padding
 
             # Use this calculated offset for bounding box check
             w, h = self.icon_base_width, self.icon_height
@@ -807,7 +802,7 @@ class StatusIndicatorManager:
         except Exception as e:
             # Log error if calculation fails unexpectedly
             logging.error(f"Error in _is_point_over_mic check: {e}", exc_info=True)
-            return False 
+            return False
 
     # --- NEW: Blink Effect ---    
     def _blink_and_hide(self, selection_details):

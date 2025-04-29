@@ -241,7 +241,8 @@ def build_general_menu():
     MAX_RECENT_DISPLAY = 3 # How many recent languages to show directly
 
     general_cfg = config.get("general", {})
-    recent_source_codes = general_cfg.get("recent_source_languages", [])[:MAX_RECENT_DISPLAY]
+    current_source_lang = general_cfg.get("selected_language") # Get current source language
+    recent_source_codes = [code for code in general_cfg.get("recent_source_languages", []) if code != current_source_lang][:MAX_RECENT_DISPLAY] # Filter out current
     recent_target_codes = general_cfg.get("recent_target_languages", [])[:MAX_RECENT_DISPLAY]
 
     # --- Helper to create item with check --- >
@@ -257,14 +258,14 @@ def build_general_menu():
 
     # --- Source Language Menu --- >
     source_lang_items = []
-    # Add recent SOURCE languages first
+    # Add recent SOURCE languages first (already filtered)
     for code in recent_source_codes:
         source_lang_items.append(create_lang_item('source', code))
 
-    # Define 'Other' source languages
+    # Define 'Other' source languages (filter out current source lang)
     other_source_langs = {
         k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
-        if k not in recent_source_codes # Exclude recent ones shown above
+        if k not in recent_source_codes and k != current_source_lang # Exclude recent AND current
     }
 
     # Build 'Other' source submenu
@@ -273,7 +274,7 @@ def build_general_menu():
             item(
                 name,
                 partial(update_general_setting_callback, setting_key='selected_language', value=code),
-                checked=lambda item, c=code: general_cfg.get("selected_language") == c,
+                checked=lambda item, c=code: general_cfg.get("selected_language") == c, # Check against the actual current lang
                 radio=True
             ) for code, name in other_source_langs.items()
         ])
@@ -281,8 +282,8 @@ def build_general_menu():
              source_lang_items.append(menu.SEPARATOR)
         source_lang_items.append(item('Autres langues', other_source_submenu))
     elif not recent_source_codes:
-        # Fallback if no recent and no other (shouldn't happen with ALL_LANGUAGES)
-        source_lang_items.append(item("No languages available", None, enabled=False))
+        # Fallback if only the current language was available (and thus filtered out)
+        source_lang_items.append(item("No other languages available", None, enabled=False))
 
     # --- Target Language Menu --- >
     target_lang_items = []
@@ -297,7 +298,9 @@ def build_general_menu():
     )
 
     # Add recent TARGET languages (excluding None if it was somehow added to recent list)
+    current_target_lang = general_cfg.get("target_language") # Keep this check for target
     for code in recent_target_codes:
+        # Don't filter current target, you might want to re-select it from recent
         if code is not None:
              target_lang_items.append(create_lang_item('target', code))
 
@@ -305,7 +308,7 @@ def build_general_menu():
     other_target_langs = {
         k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
         if k not in recent_target_codes # Exclude recent codes
-        # Note: `k is not None` check isn't strictly needed here as None isn't in ALL_LANGUAGES
+        # No need to filter current target here either
     }
 
     # Build 'Other' target submenu
@@ -318,12 +321,12 @@ def build_general_menu():
                 radio=True
             ) for code, name in other_target_langs.items()
         ])
-        if recent_target_codes or target_lang_items: # Add separator if None or recent items exist
+        # Add separator if "None" or recent items exist before "Other"
+        if target_lang_items: # Checks if the list is not empty (will have at least "None")
              target_lang_items.append(menu.SEPARATOR)
         target_lang_items.append(item('Autres langues', other_target_submenu))
     elif len(target_lang_items) <= 1: # Only "None" is present
         target_lang_items.append(item("No other languages", None, enabled=False))
-
 
     # --- Min Duration (Display only) --- >
     min_dur = general_cfg.get("min_duration_sec", "N/A")

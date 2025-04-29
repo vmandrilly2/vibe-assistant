@@ -86,8 +86,8 @@ class StatusIndicatorManager:
 
         # Font object with increased size
         self.text_font_size = 12 # Increased font size
-        self.text_font = tkFont.Font(family="Arial", size=self.text_font_size)
-        self.popup_font = tkFont.Font(family="Arial", size=10)
+        self.text_font = tkFont.Font(family="Segoe UI", size=self.text_font_size)
+        self.popup_font = tkFont.Font(family="Segoe UI", size=10)
         # --- Menus only enabled after hovering mic ---
         self.menus_enabled = False
         # --- Track if mic has been hovered since activation ---

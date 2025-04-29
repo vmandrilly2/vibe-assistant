@@ -11,7 +11,11 @@
       "zh"
     ],
     "recent_target_languages": [
-      null
+      null,
+      "ja-JP",
+      "ko-KR",
+      "zh",
+      "en-US"
     ]
   },
   "triggers": {

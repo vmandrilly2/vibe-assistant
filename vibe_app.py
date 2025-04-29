@@ -1487,7 +1487,16 @@ async def main():
             if systray_ui.config_reload_event.is_set():
                 logging.info("Detected config reload request.")
                 old_source = SELECTED_LANGUAGE
-                config = load_config(); apply_config(config); tooltip_mgr.reload_config()
+                # Reload config into the main app's global variable
+                config = load_config()
+                apply_config(config)
+                tooltip_mgr.reload_config() # Reload tooltip appearance
+
+                # --- NEW: Update StatusIndicatorManager's config reference --- >
+                if status_mgr:
+                    status_mgr.config = config # Give it the newly loaded config
+                    logging.info("Updated StatusIndicatorManager's config reference.")
+
                 systray_ui.config_reload_event.clear()
                 # Restart DG if source language changed while active
                 if dg_connection and SELECTED_LANGUAGE != old_source:

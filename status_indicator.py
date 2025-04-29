@@ -5,6 +5,8 @@ import queue
 import logging
 from functools import partial # Import partial for callbacks
 import time # Need time for precise timestamps
+import i18n # Import the module
+from i18n import _ # Import the get_translation alias
 
 # --- Define Mode Constants (can be shared with vibe_app.py) ---
 # It's slightly redundant defining them here and in vibe_app.py,
@@ -18,6 +20,7 @@ DEFAULT_MODES = {
 
 # --- Constants --- >
 MAX_RECENT_LANG_DISPLAY = 3 # How many recent languages to show in popups
+MAX_RECENT_TARGET_LANG_DISPLAY = 7
 MAX_MODE_DISPLAY = 3 # Max modes to pre-create labels for (adjust if more modes)
 
 class StatusIndicatorManager:
@@ -25,6 +28,7 @@ class StatusIndicatorManager:
     def __init__(self, q, action_q, config, all_languages, all_languages_target, available_modes=None):
         self.queue = q
         self.action_queue = action_q
+        # --- No need to pass translation function explicitly, just use imported _ --- >
         # --- Store config and language maps --- >
         self.config = config # Store the full config dict
         self.all_languages = all_languages
@@ -179,7 +183,7 @@ class StatusIndicatorManager:
             self.target_popup.config(bg=self.popup_bg, relief=tk.SOLID, borderwidth=0)
             self.target_labels = []
             # Need 1 extra label for "None" option
-            for i in range(MAX_RECENT_LANG_DISPLAY + 1):
+            for i in range(MAX_RECENT_TARGET_LANG_DISPLAY + 1):
                 label = tk.Label(self.target_popup, text="", font=("Segoe UI", 10), bg=self.popup_bg, fg=self.popup_fg, padx=5, pady=2, anchor=tk.W)
                 label.bind("<ButtonRelease-1>", self._on_popup_label_release)
                 self.target_labels.append(label)
@@ -203,6 +207,7 @@ class StatusIndicatorManager:
         current_mode_name = self.current_mode
         modes_to_display = [
             (mode_name, display_name)
+            # --- Use translated display names --- >
             for mode_name, display_name in self.available_modes.items()
             if mode_name != current_mode_name
         ]
@@ -215,7 +220,9 @@ class StatusIndicatorManager:
         for i, label in enumerate(self.mode_labels):
             if i < len(modes_to_display):
                 mode_name, display_name = modes_to_display[i]
-                label.config(text=display_name)
+                # --- Use translation --- >
+                translated_name = _(f"mode_names.{mode_name}", default=display_name)
+                label.config(text=translated_name)
                 # Store data associated with this label's ID
                 self.label_data[label.winfo_id()] = {"popup": self.mode_popup, "type": "mode", "value": mode_name}
                 # Ensure label is packed/visible
@@ -244,14 +251,20 @@ class StatusIndicatorManager:
             for code in recent_codes:
                 # Add only if it exists in the full list AND is not the currently selected one
                 if code in self.all_languages and code != current_source_lang:
-                     langs_to_display.append((code, self.all_languages[code]))
+                    # --- Translate name --- >
+                    default_name = self.all_languages.get(code, code) # Fallback to code
+                    langs_to_display.append((code, _(f"language_names.{code}", default=default_name)))
         else: # Target language
             # Add "None" first
-            langs_to_display.append((None, self.all_languages_target[None]))
-            recent_codes = self.config.get("general", {}).get("recent_target_languages", [])[:MAX_RECENT_LANG_DISPLAY]
+            # --- Translate "None" --- >
+            default_none_name = self.all_languages_target.get(None, "None")
+            langs_to_display.append((None, _(f"language_names.none", default=default_none_name)))
+            recent_codes = self.config.get("general", {}).get("recent_target_languages", [])[:MAX_RECENT_TARGET_LANG_DISPLAY]
             for code in recent_codes:
                  if code is not None and code in self.all_languages_target:
-                     langs_to_display.append((code, self.all_languages_target[code]))
+                     # --- Translate name --- >
+                     default_name = self.all_languages_target.get(code, code) # Fallback to code
+                     langs_to_display.append((code, _(f"language_names.{code}", default=default_name)))
 
         # Clear old data for labels associated with *this* popup type
         keys_to_remove = [k for k, v in self.label_data.items() if v.get("popup") == popup]
@@ -409,8 +422,14 @@ class StatusIndicatorManager:
                                      label.config(bg=self.popup_bg)
                          except tk.TclError: pass # Ignore errors if widget destroyed during check
 
-                 # --- Disable Menus if Mouse Left Interactive Area ---
-                 if self.menus_enabled and not is_mouse_over_interactive_area:
+                 # --- Disable Menus if Mouse Left Interactive Area --- >
+                 is_mouse_over_any_visible_popup = False
+                 for popup in [self.mode_popup, self.source_popup, self.target_popup]:
+                     if popup and popup.winfo_exists() and popup.state() == 'normal':
+                          if self._is_point_over_widget(mx, my, popup):
+                              is_mouse_over_any_visible_popup = True; break
+
+                 if self.menus_enabled and not is_mouse_over_interactive_area and not is_mouse_over_any_visible_popup:
                      logging.debug("Mouse left interactive area. Disabling menus and hiding popups.")
                      self.menus_enabled = False; self.mic_hovered_since_activation = False
                      needs_redraw = True # Redraw indicator without text areas
@@ -487,10 +506,12 @@ class StatusIndicatorManager:
 
             # Mode Text
             if draw_text_areas:
+                # --- Use translated mode name --- >
                 mode_text = self.current_mode
+                translated_mode_text = _(f"mode_names.{mode_text}", default=mode_text)
                 self.canvas.create_rectangle(0, bg_y0, self.mode_text_width_estimate, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("mode_area",))
                 text_x = 0 + text_padding_x
-                self.canvas.create_text(text_x, text_y, text=mode_text, anchor=tk.W, font=("Segoe UI", self.text_font_size), fill=self.mode_text_color, tags=("mode_area",))
+                self.canvas.create_text(text_x, text_y, text=translated_mode_text, anchor=tk.W, font=("Segoe UI", self.text_font_size), fill=self.mode_text_color, tags=("mode_area",))
 
             # Mic Icon
             w, h = self.icon_base_width, self.icon_height
@@ -513,9 +534,10 @@ class StatusIndicatorManager:
             # Language Text
             if draw_text_areas and self.source_lang:
                 current_x = icon_x_offset + self.icon_base_width
-                # --- MODIFIED: Look up full source language name ---
-                src_text = self.all_languages.get(self.source_lang, self.source_lang) # Use code as fallback
-                # --- END MODIFIED ---
+                # --- Translate source lang name --- >
+                default_src_name = self.all_languages.get(self.source_lang, self.source_lang) # Fallback to code
+                src_text = _(f"language_names.{self.source_lang}", default=default_src_name)
+                # --- END MODIFIED --- >
                 src_width = tkFont.Font(family="Segoe UI", size=self.text_font_size).measure(src_text)
                 src_bg_x0 = current_x; src_bg_x1 = current_x + src_width + text_padding_x * 2
                 self.canvas.create_rectangle(src_bg_x0, bg_y0, src_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("source_lang_area",))
@@ -528,9 +550,13 @@ class StatusIndicatorManager:
                 current_x = arrow_x + arrow_width
 
                 is_target_active = self.target_lang and self.target_lang != self.source_lang
-                # --- MODIFIED: Look up full target language name (or None display name) ---
-                tgt_text = self.all_languages_target.get(self.target_lang, self.target_lang) if is_target_active else self.all_languages_target.get(None, "None") # Use code/None as fallback
-                # --- END MODIFIED ---
+                # --- Translate target lang name (or None) --- >
+                target_key = self.target_lang if is_target_active else "none"
+                default_tgt_name = self.all_languages_target.get(self.target_lang, self.target_lang) if is_target_active else self.all_languages_target.get(None, "None")
+                # If target_key is None, i18n might not find it directly, use "none" key explicitly
+                tgt_text_key = f"language_names.{target_key if target_key is not None else 'none'}"
+                tgt_text = _(tgt_text_key, default=default_tgt_name)
+                # --- END MODIFIED --- >
                 tgt_color = self.text_color if is_target_active else self.inactive_text_color
                 tgt_width = tkFont.Font(family="Segoe UI", size=self.text_font_size).measure(tgt_text)
                 tgt_bg_x0 = current_x; tgt_bg_x1 = current_x + tgt_width + text_padding_x * 2
@@ -697,6 +723,9 @@ class StatusIndicatorManager:
     # --- MODIFIED: Generic Popup Release Callback ---
     def _on_popup_label_release(self, event):
         """Handles click release on any popup label."""
+        # --- ADD DEBUG LOG ---
+        logging.debug(f"_on_popup_label_release triggered for widget: {event.widget}")
+        # --- END ADD ---
         widget = event.widget
         widget_id = widget.winfo_id()
 

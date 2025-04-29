@@ -26,6 +26,10 @@ from audio_buffer import BufferedAudioInput
 # --- Status Indicator Import (NEW) ---
 from status_indicator import StatusIndicatorManager, DEFAULT_MODES # Import DEFAULT_MODES
 
+# --- Internationalization (i18n) Import >
+import i18n
+from i18n import load_translations, _ # Import the main translation function
+
 from pynput import mouse, keyboard
 from pynput.keyboard import Key, KeyCode # Import KeyCode
 from deepgram import (
@@ -256,6 +260,7 @@ def apply_config(cfg):
     global TARGET_LANGUAGE, OPENAI_MODEL, ACTIVE_MODE # Add ACTIVE_MODE
 
     logging.info("Applying configuration...")
+    old_source_lang = SELECTED_LANGUAGE # Store old language
     try:
         # Triggers
         triggers_cfg = cfg.get("triggers", {})
@@ -281,6 +286,21 @@ def apply_config(cfg):
         TOOLTIP_FONT_FAMILY = str(cfg.get("tooltip", {}).get("font_family", "Arial"))
         TOOLTIP_FONT_SIZE = int(cfg.get("tooltip", {}).get("font_size", 10))
 
+        # --- Reload Translations if Source Language Changed --- >
+        if SELECTED_LANGUAGE != old_source_lang:
+            logging.info(f"Source language changed from {old_source_lang} to {SELECTED_LANGUAGE}. Reloading translations.")
+            # --- Add debug logging --- >
+            old_i18n_lang = i18n.get_current_language()
+            load_translations(SELECTED_LANGUAGE)
+            new_i18n_lang = i18n.get_current_language()
+            logging.debug(f"apply_config: i18n language after load_translations: {new_i18n_lang} (was {old_i18n_lang})")
+            sample_key = 'systray.menu.exit' # Use a known key
+            sample_translation = _(sample_key)
+            logging.debug(f"apply_config: Sample translation for '{sample_key}' in {new_i18n_lang}: '{sample_translation}'")
+            # --- End debug logging --- >
+            # TODO: Potentially signal StatusIndicator/Systray to update display names if needed?
+            # The systray rebuilds its menu anyway. StatusIndicator redraws on state change.
+
         target_lang_str = TARGET_LANGUAGE if TARGET_LANGUAGE else "None"
         logging.info(f"Config applied: Mode={ACTIVE_MODE}, SourceLang={SELECTED_LANGUAGE}, TargetLang={target_lang_str}, Model={OPENAI_MODEL}, Dictation={triggers_cfg.get('dictation_button', 'middle')}, ...")
 
@@ -302,6 +322,9 @@ if not OPENAI_API_KEY:
 
 # Apply the initially loaded config
 apply_config(config)
+# --- Load Initial Translations --- >
+load_translations(SELECTED_LANGUAGE)
+logging.info(f"Initial translations loaded for language: {i18n.get_current_language()}")
 
 # --- Initialize OpenAI Client ---
 # Initialize AsyncOpenAI client if key exists
@@ -1096,67 +1119,77 @@ def on_click(x, y, button, pressed):
         if not transcription_active_event.is_set():
              return
 
-        # --- IMMEDIATELY HIDE UI --- >
-        # Send hide command regardless of hover or other logic.
-        # The main loop stop flow should NOT handle hiding anymore.
-        try:
-            logging.debug("Button released: Sending immediate hide command to status indicator.")
-            hide_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}
-            status_queue.put_nowait(("state", hide_data))
-            if ACTIVE_MODE == MODE_DICTATION:
-                 tooltip_queue.put_nowait(("hide", None))
-        except queue.Full: logging.warning("Queue full sending immediate hide on release.")
-        except Exception as e: logging.error(f"Error sending immediate hide on release: {e}")
-        # --- End Immediate Hide ---
-
+        # --- Check for UI Interaction (Hover Selection) FIRST --- >
         # Check hover state from status manager for potential actions
         hover_mode = None
         hover_lang_type = None
         hover_lang_code = None
-        if status_mgr and hasattr(status_mgr, 'hovering_over_mode_name'):
-            hover_mode = status_mgr.hovering_over_mode_name
-            hover_lang_type = status_mgr.hovering_over_lang_type
-            hover_lang_code = status_mgr.hovering_over_lang_code
+        # --- MODIFIED: Use the more precise hovered_data if available --- >
+        if status_mgr and hasattr(status_mgr, 'hovered_data') and status_mgr.hovered_data:
+            hover_data = status_mgr.hovered_data
+            if hover_data.get("type") == "mode":
+                hover_mode = hover_data.get("value")
+            elif hover_data.get("type") in ["source", "target"]:
+                hover_lang_type = hover_data.get("type")
+                hover_lang_code = hover_data.get("value")
 
-            # --- Check for Mode Selection FIRST ---
-            if hover_mode:
-                logging.info(f"Trigger release over mode option: {hover_mode}. Selecting mode.")
-                try: ui_action_queue.put_nowait(("select_mode", hover_mode))
-                except queue.Full: logging.warning(f"Action queue full sending hover mode selection ({hover_mode}).")
-                ui_interaction_cancelled = True # Signal cancellation of normal stop flow
-                logging.debug("Set ui_interaction_cancelled flag due to mode hover selection.")
-                # --- Send selection confirmation to StatusIndicator for blink ---
-                try:
-                     selection_data = {"type": "mode", "value": hover_mode}
-                     status_queue.put_nowait(("selection_made", selection_data))
-                except queue.Full: logging.warning("Status queue full sending selection confirmation.")
-                # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
-                return # Exit callback early
+        # --- Process Hover Selection if Found --- >
+        if hover_mode:
+            logging.info(f"Trigger release over mode option: {hover_mode}. Selecting mode.")
+            try: ui_action_queue.put_nowait(("select_mode", hover_mode))
+            except queue.Full: logging.warning(f"Action queue full sending hover mode selection ({hover_mode}).")
+            ui_interaction_cancelled = True # Signal cancellation of normal stop flow
+            logging.debug("Set ui_interaction_cancelled flag due to mode hover selection.")
+            # --- Send selection confirmation to StatusIndicator for blink/hide ---
+            try:
+                 selection_data = {"type": "mode", "value": hover_mode}
+                 status_queue.put_nowait(("selection_made", selection_data))
+            except queue.Full: logging.warning(f"Status queue full sending selection confirmation.")
+            # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
+            # --- ALSO Do NOT hide UI here - let StatusIndicator handle it via 'selection_made'
+            # --- ADD: Clear the event here as well to signal stop flow --- >
+            transcription_active_event.clear()
+            return # Exit callback early
 
-            # --- Check for Language Selection SECOND ---
-            # Allow hover_lang_code to be None ONLY if hover_lang_type is 'target'
-            elif hover_lang_type and (hover_lang_code is not None or (hover_lang_type == 'target' and hover_lang_code is None)):
-                logging.info(f"Trigger release over language option: Type={hover_lang_type}, Code={hover_lang_code}. Selecting language.")
-                try: ui_action_queue.put_nowait(("select_language", {"type": hover_lang_type, "lang": hover_lang_code}))
-                except queue.Full: logging.warning(f"Action queue full sending hover language selection ({hover_lang_type}={hover_lang_code}).")
-                ui_interaction_cancelled = True # Signal cancellation of normal stop flow
-                logging.debug("Set ui_interaction_cancelled flag due to language hover selection.")
-                # --- Send selection confirmation to StatusIndicator for blink ---
-                try:
-                     selection_data = {"type": "language", "lang_type": hover_lang_type, "value": hover_lang_code}
-                     status_queue.put_nowait(("selection_made", selection_data))
-                except queue.Full: logging.warning("Status queue full sending selection confirmation.")
-                # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
-                return # Exit callback early
+        elif hover_lang_type and (hover_lang_code is not None or (hover_lang_type == 'target' and hover_lang_code is None)):
+            logging.info(f"Trigger release over language option: Type={hover_lang_type}, Code={hover_lang_code}. Selecting language.")
+            try: ui_action_queue.put_nowait(("select_language", {"type": hover_lang_type, "lang": hover_lang_code}))
+            except queue.Full: logging.warning(f"Action queue full sending hover language selection ({hover_lang_type}={hover_lang_code}).")
+            ui_interaction_cancelled = True # Signal cancellation of normal stop flow
+            logging.debug("Set ui_interaction_cancelled flag due to language hover selection.")
+            # --- Send selection confirmation to StatusIndicator for blink/hide ---
+            try:
+                 selection_data = {"type": "language", "lang_type": hover_lang_type, "value": hover_lang_code}
+                 status_queue.put_nowait(("selection_made", selection_data))
+            except queue.Full: logging.warning(f"Status queue full sending selection confirmation.")
+            # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
+            # --- ALSO Do NOT hide UI here - let StatusIndicator handle it via 'selection_made'
+            # --- ADD: Clear the event here as well to signal stop flow --- >
+            transcription_active_event.clear()
+            return # Exit callback early
 
-        # --- Signal Transcription Stop (Normal Release - No Hover Selection) ---
-        duration = time.time() - start_time if 'start_time' in globals() and start_time else 0
-        logging.info(f"Trigger button released (duration: {duration:.2f}s). Signaling backend stop for {ACTIVE_MODE}.")
-        # Clear the event to signal the main loop stop flow
-        transcription_active_event.clear()
-        initial_activation_pos = None
-        # --- REMOVED explicit hide message sending - UI is hidden above, main loop handles backend ---
+        # --- NO Hover Selection Detected: Proceed with Normal Stop Flow ---
+        else:
+            # --- IMMEDIATELY HIDE UI --- >
+            # Send hide command regardless of hover or other logic.
+            # The main loop stop flow should NOT handle hiding anymore.
+            try:
+                logging.debug("Button released (no hover selection): Sending immediate hide command to status indicator.")
+                hide_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}
+                status_queue.put_nowait(("state", hide_data))
+                if ACTIVE_MODE == MODE_DICTATION:
+                     tooltip_queue.put_nowait(("hide", None))
+            except queue.Full: logging.warning("Queue full sending immediate hide on release.")
+            except Exception as e: logging.error(f"Error sending immediate hide on release: {e}")
+            # --- End Immediate Hide ---
 
+            # --- Signal Transcription Stop (Normal Release - No Hover Selection) ---
+            duration = time.time() - start_time if 'start_time' in globals() and start_time else 0
+            logging.info(f"Trigger button released (no hover selection, duration: {duration:.2f}s). Signaling backend stop for {ACTIVE_MODE}.")
+            # Clear the event to signal the main loop stop flow
+            transcription_active_event.clear()
+            initial_activation_pos = None
+            # --- REMOVED explicit hide message sending - UI is hidden above, main loop handles backend ---
 
 def on_press(key):
     global modifier_keys_pressed, status_queue
@@ -1262,7 +1295,10 @@ async def main():
     # --- Start Status Indicator Manager ---
     # Pass the config, full language maps, and available modes
     status_mgr = StatusIndicatorManager(status_queue, ui_action_queue,
-                                        config=config, # Pass the whole config dict
+                                        config=config,
+                                        # --- Pass i18n function --- >
+                                        # get_translation_func=_,
+                                        # --- Keep language maps for now, UI will use _() later --- >
                                         all_languages=ALL_LANGUAGES,
                                         all_languages_target=ALL_LANGUAGES_TARGET,
                                         available_modes=AVAILABLE_MODES)
@@ -1553,8 +1589,9 @@ async def main():
                 apply_config(config)
                 tooltip_mgr.reload_config()
                 if status_mgr:
-                    status_mgr.config = config
-                    logging.info("Updated StatusIndicatorManager's config reference.")
+                    status_mgr.config = config # Update config reference
+                    # apply_config (called earlier) should handle translation reload if necessary
+                    logging.info("Updated StatusIndicatorManager's config reference after reload.")
                 systray_ui.config_reload_event.clear()
                 # Check if DG needs restart due to language change
                 should_restart_dg = False

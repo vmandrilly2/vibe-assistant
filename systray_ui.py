@@ -8,6 +8,10 @@ import os
 import sys
 from functools import partial # Import partial for cleaner callbacks
 
+# --- i18n Import --- >
+import i18n
+from i18n import load_translations, _
+
 # --- Configuration Handling (Mirrors vibe_app.py logic initially) ---
 CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
@@ -78,6 +82,10 @@ def load_config():
 
 # --- Global State for UI ---
 config = load_config()
+# --- Load Initial Translations --- >
+load_translations(config.get("general", {}).get("selected_language"))
+logging.info(f"Systray initial translations loaded for language: {i18n.get_current_language()}")
+# --- End Load Initial Translations --- >
 config_reload_event = threading.Event() # Used to signal main app to reload
 exit_app_event = None # Placeholder for the event from main app
 
@@ -196,6 +204,17 @@ def update_general_setting_callback(icon, item, setting_key, value):
         logging.debug(f"Systray updated recent target: {config['general'][recent_list_key]}")
     # --- End Update Recent List ---
 
+    # --- Reload translations if source language changed BEFORE saving --- >
+    if setting_key == 'selected_language':
+        logging.info(f"Systray source language changed to {value}. Reloading translations.")
+        old_lang = i18n.get_current_language()
+        load_translations(value)
+        logging.debug(f"i18n language after load_translations: {i18n.get_current_language()} (was {old_lang})")
+        # Log a sample translation retrieval
+        sample_key = 'systray.menu.exit'
+        sample_translation = _(sample_key)
+        logging.debug(f"Sample translation for '{sample_key}' in {i18n.get_current_language()}: '{sample_translation}'")
+
     save_config()
     # Need to rebuild menu here because the recent items have changed
     # We cannot rely only on checked state as the items themselves change
@@ -219,6 +238,10 @@ def on_reload_config_clicked(icon, item):
     logging.info("Reload config requested from systray menu.")
     config = load_config()
     # Signal main app to also reload its internal config state
+    # --- Reload translations in systray --- >
+    load_translations(config.get("general", {}).get("selected_language"))
+    logging.info(f"Systray reloaded translations for language: {i18n.get_current_language()}")
+    # --- End Reload --- >
     config_reload_event.set()
     # Rebuild the menu to reflect the reloaded config
     icon.menu = build_menu()
@@ -257,15 +280,17 @@ def build_mode_menu():
     # Consider a shared constants file later.
     AVAILABLE_MODES = {
         "Dictation": "Dictation Mode",
-        "Keyboard": "Keyboard Input Mode"
+        "Keyboard": "Keyboard Input Mode",
         # Add "Command" later if desired
     }
 
     mode_items = []
     for mode_name, display_name in AVAILABLE_MODES.items():
+        # --- Use translation key for display name --- >
+        translated_name = _(f"mode_names.{mode_name}", default=display_name)
         mode_items.append(
             item(
-                display_name, # Use the descriptive name
+                translated_name,
                 partial(update_mode_setting_callback, value=mode_name),
                 checked=lambda item, m=mode_name: current_mode == m,
                 radio=True
@@ -283,7 +308,9 @@ def build_language_source_menu():
     # --- Helper to create item with check --- >
     def create_lang_item(lang_type, code):
         setting_key = 'selected_language' # Hardcoded for source
-        name = ALL_LANGUAGES.get(code, f"Unknown ({code})")
+        # --- Translate language name --- >
+        default_name = ALL_LANGUAGES.get(code, f"Unknown ({code})") # Keep original lookup as fallback
+        name = _(f"language_names.{code}", default=default_name)
         return item(
             name,
             partial(update_general_setting_callback, setting_key=setting_key, value=code),
@@ -305,8 +332,9 @@ def build_language_source_menu():
     # Build 'Other' source submenu
     if other_source_langs:
         other_source_submenu = menu(*[
+            # --- Translate language name --- >
             item(
-                name,
+                _(f"language_names.{code}", default=name),
                 partial(update_general_setting_callback, setting_key='selected_language', value=code),
                 checked=lambda item, c=code: general_cfg.get("selected_language") == c, # Check against the actual current lang
                 radio=True
@@ -314,23 +342,28 @@ def build_language_source_menu():
         ])
         if recent_source_codes: # Add separator only if recent items exist
              source_lang_items.append(menu.SEPARATOR)
-        source_lang_items.append(item('Autres langues', other_source_submenu))
+        # --- Translate "Other languages" --- >
+        source_lang_items.append(item(_('systray.menu.other_languages', default='Autres langues'), other_source_submenu))
     elif not recent_source_codes:
         # Fallback if only the current language was available (and thus filtered out)
-        source_lang_items.append(item("No other languages available", None, enabled=False))
+        # --- Translate "No other languages" --- >
+        source_lang_items.append(item(_('systray.menu.no_other_languages', default="No other languages available"), None, enabled=False))
 
     return menu(*source_lang_items)
 
 def build_language_target_menu():
     """Builds the Langue Cible submenu (extracted logic)."""
     MAX_RECENT_DISPLAY = 3 # How many recent languages to show directly
+    MAX_RECENT_TARGET_DISPLAY = 7
     general_cfg = config.get("general", {})
-    recent_target_codes = general_cfg.get("recent_target_languages", [])[:MAX_RECENT_DISPLAY]
+    recent_target_codes = general_cfg.get("recent_target_languages", [])[:MAX_RECENT_TARGET_DISPLAY]
 
     # --- Helper to create item with check --- >
     def create_lang_item(lang_type, code):
         setting_key = 'target_language' # Hardcoded for target
-        name = ALL_LANGUAGES.get(code, f"Unknown ({code})") # Use ALL_LANGUAGES for name lookup
+        # --- Translate language name --- >
+        default_name = ALL_LANGUAGES.get(code, f"Unknown ({code})") # Keep original lookup as fallback
+        name = _(f"language_names.{code}", default=default_name)
         return item(
             name,
             partial(update_general_setting_callback, setting_key=setting_key, value=code),
@@ -342,7 +375,8 @@ def build_language_target_menu():
     # Always add "None" first
     target_lang_items.append(
         item(
-            "Aucune (Dictée seulement)", # Explicit name for None
+            # --- Translate "None" option --- >
+            _(f"language_names.none", default="Aucune (Dictée seulement)"),
             partial(update_general_setting_callback, setting_key='target_language', value=None),
             checked=lambda item: general_cfg.get("target_language") is None,
             radio=True
@@ -350,7 +384,6 @@ def build_language_target_menu():
     )
 
     # Add recent TARGET languages (excluding None if it was somehow added to recent list)
-    current_target_lang = general_cfg.get("target_language") # Keep this check for target
     for code in recent_target_codes:
         # Don't filter current target, you might want to re-select it from recent
         if code is not None:
@@ -359,15 +392,16 @@ def build_language_target_menu():
     # Define 'Other' target languages
     other_target_langs = {
         k: v for k, v in sorted(ALL_LANGUAGES.items(), key=lambda item: item[1])
-        if k not in recent_target_codes # Exclude recent codes
+        if k not in recent_target_codes and k is not None # Exclude recent codes and also None from "Other"
         # No need to filter current target here either
     }
 
     # Build 'Other' target submenu
     if other_target_langs:
         other_target_submenu = menu(*[
+            # --- Translate language name --- >
             item(
-                name,
+                _(f"language_names.{code}", default=name),
                 partial(update_general_setting_callback, setting_key='target_language', value=code),
                 checked=lambda item, c=code: general_cfg.get("target_language") == c,
                 radio=True
@@ -376,9 +410,11 @@ def build_language_target_menu():
         # Add separator if "None" or recent items exist before "Other"
         if target_lang_items: # Checks if the list is not empty (will have at least "None")
              target_lang_items.append(menu.SEPARATOR)
-        target_lang_items.append(item('Autres langues', other_target_submenu))
+        # --- Translate "Other languages" --- >
+        target_lang_items.append(item(_('systray.menu.other_languages', default='Autres langues'), other_target_submenu))
     elif len(target_lang_items) <= 1: # Only "None" is present
-        target_lang_items.append(item("No other languages", None, enabled=False))
+        # --- Translate "No other languages" --- >
+        target_lang_items.append(item(_('systray.menu.no_other_languages', default="No other languages available"), None, enabled=False))
 
     return menu(*target_lang_items)
 
@@ -386,18 +422,18 @@ def build_language_target_menu():
 def build_personalisation_submenu_content():
     general_cfg = config.get("general", {})
 
-    # --- Min Duration (Display only) --- >
+    # --- Min Duration (Display only, translated) --- >
     min_dur = general_cfg.get("min_duration_sec", "N/A")
-    min_dur_item = item(f'Min Duration (s): {min_dur}', None, enabled=False)
+    min_dur_item = item(_('systray.menu.min_duration', default=f'Min Duration (s): {min_dur}', value=min_dur), None, enabled=False)
 
-    # --- OpenAI Model (Display only for now) --- >
+    # --- OpenAI Model (Display only, translated) --- >
     openai_model = general_cfg.get("openai_model", "N/A")
-    model_item = item(f'Translation Model: {openai_model}', None, enabled=False)
+    model_item = item(_('systray.menu.translation_model', default=f'Translation Model: {openai_model}', value=openai_model), None, enabled=False)
 
     # --- Return list including submenus for triggers and tooltip ---
     return [
-        item('Déclencheurs', menu(*build_triggers_menu())), # Move triggers here
-        item('Info-bulle', menu(*build_tooltip_menu())), # Move tooltip here
+        item(_('systray.menu.triggers', default='Déclencheurs'), menu(*build_triggers_menu())), # Translate submenu title
+        item(_('systray.menu.tooltip', default='Info-bulle'), menu(*build_tooltip_menu())), # Translate submenu title
         menu.SEPARATOR,
         min_dur_item,
         model_item
@@ -449,9 +485,9 @@ def build_triggers_menu():
     modifier_submenu = menu(*modifier_items)
 
     return [
-        item('Dictation Button', dictation_submenu),
-        item('Command Button', command_submenu),
-        item('Command Modifier', modifier_submenu)
+        item(_('systray.menu.dictation_button', default='Dictation Button'), dictation_submenu),
+        item(_('systray.menu.command_button', default='Command Button'), command_submenu),
+        item(_('systray.menu.command_modifier', default='Command Modifier'), modifier_submenu)
     ]
 
 def build_tooltip_menu():
@@ -463,24 +499,24 @@ def build_tooltip_menu():
 
     # TODO: Add actions to change these settings
     return [
-        item(f'Transparency: {alpha}', None),
-        item(f'Background: {bg}', None),
-        item(f'Text Color: {fg}', None),
-        item(f'Font: {font}', None),
-        item(f'Font Size: {size}', None)
+        item(_('systray.menu.tooltip_transparency', default=f'Transparency: {alpha}', value=alpha), None, enabled=False),
+        item(_('systray.menu.tooltip_background', default=f'Background: {bg}', value=bg), None, enabled=False),
+        item(_('systray.menu.tooltip_text_color', default=f'Text Color: {fg}', value=fg), None, enabled=False),
+        item(_('systray.menu.tooltip_font', default=f'Font: {font}', value=font), None, enabled=False),
+        item(_('systray.menu.tooltip_font_size', default=f'Font Size: {size}', value=size), None, enabled=False)
     ]
 
 def build_menu():
     """Builds the main systray menu structure (reorganized)."""
     return menu(
-        item('Mode', build_mode_menu()), # New Mode menu at the root
-        item('Langue Source', build_language_source_menu()), # Langue Source at the root
-        item('Langue Cible', build_language_target_menu()), # Langue Cible at the root
+        item(_('systray.menu.mode', default='Mode'), build_mode_menu()),
+        item(_('systray.menu.source_language', default='Langue Source'), build_language_source_menu()),
+        item(_('systray.menu.target_language', default='Langue Cible'), build_language_target_menu()),
         menu.SEPARATOR,
-        item('Personnalisation', menu(*build_personalisation_submenu_content())), # Renamed from "Général"
+        item(_('systray.menu.customization', default='Personnalisation'), menu(*build_personalisation_submenu_content())),
         menu.SEPARATOR,
-        item('Recharger Config', on_reload_config_clicked), # Kept at root
-        item('Quitter', on_exit_clicked) # Kept at root
+        item(_('systray.menu.reload_config', default='Recharger Config'), on_reload_config_clicked),
+        item(_('systray.menu.exit', default='Quitter'), on_exit_clicked)
     )
 
 # --- Main Systray Function ---
@@ -495,7 +531,9 @@ def run_systray(exit_event_arg):
         # You might want to replace this with an actual .ico file later
         image = create_image(64, 64, 'black', 'red')
 
-        icon = pystray.Icon("vibe_assistant", image, "Vibe Assistant", menu=build_menu())
+        # --- Translate icon title --- >
+        icon_title = _('systray.title', default="Vibe Assistant")
+        icon = pystray.Icon("vibe_assistant", image, icon_title, menu=build_menu())
         logging.info("Running systray icon...")
         icon.run() # This blocks until icon.stop() is called
         logging.info("Systray icon stopped.")

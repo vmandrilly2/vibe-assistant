@@ -784,8 +784,7 @@ def on_click(x, y, button, pressed):
                 hover_lang_type = status_mgr.hovering_over_lang_type
                 hover_lang_code = status_mgr.hovering_over_lang_code
 
-            # --- Corrected condition to handle None for target ---
-            if (hover_lang_type == "source" and hover_lang_code is not None) or (hover_lang_type == "target"):
+            if hover_lang_type and hover_lang_code is not None: # Check if hover was active
                 logging.info(f"Trigger release over language option: Type={hover_lang_type}, Code={hover_lang_code}. Selecting language.")
                 # Send action to main thread via the action queue
                 try:

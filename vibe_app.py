@@ -331,8 +331,8 @@ else:
     logging.info("Command Trigger: Disabled")
 
 # --- Logging Setup ---
-# Only show HH:MM:SS and log level, no date, no thread name
-log_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s', datefmt='%H:%M:%S')
+# Include milliseconds in timestamp
+log_formatter = logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s: %(message)s', datefmt='%H:%M:%S')
 log_level = logging.DEBUG
 
 # Remove all handlers before adding new ones to avoid duplicates
@@ -1096,7 +1096,20 @@ def on_click(x, y, button, pressed):
         if not transcription_active_event.is_set():
              return
 
-        # Check hover state from status manager
+        # --- IMMEDIATELY HIDE UI --- >
+        # Send hide command regardless of hover or other logic.
+        # The main loop stop flow should NOT handle hiding anymore.
+        try:
+            logging.debug("Button released: Sending immediate hide command to status indicator.")
+            hide_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}
+            status_queue.put_nowait(("state", hide_data))
+            if ACTIVE_MODE == MODE_DICTATION:
+                 tooltip_queue.put_nowait(("hide", None))
+        except queue.Full: logging.warning("Queue full sending immediate hide on release.")
+        except Exception as e: logging.error(f"Error sending immediate hide on release: {e}")
+        # --- End Immediate Hide ---
+
+        # Check hover state from status manager for potential actions
         hover_mode = None
         hover_lang_type = None
         hover_lang_code = None
@@ -1138,11 +1151,11 @@ def on_click(x, y, button, pressed):
 
         # --- Signal Transcription Stop (Normal Release - No Hover Selection) ---
         duration = time.time() - start_time if 'start_time' in globals() and start_time else 0
-        logging.info(f"Trigger button released (duration: {duration:.2f}s). Stopping mode {ACTIVE_MODE} normally.")
+        logging.info(f"Trigger button released (duration: {duration:.2f}s). Signaling backend stop for {ACTIVE_MODE}.")
         # Clear the event to signal the main loop stop flow
         transcription_active_event.clear()
         initial_activation_pos = None
-        # --- REMOVED explicit hide message sending - main loop handles this ---
+        # --- REMOVED explicit hide message sending - UI is hidden above, main loop handles backend ---
 
 
 def on_press(key):
@@ -1280,28 +1293,45 @@ async def main():
     keyboard_listener.start()
     logging.info("Input listeners started.")
 
-    # --- Loop Variables ---
+    # --- Loop Variables --- >
     dg_connection = None
     microphone = None
-    active_mode_on_stop = None
+    # active_mode_on_stop = None # Capture this differently
     last_hover_check_time = 0
-    hover_check_interval = 0.1
-    # start_time is handled globally
+    hover_check_interval = 0.05 # Check hover every 50ms instead of 100ms
+    # --- NEW: Track if we are in the process of stopping --- >
+    is_stopping = False
+    stop_initiated_time = 0 # Track when stop was first detected
+    active_mode_on_stop = None # Store mode when stop begins
+    start_time = None # Make sure it's initialized
+    stopping_start_time = None # NEW: Store the start_time for the specific stop cycle being processed
 
     try:
         while not systray_ui.exit_app_event.is_set():
             current_time = time.time()
-            perform_stop_flow = False # Flag to check if stop flow should run
+            # perform_stop_flow = False # Remove this flag
 
-            # --- Check if stop flow needs to run ---
-            # Condition: Transcription WAS active, event is now clear, and DG connection exists
-            if not transcription_active_event.is_set() and dg_connection is not None:
-                 perform_stop_flow = True
-                 active_mode_on_stop = ACTIVE_MODE # Capture mode *before* potential UI action changes it
+            # --- Check if stop is signaled --- >
+            stop_detected_this_cycle = False
+            if not transcription_active_event.is_set() and start_time is not None and not is_stopping:
+                # Event is clear, we were active (start_time is set), and not already stopping
+                logging.info("Stop signal detected (transcription_active_event is clear).")
+                is_stopping = True
+                stop_initiated_time = current_time
+                stopping_start_time = start_time # CAPTURE start_time for this stop cycle
+                stop_detected_this_cycle = True
+                active_mode_on_stop = ACTIVE_MODE # Capture the mode when stop is first detected
+                # --- REMOVED: Immediate UI hide logic moved to on_click release handler ---
+                # logging.debug(f"Immediately hiding UI for {active_mode_on_stop}.")
+                # try: status_mgr.queue.put_nowait(("state", {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}))
+                # except queue.Full: logging.error("Status queue full sending immediate hide message.")
+                # except Exception as e: logging.error(f"Error sending immediate hide message: {e}")
+                # if active_mode_on_stop == MODE_DICTATION:
+                #     try: tooltip_mgr.queue.put_nowait(("hide", None))
+                #     except queue.Full: logging.error("Tooltip queue full sending immediate hide message.")
+                #     except Exception as e: logging.error(f"Error sending immediate tooltip hide message: {e}")
 
-            # --- Handle UI Actions FIRST ---
-            # Process these even if a stop is pending, as they might change config/mode
-            # before the stop action (like translation) is decided.
+            # --- Handle UI Actions FIRST (Keep this high priority) --- >
             try:
                 action_command, action_data = ui_action_queue.get_nowait()
                 if action_command == "select_language":
@@ -1314,204 +1344,237 @@ async def main():
 
                     # --- Update Recent Language List --- >
                     recent_list = config["general"].get(recent_list_key, [])
-                    # Remove if exists
-                    if new_lang in recent_list:
-                        recent_list.remove(new_lang)
-                    # Insert at beginning
+                    if new_lang in recent_list: recent_list.remove(new_lang)
                     recent_list.insert(0, new_lang)
-                    # Keep only the last, say, 10 used (adjust as needed)
                     MAX_RECENT_LANGS = 10
                     config["general"][recent_list_key] = recent_list[:MAX_RECENT_LANGS]
                     # --- End Update Recent Language List ---
 
                     logging.info(f"UI selected {lang_type} language: {new_lang}. Updating config.")
-                    save_config_local(config); apply_config(config); ui_interaction_cancelled = True
-                    # No need to restart DG here, apply_config updates globals used by next activation
+                    save_config_local(config); apply_config(config)
+                    # --- Crucial: Set cancel flag if interaction happens while stopping --- >
+                    if is_stopping: ui_interaction_cancelled = True
+                    # Original code had ui_interaction_cancelled = True here always, let's keep it
+                    ui_interaction_cancelled = True
 
-                elif action_command == "select_mode": # Handle mode selection
-                    new_mode = action_data # Data is just the mode name string
+                elif action_command == "select_mode":
+                    new_mode = action_data
                     if "general" not in config: config["general"] = {}
                     config["general"]["active_mode"] = new_mode
                     logging.info(f"UI selected mode: {new_mode}. Updating config.")
-                    save_config_local(config)
-                    apply_config(config) # Apply changes (might affect status bar display)
-                    ui_interaction_cancelled = True # Cancel current action if any
+                    save_config_local(config); apply_config(config)
+                    # --- Crucial: Set cancel flag if interaction happens while stopping --- >
+                    if is_stopping: ui_interaction_cancelled = True
+                    # Original code had ui_interaction_cancelled = True here always, let's keep it
+                    ui_interaction_cancelled = True
 
             except queue.Empty: pass
             except Exception as e: logging.error(f"Error processing UI action queue: {e}", exc_info=True)
 
-            # --- Check Hover Position (Only if active) ---
-            if transcription_active_event.is_set() and current_time - last_hover_check_time > hover_check_interval:
+            # --- Check Hover Position (Only if active and NOT stopping) --- >
+            if transcription_active_event.is_set() and not is_stopping and current_time - last_hover_check_time > hover_check_interval:
                 last_hover_check_time = current_time
                 try:
                     hover_pos = mouse_controller.position
                     if status_mgr and status_mgr.thread.is_alive():
-                        # Send current position for hover *checking*
                         status_mgr.queue.put_nowait(("check_hover_position", hover_pos))
                 except queue.Full: pass
                 except Exception as e:
-                    if time.time() % 5 < 0.1: logging.error(f"Error checking/sending hover position: {e}")
+                     # Reduce logging frequency for this error
+                     if time.time() % 1 < 0.02: # Log approx once per second max
+                         logging.error(f"Error checking/sending hover position: {e}")
 
-            # --- Start Transcription Flow ---
-            if transcription_active_event.is_set() and dg_connection is None:
-                # Use the global ACTIVE_MODE to determine behavior if needed, but DG options are usually the same
+            # --- Start Transcription Flow --- >
+            # Only start if the event is set AND we are not in the process of stopping
+            if transcription_active_event.is_set() and not is_stopping and dg_connection is None:
                 logging.info(f"Activating transcription in {ACTIVE_MODE} mode...")
                 # Clear state based on ACTIVE_MODE
                 if ACTIVE_MODE == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
                 elif ACTIVE_MODE == MODE_KEYBOARD: final_keyboard_input_text = ""
-                # elif ACTIVE_MODE == MODE_COMMAND: current_command_transcript = ""
 
                 try:
-                    # Connect, register handlers, set options...
                     dg_connection = deepgram.listen.asyncwebsocket.v("1")
+                    # --- Register ALL handlers --- >
                     dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
-                    # ... other handlers (on_open, on_close, etc.) ...
+                    dg_connection.on(LiveTranscriptionEvents.Open, on_open)
+                    dg_connection.on(LiveTranscriptionEvents.Close, on_close)
+                    dg_connection.on(LiveTranscriptionEvents.Error, on_error)
+                    dg_connection.on(LiveTranscriptionEvents.Unhandled, on_unhandled)
+                    dg_connection.on(LiveTranscriptionEvents.Metadata, on_metadata)
+                    dg_connection.on(LiveTranscriptionEvents.SpeechStarted, on_speech_started)
+                    dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, on_utterance_end)
+                    # --- End Handlers --- >
                     options = LiveOptions(model="nova-2", language=SELECTED_LANGUAGE, interim_results=True, smart_format=True,
                                           encoding="linear16", channels=1, sample_rate=16000, punctuate=True, numerals=True,
                                           utterance_end_ms="1000", vad_events=True, endpointing=300)
                     await dg_connection.start(options)
                     pre_activation_buffer = buffered_audio_input.get_buffer()
-                    # ... buffer sending logic ...
                     if pre_activation_buffer:
                         total_bytes = sum(len(chunk) for chunk in pre_activation_buffer)
                         logging.info(f"Sending pre-activation buffer: {len(pre_activation_buffer)} chunks, {total_bytes} bytes.")
                         for chunk in pre_activation_buffer:
                             if dg_connection and await dg_connection.is_connected():
                                 try: await dg_connection.send(chunk)
-                                except Exception: break
-                            else: break
-
-                    # Start DG mic...
+                                except Exception as send_err: logging.warning(f"Error sending buffer chunk: {send_err}"); break
+                            else: logging.warning("DG connection lost while sending buffer."); break
+                    # --- Microphone Setup --- >
                     original_send = dg_connection.send
                     async def logging_send_wrapper(data):
-                        # ... wrapper logic ...
                         is_conn_connected = False
                         if dg_connection:
                             try: is_conn_connected = await dg_connection.is_connected()
                             except Exception: pass
                         if is_conn_connected:
-                            # logging.debug(...) # Reduce noise
                             try: await original_send(data)
-                            except Exception: pass
-
+                            except Exception as mic_send_err: logging.warning(f"Error sending mic data: {mic_send_err}")
+                        # else: # Optional: Log if trying to send when not connected
+                        #    logging.debug("Attempted to send mic data while DG not connected.")
                     microphone = Microphone(logging_send_wrapper)
                     microphone.start()
                     logging.info("Deepgram connection and microphone started.")
 
+                    # --- IMMEDIATE CHECK AFTER START --- >
+                    if not transcription_active_event.is_set():
+                        logging.warning("Stop event detected immediately after DG/Mic start. Initiating stop.")
+                        # Manually trigger the stop logic *now* by setting the flag
+                        # The main loop will pick this up in the next iteration's 'if is_stopping:' block
+                        is_stopping = True
+                        stop_initiated_time = time.time() # Use current time
+                        stopping_start_time = start_time # CAPTURE start_time for this stop cycle too
+                        active_mode_on_stop = ACTIVE_MODE # Capture mode
+                        # UI should have been hidden by the main stop signal check,
+                        # but log if it wasn't, just in case.
+                        if start_time is not None: # Check if start_time was set before stop
+                            logging.debug("Ensuring UI is hidden due to stop during startup.")
+                            try: status_mgr.queue.put_nowait(("state", {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}))
+                            except Exception as e: logging.error(f"Error sending hide message during startup stop: {e}")
+                            if ACTIVE_MODE == MODE_DICTATION:
+                                try: tooltip_mgr.queue.put_nowait(("hide", None))
+                                except Exception as e: logging.error(f"Error sending tooltip hide during startup stop: {e}")
+
                 except Exception as e:
-                    # ... (Existing error handling for DG start) ...
                     logging.error(f"Failed to start DG/Mic: {e}", exc_info=True)
                     if dg_connection:
                        try: await dg_connection.finish()
                        except Exception: pass
-                    # Clear relevant flags
-                    transcription_active_event.clear()
+                       finally: dg_connection = None
+                    if microphone: microphone.finish(); microphone = None # Ensure mic is stopped
+                    # Clear flags if start failed
+                    transcription_active_event.clear() # Ensure it's clear
                     initial_activation_pos = None
+                    start_time = None # Reset start time too
+                    is_stopping = False # Not stopping if start failed
+                    # Ensure UI is hidden
                     try: status_mgr.queue.put_nowait(("state", {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}))
                     except Exception: pass
-
-
-            # --- Stop Transcription Flow ---
-            # Use the flag determined earlier
-            elif perform_stop_flow:
-                logging.info(f"Deactivating {active_mode_on_stop} mode...")
-                duration = current_time - start_time if 'start_time' in globals() and start_time else 0
-                start_time = None # Reset global start_time
-
-                # Hide UI
-                try: status_mgr.queue.put_nowait(("state", {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}))
-                except Exception: pass
-                if active_mode_on_stop == MODE_DICTATION: # Hide tooltip only for dictation
                     try: tooltip_mgr.queue.put_nowait(("hide", None))
                     except Exception: pass
 
-                # Stop Mic/Conn
+            # --- Process Stop Flow --- >
+            # If stopping has been initiated
+            if is_stopping:
+                logging.debug(f"Processing stop flow steps for {active_mode_on_stop}...")
+                # Stop Mic/Conn (if they exist)
                 if microphone:
                      microphone.finish()
                      microphone = None
-                     logging.info("DG Mic finished.")
-                # IMPORTANT: Set dg_connection to None *after* finish() completes
+                     logging.info("DG Mic finished during stop flow.")
                 if dg_connection:
                     try:
-                        await asyncio.sleep(0.1) # Brief pause allows sending CloseStream
+                        # Add short sleep before finish ONLY if buffer might still be sending? Risky.
+                        # Let's just try finishing directly.
+                        # await asyncio.sleep(0.05) # Removed sleep
                         await dg_connection.finish()
-                        logging.info("DG Conn finished.")
-                    except Exception as e: logging.error(f"Error finishing DG conn: {e}")
+                        logging.info("DG Conn finished during stop flow.")
+                    except Exception as e: logging.warning(f"Error finishing DG conn during stop flow: {e}")
                     finally:
                          dg_connection = None # Ensure this is set to None
 
-                # Check cancellation flag (set by hover or Esc)
+                # Check cancellation flag (might have been set by UI action during stop detection)
                 perform_action = True
                 if ui_interaction_cancelled:
                      perform_action = False
                      ui_interaction_cancelled = False # Reset flag AFTER checking it
-                     logging.info("UI interaction cancelled post-stop.")
+                     logging.info("UI interaction cancelled during stop flow.")
 
-                # Post-process / Translate / Execute based on the mode that *was* active
-                action_task = None # Use a general task name
+                # Calculate duration using the start_time captured for THIS stop cycle
+                duration = stop_initiated_time - stopping_start_time if stopping_start_time else 0
+
+                # Post-process / Translate / Execute
+                action_task = None
                 if perform_action:
                     if duration >= MIN_DURATION_SEC:
-                        logging.debug(f"Performing action for {active_mode_on_stop} (duration: {duration:.2f}s)")
+                        logging.debug(f"Performing action post-stop for {active_mode_on_stop} (duration: {duration:.2f}s)")
                         if active_mode_on_stop == MODE_DICTATION:
                             if TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE and final_source_text:
-                                # Create translation task
                                 action_task = asyncio.create_task(translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE))
-                            else: logging.info("Dictation finished. No translation necessary.")
+                            else: logging.info("Dictation finished post-stop. No translation.")
                         elif active_mode_on_stop == MODE_KEYBOARD:
-                             # Create keyboard input task
                              action_task = asyncio.create_task(handle_keyboard_input_final(final_keyboard_input_text))
-                        # elif active_mode_on_stop == MODE_COMMAND: execute_command(current_command_transcript) # Not async yet
                     else: # Discard short
-                         logging.info(f"Duration < min ({MIN_DURATION_SEC}s), discarding action for {active_mode_on_stop}.")
-                         # Clear state if discarded
+                         logging.info(f"Duration < min ({MIN_DURATION_SEC}s), discarding action post-stop for {active_mode_on_stop}.")
                          if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
                          elif active_mode_on_stop == MODE_KEYBOARD: final_keyboard_input_text = ""
                 else: # Clear state if cancelled
-                     logging.info(f"Action cancelled for {active_mode_on_stop}, clearing state.")
+                     logging.info(f"Action cancelled post-stop for {active_mode_on_stop}, clearing state.")
                      if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
                      elif active_mode_on_stop == MODE_KEYBOARD: final_keyboard_input_text = ""
-
-                # Reset keyboard text buffer regardless
-                final_keyboard_input_text = ""
 
                 # Await the action task if it was created
                 if action_task:
                     try: await action_task
-                    except Exception as e: logging.error(f"Error awaiting action task ({active_mode_on_stop}): {e}", exc_info=True)
+                    except Exception as e: logging.error(f"Error awaiting action task post-stop ({active_mode_on_stop}): {e}", exc_info=True)
 
-                # Reset the local flag after processing
-                perform_stop_flow = False
+                # --- Reset state AFTER processing stop flow --- >
+                logging.debug("Stop flow processing complete. Resetting state.")
+                is_stopping = False
+                # Check if a new activation started *during* this stop flow
+                # by comparing the current global start_time with the one we captured
+                # when *this* stop flow began.
+                if start_time == stopping_start_time:
+                    # No new activation interfered, safe to reset
+                    logging.debug(f"Current start_time ({start_time}) matches stopping_start_time ({stopping_start_time}). Resetting.")
+                    start_time = None
+                    initial_activation_pos = None
+                else:
+                    # A new activation occurred (global start_time was updated), keep it.
+                    logging.info(f"New activation detected during stop flow (current start_time {start_time} != stopping_start_time {stopping_start_time}). Keeping current start_time.")
+
+                # Always clear these buffers/states related to the *just completed* stopped action
+                final_keyboard_input_text = ""
                 active_mode_on_stop = None
+                stopping_start_time = None # Clear the temporary variable
 
-
-            # --- Check Config Reload ---
+            # --- Check Config Reload --- >
             if systray_ui.config_reload_event.is_set():
                 logging.info("Detected config reload request.")
                 old_source = SELECTED_LANGUAGE
-                # Reload config into the main app's global variable
                 config = load_config()
                 apply_config(config)
-                tooltip_mgr.reload_config() # Reload tooltip appearance
-
-                # --- NEW: Update StatusIndicatorManager's config reference --- >
+                tooltip_mgr.reload_config()
                 if status_mgr:
-                    status_mgr.config = config # Give it the newly loaded config
+                    status_mgr.config = config
                     logging.info("Updated StatusIndicatorManager's config reference.")
-
                 systray_ui.config_reload_event.clear()
-                # Restart DG if source language changed while active
-                if dg_connection and SELECTED_LANGUAGE != old_source:
-                     logging.info("Source language changed while active, restarting DG...")
-                     transcription_active_event.clear() # Trigger stop flow on next loop
+                # Check if DG needs restart due to language change
+                should_restart_dg = False
+                if SELECTED_LANGUAGE != old_source:
+                    if is_stopping:
+                        logging.warning("Config reload changed language during stop flow. Restart will happen naturally if needed.")
+                    elif transcription_active_event.is_set() and dg_connection is not None:
+                        logging.info("Source language changed while active, initiating stop to restart DG...")
+                        transcription_active_event.clear() # Let the stop flow handle restart on next cycle
+                        # No need to set is_stopping here, the cleared event will trigger it
+                    # else: language changed but not active or stopping, no action needed now
 
-            # --- Thread Health Checks ---
+            # --- Thread Health Checks --- >
             if not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set(): logging.error("Tooltip thread died."); break
             if not status_mgr.thread.is_alive() and not status_mgr._stop_event.is_set(): logging.error("Status Indicator thread died."); break
 
-            # --- At the end of main loop, flush modifier log buffer ---
+            # --- At the end of main loop, flush modifier log buffer --- >
             flush_modifier_log(force=True)
 
-            await asyncio.sleep(0.05) # Main loop sleep
+            await asyncio.sleep(0.02) # Keep the reduced sleep
 
     except (asyncio.CancelledError, KeyboardInterrupt): logging.info("Main task cancelled/interrupted.")
     finally:

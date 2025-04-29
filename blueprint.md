@@ -89,6 +89,7 @@ This file acts as both the project blueprint and a task manager. It outlines the
             *   [x] List preferred languages (defined in `vibe_app.py` for now).
             *   [x] Position popups above text area, handle screen edges.
             *   [x] Dismiss popups on mouse leave.
+            *   [x] Highlight popup options on hover **using coordinate checks (not Tkinter events, which do not work for actions while pressing a key)**.
             *   [x] Select language via standard mouse click on popup option.
             *   [x] Select language by releasing the main trigger button while hovering over a popup option.
             *   [x] Update `config.json` and running state immediately on selection.

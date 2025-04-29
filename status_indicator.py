@@ -53,6 +53,7 @@ class StatusIndicatorManager:
         self.hovering_over_lang_type = None # 'source' or 'target'
         self.hovering_over_lang_code = None # The actual code (e.g., 'en-US')
         self.hovering_over_mode_name = None # The name of the hovered mode (e.g., 'Keyboard')
+        self.currently_hovered_label = None # Track the specific label widget being hovered
 
         # Icon drawing properties
         self.icon_base_width = 24 # Original icon width
@@ -244,26 +245,49 @@ class StatusIndicatorManager:
                 # --- Only allow popups if menus_enabled ---
                 if self.menus_enabled:
                     self._check_hover_and_update_popups(mx, my)
-                # --- Check if Hovering Over Specific Label ---
+                # --- Check if Hovering Over Specific Label --- >
+                newly_hovered_label = None
                 if self.menus_enabled:
-                    if self.mode_popup and self._is_point_over_popup(mx, my, self.mode_popup):
-                        for mode_name, label in self.mode_popup_labels.items():
-                             if self._is_point_over_widget(mx, my, label):
-                                 self.hovering_over_mode_name = mode_name
-                                 break
-                    elif not self.hovering_over_mode_name and self.source_popup and self._is_point_over_popup(mx, my, self.source_popup):
-                        for code, label in self.source_popup_labels.items():
-                            if self._is_point_over_widget(mx, my, label):
-                                self.hovering_over_lang_type = "source"
-                                self.hovering_over_lang_code = code
-                                break
-                    elif not self.hovering_over_mode_name and not self.hovering_over_lang_code and self.target_popup and self._is_point_over_popup(mx, my, self.target_popup):
-                         for code, label in self.target_popup_labels.items():
-                             if self._is_point_over_widget(mx, my, label):
-                                 self.hovering_over_lang_type = "target"
-                                 self.hovering_over_lang_code = code
-                                 break
+                    popup_dicts = [
+                        (self.mode_popup, self.mode_popup_labels),
+                        (self.source_popup, self.source_popup_labels),
+                        (self.target_popup, self.target_popup_labels)
+                    ]
+                    for popup, label_dict in popup_dicts:
+                        if popup and self._is_point_over_popup(mx, my, popup):
+                            for key, label in label_dict.items():
+                                if self._is_point_over_widget(mx, my, label):
+                                    newly_hovered_label = label
+                                    # Store hover details for button release check
+                                    if popup is self.mode_popup: self.hovering_over_mode_name = key
+                                    elif popup is self.source_popup: self.hovering_over_lang_type = "source"; self.hovering_over_lang_code = key
+                                    elif popup is self.target_popup: self.hovering_over_lang_type = "target"; self.hovering_over_lang_code = key
+                                    break # Found the hovered label in this popup
+                            if newly_hovered_label: break # Found the hovered label, stop checking other popups
+
+                # --- Update Label Highlighting --- >
+                # If a new label is hovered
+                if newly_hovered_label and newly_hovered_label != self.currently_hovered_label:
+                    # Unhighlight previous label if there was one
+                    if self.currently_hovered_label and self.currently_hovered_label.winfo_exists():
+                        try: self.currently_hovered_label.config(bg=self.popup_bg)
+                        except tk.TclError: pass # Ignore error if widget destroyed
+                    # Highlight the new label
+                    try:
+                        newly_hovered_label.config(bg=self.popup_highlight_bg)
+                        self.currently_hovered_label = newly_hovered_label
+                    except tk.TclError: # Handle case where widget is destroyed between check and config
+                        self.currently_hovered_label = None
+                # If mouse moved off the previously hovered label and not onto a new one
+                elif not newly_hovered_label and self.currently_hovered_label:
+                    if self.currently_hovered_label.winfo_exists():
+                        try: self.currently_hovered_label.config(bg=self.popup_bg)
+                        except tk.TclError: pass
+                    self.currently_hovered_label = None
+
+                # --- Destroy Popups Check (after processing hover) --- >
                 self._check_and_destroy_popups(mx, my)
+
             except tk.TclError: pass
             except Exception as e: logging.error(f"Error during hover/popup check: {e}", exc_info=True)
 
@@ -474,8 +498,8 @@ class StatusIndicatorManager:
         for lang_code, lang_name in languages_to_show.items():
             label = tk.Label(popup, text=lang_name, font=self.popup_font, bg=self.popup_bg, fg=self.popup_fg, padx=5, pady=2, anchor=tk.W)
             label.pack(fill=tk.X)
-            label.bind("<Enter>", partial(self._on_popup_label_enter, label=label))
-            label.bind("<Leave>", partial(self._on_popup_label_leave, label=label))
+            # label.bind("<Enter>", partial(self._on_popup_label_enter, label=label))
+            # label.bind("<Leave>", partial(self._on_popup_label_leave, label=label))
             # --- Keep the regular ButtonRelease binding too ---
             label.bind("<ButtonRelease-1>", partial(self._on_popup_label_release, lang_type=lang_type, lang_code=lang_code))
             # Store label reference
@@ -567,8 +591,8 @@ class StatusIndicatorManager:
         for mode_name, mode_display_name in self.available_modes.items():
             label = tk.Label(popup, text=mode_display_name, font=self.popup_font, bg=self.popup_bg, fg=self.popup_fg, padx=5, pady=2, anchor=tk.W)
             label.pack(fill=tk.X)
-            label.bind("<Enter>", partial(self._on_popup_label_enter, label=label))
-            label.bind("<Leave>", partial(self._on_popup_label_leave, label=label))
+            # label.bind("<Enter>", partial(self._on_popup_label_enter, label=label))
+            # label.bind("<Leave>", partial(self._on_popup_label_leave, label=label))
             label.bind("<ButtonRelease-1>", partial(self._on_mode_popup_label_release, mode_name=mode_name))
             # Store label reference
             self.mode_popup_labels[mode_name] = label
@@ -787,33 +811,60 @@ class StatusIndicatorManager:
 
     # --- NEW: Blink Effect ---    
     def _blink_and_hide(self, selection_details):
-        """ Briefly highlights the selection or whole window, then hides. """
+        """ Briefly highlights the selected label, then hides the window. """
         if not self.root or not self.root.winfo_exists() or self._stop_event.is_set():
             return
 
-        # Simple blink: Change canvas background briefly
+        selected_label = None
+        sel_type = selection_details.get("type")
+        sel_value = selection_details.get("value")
+
+        # --- Find the selected label widget --- >
+        if sel_type == "mode":
+            selected_label = self.mode_popup_labels.get(sel_value)
+        elif sel_type == "language":
+            lang_type = selection_details.get("lang_type")
+            if lang_type == "source":
+                selected_label = self.source_popup_labels.get(sel_value)
+            elif lang_type == "target":
+                selected_label = self.target_popup_labels.get(sel_value)
+
+        if not selected_label or not selected_label.winfo_exists():
+            logging.warning(f"Could not find label for selection to blink: {selection_details}. Hiding immediately.")
+            self._hide_after_blink() # Hide immediately if label not found
+            return
+
+        # --- Blink Logic --- >
         blink_color = "#FFFF00" # Yellow blink
-        original_color = self.bg_color
-        blink_duration_ms = 150
-        hide_delay_ms = 50
+        original_color = self.popup_bg # Original background of popup labels
+        blink_count = 3 # Number of blinks (on/off pairs)
+        blink_interval_ms = 100 # Duration for each on/off state
 
-        try:
-            # Step 1: Change color
-            if self.canvas:
-                self.canvas.config(bg=blink_color)
-            self.root.config(bg=blink_color) # Change root too for full effect
-            self.root.attributes("-transparentcolor", blink_color) # Update transparent color
+        def blink_step(count_remaining, is_on):
+            if self._stop_event.is_set() or not selected_label.winfo_exists():
+                self._hide_after_blink() # Ensure hide if stopped or label destroyed
+                return
 
-            # Step 2: Schedule color reset after blink_duration_ms
-            self.root.after(blink_duration_ms, lambda:
-                self._reset_blink_and_schedule_hide(original_color, hide_delay_ms))
+            if count_remaining <= 0:
+                try: selected_label.config(bg=original_color) # Ensure final state is original color
+                except tk.TclError: pass
+                self._hide_after_blink() # Schedule final hide
+                return
 
-        except tk.TclError as e:
-            logging.warning(f"TclError during blink start: {e}. Hiding immediately.")
-            self._hide_after_blink() # Attempt immediate hide
-        except Exception as e:
-            logging.error(f"Error starting blink effect: {e}")
-            self._hide_after_blink() # Attempt immediate hide
+            try:
+                current_color = blink_color if is_on else original_color
+                selected_label.config(bg=current_color)
+                next_count = count_remaining if not is_on else count_remaining - 1
+                self.root.after(blink_interval_ms, lambda: blink_step(next_count, not is_on))
+            except tk.TclError as e:
+                 logging.warning(f"TclError during blink step: {e}. Stopping blink.")
+                 self._hide_after_blink()
+            except Exception as e:
+                 logging.error(f"Error during blink step: {e}")
+                 self._hide_after_blink()
+
+        # Start the first blink step (turn label on)
+        blink_step(blink_count, True)
 
     def _reset_blink_and_schedule_hide(self, original_color, hide_delay_ms):
         """ Resets color after blink and schedules the final hide action. """

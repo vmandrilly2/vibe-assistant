@@ -1105,35 +1105,35 @@ def on_click(x, y, button, pressed):
             hover_lang_type = status_mgr.hovering_over_lang_type
             hover_lang_code = status_mgr.hovering_over_lang_code
 
-        # --- Check for Mode Selection FIRST ---
-        if hover_mode:
-            logging.info(f"Trigger release over mode option: {hover_mode}. Selecting mode.")
-            try: ui_action_queue.put_nowait(("select_mode", hover_mode))
-            except queue.Full: logging.warning(f"Action queue full sending hover mode selection ({hover_mode}).")
-            ui_interaction_cancelled = True # Signal cancellation of normal stop flow
-            logging.debug("Set ui_interaction_cancelled flag due to mode hover selection.")
-            # --- Send selection confirmation to StatusIndicator for blink ---
-            try:
-                 selection_data = {"type": "mode", "value": hover_mode}
-                 status_queue.put_nowait(("selection_made", selection_data))
-            except queue.Full: logging.warning("Status queue full sending selection confirmation.")
-            # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
-            return # Exit callback early
+            # --- Check for Mode Selection FIRST ---
+            if hover_mode:
+                logging.info(f"Trigger release over mode option: {hover_mode}. Selecting mode.")
+                try: ui_action_queue.put_nowait(("select_mode", hover_mode))
+                except queue.Full: logging.warning(f"Action queue full sending hover mode selection ({hover_mode}).")
+                ui_interaction_cancelled = True # Signal cancellation of normal stop flow
+                logging.debug("Set ui_interaction_cancelled flag due to mode hover selection.")
+                # --- Send selection confirmation to StatusIndicator for blink ---
+                try:
+                     selection_data = {"type": "mode", "value": hover_mode}
+                     status_queue.put_nowait(("selection_made", selection_data))
+                except queue.Full: logging.warning("Status queue full sending selection confirmation.")
+                # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
+                return # Exit callback early
 
-        # --- Check for Language Selection SECOND ---
-        elif hover_lang_type and hover_lang_code is not None:
-            logging.info(f"Trigger release over language option: Type={hover_lang_type}, Code={hover_lang_code}. Selecting language.")
-            try: ui_action_queue.put_nowait(("select_language", {"type": hover_lang_type, "lang": hover_lang_code}))
-            except queue.Full: logging.warning(f"Action queue full sending hover language selection ({hover_lang_type}={hover_lang_code}).")
-            ui_interaction_cancelled = True # Signal cancellation of normal stop flow
-            logging.debug("Set ui_interaction_cancelled flag due to language hover selection.")
-            # --- Send selection confirmation to StatusIndicator for blink ---
-            try:
-                 selection_data = {"type": "language", "lang_type": hover_lang_type, "value": hover_lang_code}
-                 status_queue.put_nowait(("selection_made", selection_data))
-            except queue.Full: logging.warning("Status queue full sending selection confirmation.")
-            # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
-            return # Exit callback early
+            # --- Check for Language Selection SECOND ---
+            elif hover_lang_type and hover_lang_code is not None:
+                logging.info(f"Trigger release over language option: Type={hover_lang_type}, Code={hover_lang_code}. Selecting language.")
+                try: ui_action_queue.put_nowait(("select_language", {"type": hover_lang_type, "lang": hover_lang_code}))
+                except queue.Full: logging.warning(f"Action queue full sending hover language selection ({hover_lang_type}={hover_lang_code}).")
+                ui_interaction_cancelled = True # Signal cancellation of normal stop flow
+                logging.debug("Set ui_interaction_cancelled flag due to language hover selection.")
+                # --- Send selection confirmation to StatusIndicator for blink ---
+                try:
+                     selection_data = {"type": "language", "lang_type": hover_lang_type, "value": hover_lang_code}
+                     status_queue.put_nowait(("selection_made", selection_data))
+                except queue.Full: logging.warning("Status queue full sending selection confirmation.")
+                # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
+                return # Exit callback early
 
         # --- Signal Transcription Stop (Normal Release - No Hover Selection) ---
         duration = time.time() - start_time if 'start_time' in globals() and start_time else 0

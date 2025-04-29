@@ -86,8 +86,6 @@ class StatusIndicatorManager:
 
         # Font object with increased size
         self.text_font_size = 12 # Increased font size
-        self.text_font = tkFont.Font(family="Segoe UI", size=self.text_font_size)
-        self.popup_font = tkFont.Font(family="Segoe UI", size=10)
         # --- Menus only enabled after hovering mic ---
         self.menus_enabled = False
         # --- Track if mic has been hovered since activation ---
@@ -397,7 +395,7 @@ class StatusIndicatorManager:
                 self.canvas.create_rectangle(0, bg_y0, self.mode_text_width_estimate, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("mode_area",))
                 # Position text inside the background area (e.g., left-aligned with padding)
                 text_x = 0 + text_padding_x
-                self.canvas.create_text(text_x, text_y, text=mode_text, anchor=tk.W, font=self.text_font, fill=self.mode_text_color, tags=("mode_area",))
+                self.canvas.create_text(text_x, text_y, text=mode_text, anchor=tk.W, font=("Segoe UI", self.text_font_size), fill=self.mode_text_color, tags=("mode_area",))
             # No 'else' needed here for icon_x_offset calculation
 
             # --- Draw Microphone Icon (Using the ALWAYS fixed icon_x_offset) --- >
@@ -425,26 +423,31 @@ class StatusIndicatorManager:
                 current_x = icon_x_offset + self.icon_base_width
 
                 # 1. Draw Source Language
-                src_text = self.source_lang; src_width = self.text_font.measure(src_text)
+                src_text = self.source_lang; src_width = tkFont.Font(family="Segoe UI", size=self.text_font_size).measure(src_text)
                 src_bg_x0 = current_x; src_bg_x1 = current_x + src_width + text_padding_x * 2
                 self.canvas.create_rectangle(src_bg_x0, bg_y0, src_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("source_lang_area",))
-                self.canvas.create_text(current_x + text_padding_x, text_y, text=src_text, anchor=tk.W, font=self.text_font, fill=self.text_color, tags=("source_lang_area",))
+                self.canvas.create_text(current_x + text_padding_x, text_y, text=src_text, anchor=tk.W, font=("Segoe UI", self.text_font_size), fill=self.text_color, tags=("source_lang_area",))
                 current_x = src_bg_x1
 
                 # 2. Draw Arrow and Target Language Area (immediately after source) --- >
-                arrow_text = ">"; arrow_width = self.text_font.measure(arrow_text)
+                arrow_text = ">"; arrow_width = tkFont.Font(family="Segoe UI", size=self.text_font_size).measure(arrow_text)
+                # Re-measure with the actual font tuple to be used
+                arrow_width = tkFont.Font(family="Segoe UI", size=self.text_font_size).measure(arrow_text)
+
                 arrow_x = current_x # Arrow starts right after source bg
                 # Add tag="arrow_area" to the arrow text
-                self.canvas.create_text(arrow_x, text_y, text=arrow_text, anchor=tk.W, font=self.text_font, fill=self.text_color, tags=("arrow_area",))
+                self.canvas.create_text(arrow_x, text_y, text=arrow_text, anchor=tk.W, font=("Segoe UI", self.text_font_size), fill=self.text_color, tags=("arrow_area",))
                 current_x = arrow_x + arrow_width # Update current_x to end of arrow
 
                 is_target_active = self.target_lang and self.target_lang != self.source_lang
                 tgt_text = self.target_lang if is_target_active else "None"
                 tgt_color = self.text_color if is_target_active else self.inactive_text_color
-                tgt_width = self.text_font.measure(tgt_text)
+                # Re-measure target text width
+                tgt_width = tkFont.Font(family="Segoe UI", size=self.text_font_size).measure(tgt_text)
+
                 tgt_bg_x0 = current_x; tgt_bg_x1 = current_x + tgt_width + text_padding_x * 2
                 self.canvas.create_rectangle(tgt_bg_x0, bg_y0, tgt_bg_x1, bg_y1, fill=text_bg_color, outline=self.mic_stand_color, tags=("target_lang_area",))
-                self.canvas.create_text(current_x + text_padding_x, text_y, text=tgt_text, anchor=tk.W, font=self.text_font, fill=tgt_color, tags=("target_lang_area",))
+                self.canvas.create_text(current_x + text_padding_x, text_y, text=tgt_text, anchor=tk.W, font=("Segoe UI", self.text_font_size), fill=tgt_color, tags=("target_lang_area",))
 
         except tk.TclError as e: logging.warning(f"Error drawing status icon: {e}"); self._stop_event.set()
         except Exception as e: logging.error(f"Unexpected error drawing status icon: {e}", exc_info=True)
@@ -497,7 +500,7 @@ class StatusIndicatorManager:
 
         # --- Create labels based on the filtered list --- >
         for lang_code, lang_name in languages_to_show.items():
-            label = tk.Label(popup, text=lang_name, font=self.popup_font, bg=self.popup_bg, fg=self.popup_fg, padx=5, pady=2, anchor=tk.W)
+            label = tk.Label(popup, text=lang_name, font=("Segoe UI", 10), bg=self.popup_bg, fg=self.popup_fg, padx=5, pady=2, anchor=tk.W)
             label.pack(fill=tk.X)
             # label.bind("<Enter>", partial(self._on_popup_label_enter, label=label))
             # label.bind("<Leave>", partial(self._on_popup_label_leave, label=label))
@@ -590,7 +593,7 @@ class StatusIndicatorManager:
         # --- Store labels for hover check ---
         self.mode_popup_labels = {} # Clear previous labels
         for mode_name, mode_display_name in self.available_modes.items():
-            label = tk.Label(popup, text=mode_display_name, font=self.popup_font, bg=self.popup_bg, fg=self.popup_fg, padx=5, pady=2, anchor=tk.W)
+            label = tk.Label(popup, text=mode_display_name, font=("Segoe UI", 10), bg=self.popup_bg, fg=self.popup_fg, padx=5, pady=2, anchor=tk.W)
             label.pack(fill=tk.X)
             # label.bind("<Enter>", partial(self._on_popup_label_enter, label=label))
             # label.bind("<Leave>", partial(self._on_popup_label_leave, label=label))

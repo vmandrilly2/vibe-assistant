@@ -354,8 +354,6 @@ class StatusIndicatorManager:
                         # Redraw needed only if the indicator is currently visible
                         if self.current_state != "hidden":
                             needs_redraw = True
-                elif command == "check_hover_position":
-                    self.last_hover_pos = data
                 elif command == "selection_made":
                     logging.debug(f"StatusIndicator received selection_made: {data}")
                     self._blink_and_hide(data) # Handles hiding popups and main window
@@ -367,6 +365,16 @@ class StatusIndicatorManager:
             if not self._stop_event.is_set(): logging.warning(f"StatusIndicator Tkinter error processing queue: {e}.")
             self._stop_event.set(); self._cleanup_tk(); return
         except Exception as e: logging.error(f"Error processing StatusIndicator queue: {e}", exc_info=True)
+
+        # --- Get current mouse position directly within Tkinter thread --- >
+        mx, my = (0, 0) # Default if root doesn't exist
+        if self.root and self.root.winfo_exists():
+            try:
+                mx, my = self.root.winfo_pointerxy()
+            except tk.TclError:
+                pass # Ignore if window doesn't exist
+        # --- Store position for potential use by other methods if needed ---
+        self.last_hover_pos = (mx, my)
 
         state_actually_changed = (target_state != self.current_state)
         if state_actually_changed: self.current_state = target_state

@@ -1461,19 +1461,6 @@ async def main():
             except queue.Empty: pass
             except Exception as e: logging.error(f"Error processing UI action queue: {e}", exc_info=True)
 
-            # --- Check Hover Position (Only if active and NOT stopping) --- >
-            if transcription_active_event.is_set() and not is_stopping and current_time - last_hover_check_time > hover_check_interval:
-                last_hover_check_time = current_time
-                try:
-                    hover_pos = mouse_controller.position
-                    if status_mgr and status_mgr.thread.is_alive():
-                        status_mgr.queue.put_nowait(("check_hover_position", hover_pos))
-                except queue.Full: pass
-                except Exception as e:
-                     # Reduce logging frequency for this error
-                     if time.time() % 1 < 0.02: # Log approx once per second max
-                         logging.error(f"Error checking/sending hover position: {e}")
-
             # --- Start Transcription Flow --- >
             # Only start if the event is set AND we are not in the process of stopping
             if transcription_active_event.is_set() and not is_stopping and dg_connection is None:
@@ -1506,14 +1493,23 @@ async def main():
                                           utterance_end_ms="1000", vad_events=True, endpointing=300)
                     await dg_connection.start(options)
                     pre_activation_buffer = buffered_audio_input.get_buffer()
+                    # --- Send Buffer with Yielding --- >
                     if pre_activation_buffer:
                         total_bytes = sum(len(chunk) for chunk in pre_activation_buffer)
                         logging.info(f"Sending pre-activation buffer: {len(pre_activation_buffer)} chunks, {total_bytes} bytes.")
                         for chunk in pre_activation_buffer:
                             if dg_connection and await dg_connection.is_connected():
-                                try: await dg_connection.send(chunk)
-                                except Exception as send_err: logging.warning(f"Error sending buffer chunk: {send_err}"); break
-                            else: logging.warning("DG connection lost while sending buffer."); break
+                                try:
+                                    await dg_connection.send(chunk)
+                                    await asyncio.sleep(0.001) # <-- ADD SMALL SLEEP HERE
+                                except Exception as send_err:
+                                    logging.warning(f"Error sending buffer chunk: {send_err}")
+                                    break
+                            else:
+                                logging.warning("DG connection lost while sending buffer.")
+                                break
+                    # --- End Buffer Sending --- >
+
                     # --- Microphone Setup --- >
                     original_send = dg_connection.send
                     async def logging_send_wrapper(data):

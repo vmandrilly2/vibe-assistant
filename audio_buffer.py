@@ -17,7 +17,7 @@ MAX_RMS = 5000 # Adjust based on microphone sensitivity
 class BufferedAudioInput:
     """Manages continuous background audio recording, buffering, and RMS calculation."""
 
-    def __init__(self, status_q, buffer_seconds=1.5, device_index=None):
+    def __init__(self, status_q, buffer_seconds=7.0, device_index=None):
         """
         Args:
             status_q: Queue to send ('volume', rms_value) tuples to.
@@ -26,7 +26,7 @@ class BufferedAudioInput:
         """
         self.status_queue = status_q
         self.device_index = device_index
-        self.buffer_seconds = buffer_seconds
+        self.buffer_seconds = 7.0 # Store up to 7 seconds
 
         self.p = None
         self.stream = None
@@ -75,9 +75,11 @@ class BufferedAudioInput:
             try:
                 data = self.stream.read(CHUNK_SIZE, exception_on_overflow=False)
 
-                # 1. Store data in buffer (thread-safe)
+                # --- MODIFIED: Store timestamp with data --- >
+                current_time = time.monotonic()
                 with self._buffer_lock:
-                    self._audio_buffer.append(data)
+                    self._audio_buffer.append((current_time, data))
+                # --- END MODIFIED --- >
 
                 # 2. Calculate volume and send to status queue
                 volume = self._calculate_rms(data)
@@ -128,6 +130,33 @@ class BufferedAudioInput:
             buffer_list = list(self._audio_buffer)
             logging.debug(f"[BufferedAudioInput] Returning buffer with {len(buffer_list)} chunks.")
             return buffer_list
+
+    # --- NEW: Method to get audio from the last N seconds --- >
+    def get_buffer_last_n_seconds(self, duration_sec: float, reference_time: float) -> list:
+        """Returns audio data recorded within the last 'duration_sec' before 'reference_time'.
+
+        Args:
+            duration_sec: The duration of audio to retrieve (e.g., connection time, capped).
+            reference_time: The timestamp (time.monotonic()) when the period ends (e.g., connection established).
+
+        Returns:
+            A list of audio data chunks.
+        """
+        if duration_sec <= 0 or reference_time <= 0:
+            return []
+
+        cutoff_time = reference_time - duration_sec
+        relevant_chunks = []
+
+        with self._buffer_lock:
+            # Iterate through the deque (ordered oldest to newest)
+            for timestamp, data in self._audio_buffer:
+                if timestamp >= cutoff_time:
+                    relevant_chunks.append(data)
+
+        logging.debug(f"[BufferedAudioInput] Retrieved {len(relevant_chunks)} chunks for the last {duration_sec:.2f}s (cutoff: {cutoff_time:.2f}, ref: {reference_time:.2f})")
+        return relevant_chunks
+    # --- END NEW ---
 
     def start(self):
         """Starts the audio capture thread if not already running."""

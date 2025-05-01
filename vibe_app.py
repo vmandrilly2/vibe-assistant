@@ -1545,6 +1545,10 @@ async def main():
                 microphone = None # Reset microphone state here
                 connection_established_event.clear() # Clear event before attempts
                 start_connect_time = time.time() # Track start of overall connection process
+                # --- NEW: Use monotonic clock for duration measurement --- >
+                start_connect_monotonic = time.monotonic()
+                connection_established_monotonic = None # Initialize
+                # --- END NEW ---
 
                 for attempt in range(MAX_CONNECT_ATTEMPTS):
                     if time.time() - start_connect_time > OVERALL_CONNECT_TIMEOUT_SEC:
@@ -1583,6 +1587,9 @@ async def main():
                         logging.debug(f"Waiting for connection event with remaining timeout: {remaining_timeout:.2f}s")
                         try:
                             await asyncio.wait_for(connection_established_event.wait(), timeout=remaining_timeout)
+                            # --- NEW: Record connection time --- >
+                            connection_established_monotonic = time.monotonic()
+                            # --- END NEW ---
                             logging.info(f"Connection established (on_open received) on attempt {attempt + 1}.")
                             connection_successful = True
                             # Don't set status here, on_open handler does it.
@@ -1625,7 +1632,18 @@ async def main():
                 if connection_successful and dg_connection:
                     try:
                         # --- Send Buffer --- >
-                        pre_activation_buffer = buffered_audio_input.get_buffer()
+                        # --- MODIFIED: Calculate duration and get specific buffer part --- >
+                        connection_duration_sec = 0
+                        if connection_established_monotonic and start_connect_monotonic:
+                            connection_duration_sec = connection_established_monotonic - start_connect_monotonic
+
+                        # Cap duration at 5 seconds max
+                        duration_to_send_sec = min(max(0, connection_duration_sec), 5.0)
+                        logging.info(f"Connection took {connection_duration_sec:.2f}s. Will send buffer for last {duration_to_send_sec:.2f}s.")
+
+                        pre_activation_buffer = buffered_audio_input.get_buffer_last_n_seconds(duration_to_send_sec, connection_established_monotonic)
+                        # --- END MODIFIED --- >
+
                         if pre_activation_buffer:
                             total_bytes = sum(len(chunk) for chunk in pre_activation_buffer)
                             logging.info(f"Sending pre-activation buffer: {len(pre_activation_buffer)} chunks, {total_bytes} bytes.")

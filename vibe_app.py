@@ -405,6 +405,7 @@ def flush_modifier_log(force=False):
 # --- Global State ---
 is_command_active = threading.Event() # Keep for potential command mode later
 transcription_active_event = threading.Event() # True if any trigger is active
+current_activation_id = None # <<< NEW: ID for the current transcription activation
 tooltip_queue = queue.Queue()
 status_queue = queue.Queue()
 modifier_keys_pressed = set()
@@ -437,6 +438,7 @@ class TooltipManager:
         self.thread = threading.Thread(target=self._run_tkinter, daemon=True)
         self._stop_event = threading.Event()
         self._tk_ready = threading.Event() # Signal when Tkinter root is ready
+        self.active_tooltip_id = None # <<< NEW: Store the ID of the currently active tooltip
         # --- Add config references ---
         self._apply_tooltip_config()
 
@@ -531,12 +533,17 @@ class TooltipManager:
             while not self.queue.empty():
                 command, data = self.queue.get_nowait()
                 if command == "update":
-                    text, x, y = data
-                    self._update_tooltip(text, x, y)
+                    # Unpack data including the activation ID
+                    text, x, y, activation_id = data
+                    self._update_tooltip(text, x, y, activation_id)
                 elif command == "show":
-                    self._show_tooltip()
+                    # Get the activation ID
+                    activation_id = data
+                    self._show_tooltip(activation_id)
                 elif command == "hide":
-                    self._hide_tooltip()
+                    # Get the activation ID
+                    activation_id = data
+                    self._hide_tooltip(activation_id)
                 elif command == "stop":
                     # This command ensures we wake up and check the _stop_event
                     logging.debug("Received stop command in queue.")
@@ -581,7 +588,7 @@ class TooltipManager:
             except Exception as e:
                 logging.error(f"Unexpected error during Tkinter destroy: {e}", exc_info=True)
 
-    def _update_tooltip(self, text, x, y):
+    def _update_tooltip(self, text, x, y, activation_id):
         # Check if root exists and stop event isn't set
         if self.root and self.label and not self._stop_event.is_set():
             try:
@@ -589,27 +596,36 @@ class TooltipManager:
                 offset_x = 15
                 offset_y = -30
                 self.root.geometry(f"+{x + offset_x}+{y + offset_y}")
+                # Store the ID associated with this visible tooltip
+                self.active_tooltip_id = activation_id
             except tk.TclError as e:
                  logging.warning(f"Failed to update tooltip (window likely closed): {e}")
                  self._stop_event.set() # Stop if window is broken
 
-    def _show_tooltip(self):
+    def _show_tooltip(self, activation_id):
         if self.root and not self._stop_event.is_set():
             try:
                 self.root.deiconify() # Show the window
+                # Store the ID associated with this visible tooltip
+                self.active_tooltip_id = activation_id
+                logging.debug(f"Tooltip shown for activation ID: {activation_id}")
             except tk.TclError as e:
                  logging.warning(f"Failed to show tooltip (window likely closed): {e}")
                  self._stop_event.set()
 
-    def _hide_tooltip(self):
-        # Allow hiding even if stop_event is set, for cleanup purposes? Maybe not.
-        # Let's only hide if not stopping.
+    def _hide_tooltip(self, activation_id):
+        # Only hide if not stopping AND the activation ID matches the currently shown tooltip
         if self.root and not self._stop_event.is_set():
-            try:
-                self.root.withdraw() # Hide the window
-            except tk.TclError as e:
-                 logging.warning(f"Failed to hide tooltip (window likely closed): {e}")
-                 self._stop_event.set()
+            if self.active_tooltip_id == activation_id:
+                try:
+                    self.root.withdraw() # Hide the window
+                    logging.debug(f"Tooltip hidden for activation ID: {activation_id}")
+                    self.active_tooltip_id = None # Clear the ID since it's hidden
+                except tk.TclError as e:
+                     logging.warning(f"Failed to hide tooltip (window likely closed): {e}")
+                     self._stop_event.set()
+            elif self.root.winfo_viewable(): # Only log if the tooltip is actually visible
+                logging.debug(f"Ignored hide tooltip command for activation ID {activation_id} (current: {self.active_tooltip_id})")
 
 
 # --- Placeholder/Handler Functions ---
@@ -687,8 +703,10 @@ def simulate_key_combination(keys):
             try: kb_controller.release(mod)
             except: pass
 
-def handle_dictation_interim(transcript):
-    """Handles interim dictation results by displaying them in a temporary tooltip."""
+def handle_dictation_interim(transcript, activation_id):
+    """Handles interim dictation results by displaying them in a temporary tooltip
+       for a specific activation ID.
+    """
     global last_simulated_text # Keep variable for now, but don't use for typing
     if not transcript:
         return
@@ -700,11 +718,10 @@ def handle_dictation_interim(transcript):
     try:
         # Get current mouse position
         x, y = pyautogui.position()
-        # Send update command to the tooltip manager thread
-        # Use put_nowait or handle Full exception if queue might fill up,
-        # but for this use case, blocking put is likely fine.
-        tooltip_queue.put(("update", (transcript, x, y)))
-        tooltip_queue.put(("show", None)) # Ensure it's visible
+        # Send update command to the tooltip manager thread with the activation ID
+        tooltip_queue.put(("update", (transcript, x, y, activation_id)))
+        # Send show command with the activation ID
+        tooltip_queue.put(("show", activation_id))
     except pyautogui.FailSafeException:
          logging.warning("PyAutoGUI fail-safe triggered (mouse moved to corner?).")
     except Exception as e:
@@ -713,22 +730,22 @@ def handle_dictation_interim(transcript):
     # --- REMOVED TYPING/BACKSPACE LOGIC ---
     # last_simulated_text = transcript # DO NOT UPDATE STATE HERE
 
-def handle_dictation_final(final_transcript, history):
+def handle_dictation_final(final_transcript, history, activation_id):
     """Handles the final dictation transcript segment based on history.
     Calculates target state, determines diff from current state, executes typing, updates history.
-    Also hides the interim tooltip.
+    Also hides the interim tooltip FOR THE CORRECT ACTIVATION.
 
     Returns:
         tuple: (updated_history_list, final_text_string_typed)
                The final_text_string_typed includes the trailing space if added.
     """
-    logging.debug(f"Handling final dictation segment: '{final_transcript}'")
+    logging.debug(f"Handling final dictation segment '{final_transcript}' for activation ID {activation_id}")
 
-    # --- Hide the interim tooltip ---
+    # --- Hide the interim tooltip for this specific activation --- >
     try:
-        tooltip_queue.put_nowait(("hide", None))
+        tooltip_queue.put_nowait(("hide", activation_id))
     except queue.Full:
-        logging.warning("Tooltip queue full when trying to hide on final.")
+        logging.warning(f"Tooltip queue full when trying to hide on final for activation ID {activation_id}.")
 
     # --- Step A: Calculate Target Word List ---
     target_words = [entry['text'] for entry in history] # Start with existing words
@@ -1049,7 +1066,8 @@ async def on_message(self, result, **kwargs):
                 logging.debug(f"Processing final dictation result: '{transcript}'")
                 final_part = transcript
                 # Note: handle_dictation_final expects the final segment transcript
-                updated_history, text_typed_this_segment = handle_dictation_final(final_part, typed_word_history)
+                # Pass the current activation ID
+                updated_history, text_typed_this_segment = handle_dictation_final(final_part, typed_word_history, current_activation_id)
                 typed_word_history = updated_history
                 final_source_text = " ".join([entry['text'] for entry in typed_word_history])
                 logging.debug(f"Dictation final source text updated: '{final_source_text}'")
@@ -1060,7 +1078,8 @@ async def on_message(self, result, **kwargs):
                 # --- Update last interim transcript ---
                 last_interim_transcript = transcript
                 # --- Call interim handler (as before) ---
-                handle_dictation_interim(transcript)
+                # Pass the current activation ID
+                handle_dictation_interim(transcript, current_activation_id)
 
         elif ACTIVE_MODE == MODE_KEYBOARD:
             # Keyboard mode might only care about the final result
@@ -1131,6 +1150,8 @@ def on_click(x, y, button, pressed):
     global status_mgr
     # --- ADDED GLOBALS ---
     global last_interim_transcript # REMOVED final_processed_this_session
+    # --- ADDED Activation ID --- >
+    global current_activation_id
 
     # Determine trigger based only on DICTATION_TRIGGER_BUTTON for now
     is_primary_trigger = (button == DICTATION_TRIGGER_BUTTON)
@@ -1156,8 +1177,9 @@ def on_click(x, y, button, pressed):
             # Set general active flag and time/pos
             transcription_active_event.set()
             start_time = time.time()
+            current_activation_id = time.monotonic() # <<< NEW: Generate unique ID
             initial_activation_pos = (x, y)
-            logging.debug(f"Stored initial activation position: {initial_activation_pos}")
+            logging.debug(f"Stored initial activation position: {initial_activation_pos} with ID: {current_activation_id}")
 
             # --- Send START command to main loop's queue --- >
             try:
@@ -1681,55 +1703,53 @@ async def main():
                     if duration >= MIN_DURATION_SEC:
                         logging.debug(f"Performing action post-stop for {active_mode_on_stop} (duration: {duration:.2f}s)")
                         if active_mode_on_stop == MODE_DICTATION:
-                            # Check if translation is needed
-                            if TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE:
+                             # Check if translation is needed
+                            # --- MODIFIED: Check final_source_text before proceeding ---
+                            if final_source_text and TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE:
                                 logging.info(f"Requesting translation post-stop for: '{final_source_text.strip()}'")
                                 action_task = asyncio.create_task(translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE))
-                            # --- CORRECTED: This is the ELSE for NO translation in DICTATION mode --- >
-                            else:
-                                # --- REMOVED: Typing is handled by handle_dictation_final ---
+                            # --- MODIFIED: Check final_source_text here too ---
+                            elif final_source_text:
                                 logging.info("Dictation finished post-stop. No translation needed. Typing handled by on_message/handle_dictation_final.")
                                 # action_task remains None
+                            else:
+                                 logging.debug("Stop flow action check: No final_source_text for Dictation, likely connection/stop issue.")
                         elif active_mode_on_stop == MODE_KEYBOARD:
-                             action_task = asyncio.create_task(handle_keyboard_input_final(final_keyboard_input_text))
-                        else:
-                            # --- REMOVED: Type the final source text if no translation needed ---
-                            # Typing is handled by handle_dictation_final called from on_message
-                            logging.info("Dictation finished post-stop. No translation needed. Typing handled by on_message/handle_dictation_final.")
-                            # No async task needed for this path, action_task remains None
+                             # --- MODIFIED: Check final_keyboard_input_text before proceeding ---
+                            if final_keyboard_input_text:
+                                 logging.info(f"Processing keyboard input post-stop for: '{final_keyboard_input_text}'")
+                                 action_task = asyncio.create_task(handle_keyboard_input_final(final_keyboard_input_text))
+                            else:
+                                 logging.debug("Stop flow action check: No final_keyboard_input_text for Keyboard mode.")
+                        # --- REMOVED incorrect else block that duplicated dictation logic ---
+
                     else: # Discard short
                          logging.info(f"Duration < min ({MIN_DURATION_SEC}s), discarding action post-stop for {active_mode_on_stop}.")
-                         if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
-                         elif active_mode_on_stop == MODE_KEYBOARD: final_keyboard_input_text = ""
-                else: # Clear state if cancelled
-                     logging.info(f"Action cancelled post-stop for {active_mode_on_stop}, clearing state.")
-                     if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
-                     elif active_mode_on_stop == MODE_KEYBOARD: final_keyboard_input_text = ""
+                         # State cleared below
 
-                # Await the action task if it was created
-                if action_task:
-                    try: await action_task
-                    except Exception as e: logging.error(f"Error awaiting action task post-stop ({active_mode_on_stop}): {e}", exc_info=True)
+                # --- Clear state relevant to the *just completed* action regardless --- >
+                if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
+                elif active_mode_on_stop == MODE_KEYBOARD: final_keyboard_input_text = ""
 
                 # --- Reset state AFTER processing stop flow --- >
                 logging.debug("Stop flow processing complete. Resetting state.")
-                is_stopping = False
-                # Check if a new activation started *during* this stop flow
-                # by comparing the current global start_time with the one we captured
-                # when *this* stop flow began.
-                if start_time == stopping_start_time:
-                    # No new activation interfered, safe to reset
-                    logging.debug(f"Current start_time ({start_time}) matches stopping_start_time ({stopping_start_time}). Resetting.")
+
+                # Check if a new activation occurred during this stop flow
+                new_activation_occurred = (start_time != stopping_start_time)
+                if new_activation_occurred:
+                    logging.info(f"New activation detected during stop flow (current start_time {start_time} != stopping_start_time {stopping_start_time}). Keeping current start_time.")
+                else:
+                    # No new activation interfered, safe to reset start_time
+                    logging.debug(f"Resetting start_time ({start_time}).")
                     start_time = None
                     initial_activation_pos = None
-                else:
-                    # A new activation occurred (global start_time was updated), keep it.
-                    logging.info(f"New activation detected during stop flow (current start_time {start_time} != stopping_start_time {stopping_start_time}). Keeping current start_time.")
 
-                # Always clear these buffers/states related to the *just completed* stopped action
-                final_keyboard_input_text = ""
+                # Always clear these state variables related to the completed stop flow
                 active_mode_on_stop = None
-                stopping_start_time = None # Clear the temporary variable
+                stopping_start_time = None
+
+                # Finally, mark stopping as complete
+                is_stopping = False
 
             # --- Check Config Reload --- >
             if systray_ui.config_reload_event.is_set():

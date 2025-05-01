@@ -2,7 +2,7 @@
   "general": {
     "min_duration_sec": 0.5,
     "selected_language": "fr-FR",
-    "target_language": null,
+    "target_language": "en-US",
     "openai_model": "gpt-4.1-nano",
     "active_mode": "Dictation",
     "recent_source_languages": [
@@ -11,11 +11,11 @@
       "en-US"
     ],
     "recent_target_languages": [
+      "en-US",
       null,
       "zh",
       "ja-JP",
-      "ko-KR",
-      "en-US"
+      "ko-KR"
     ]
   },
   "triggers": {

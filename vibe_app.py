@@ -1678,6 +1678,21 @@ async def main():
                 # --- ADDED: Short delay to allow final messages --- >
                 await asyncio.sleep(0.15) # 150ms delay
 
+                # --- NEW: Hide Tooltip during stop flow ---
+                # Ensure the tooltip is hidden regardless of final message processing
+                if active_mode_on_stop == MODE_DICTATION:
+                    try:
+                        # Use the specific activation ID captured when stopping started
+                        # (though current_activation_id might be None if a new activation happened)
+                        hide_id = current_activation_id if stopping_start_time == start_time else None # Best effort ID
+                        tooltip_queue.put_nowait(("hide", hide_id))
+                        logging.debug(f"Sent hide command to tooltip queue during stop flow (ID: {hide_id}).")
+                    except queue.Full:
+                        logging.error("Tooltip queue full sending hide message during stop flow.")
+                    except Exception as e:
+                        logging.error(f"Error sending tooltip hide message during stop flow: {e}")
+                # --- End NEW ---
+
                 if dg_connection:
                     try:
                         # await asyncio.sleep(0.05) # Removed sleep

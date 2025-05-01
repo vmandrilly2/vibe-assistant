@@ -1652,10 +1652,12 @@ async def main():
                      microphone.finish()
                      microphone = None
                      logging.info("DG Mic finished during stop flow.")
+
+                # --- ADDED: Short delay to allow final messages --- >
+                await asyncio.sleep(0.15) # 150ms delay
+
                 if dg_connection:
                     try:
-                        # Add short sleep before finish ONLY if buffer might still be sending? Risky.
-                        # Let's just try finishing directly.
                         # await asyncio.sleep(0.05) # Removed sleep
                         await dg_connection.finish()
                         logging.info("DG Conn finished during stop flow.")
@@ -1679,11 +1681,22 @@ async def main():
                     if duration >= MIN_DURATION_SEC:
                         logging.debug(f"Performing action post-stop for {active_mode_on_stop} (duration: {duration:.2f}s)")
                         if active_mode_on_stop == MODE_DICTATION:
-                            if TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE and final_source_text:
+                            # Check if translation is needed
+                            if TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE:
+                                logging.info(f"Requesting translation post-stop for: '{final_source_text.strip()}'")
                                 action_task = asyncio.create_task(translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE))
-                            else: logging.info("Dictation finished post-stop. No translation.")
+                            # --- CORRECTED: This is the ELSE for NO translation in DICTATION mode --- >
+                            else:
+                                # --- REMOVED: Typing is handled by handle_dictation_final ---
+                                logging.info("Dictation finished post-stop. No translation needed. Typing handled by on_message/handle_dictation_final.")
+                                # action_task remains None
                         elif active_mode_on_stop == MODE_KEYBOARD:
                              action_task = asyncio.create_task(handle_keyboard_input_final(final_keyboard_input_text))
+                        else:
+                            # --- REMOVED: Type the final source text if no translation needed ---
+                            # Typing is handled by handle_dictation_final called from on_message
+                            logging.info("Dictation finished post-stop. No translation needed. Typing handled by on_message/handle_dictation_final.")
+                            # No async task needed for this path, action_task remains None
                     else: # Discard short
                          logging.info(f"Duration < min ({MIN_DURATION_SEC}s), discarding action post-stop for {active_mode_on_stop}.")
                          if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""

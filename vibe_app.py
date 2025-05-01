@@ -30,6 +30,7 @@ from status_indicator import StatusIndicatorManager, DEFAULT_MODES # Import DEFA
 # --- Internationalization (i18n) Import >
 import i18n
 from i18n import load_translations, _ # Import the main translation function
+from i18n import get_current_language, ALL_DICTATION_REPLACEMENTS # Import replacements and confirmable set
 
 from pynput import mouse, keyboard
 from pynput.keyboard import Key, KeyCode # Import KeyCode
@@ -792,40 +793,86 @@ def handle_dictation_final(final_transcript, history, activation_id):
     escape_keywords = set(kw.strip().lower() for kw in escape_keywords_str.split(',') if kw.strip())
     logging.debug(f"Using enter keywords: {enter_keywords}")
     logging.debug(f"Using escape keywords: {escape_keywords}")
-    # --- End Get keywords --- >
+    # --- Get replacements for the current language --- >
+    current_lang_base = get_current_language()
+    replacements = ALL_DICTATION_REPLACEMENTS.get(current_lang_base, {})
+    logging.debug(f"Using replacements for '{current_lang_base}': {len(replacements)} entries")
+    # --- End Get i18n data --- >
 
-    # Process the new transcript segment against the target list
-    for word in original_words:
+    # --- Combine all potential triggers (spoken phrases) --- >
+    # Map spoken phrase -> action identifier ("Enter", "Escape", or character)
+    all_triggers = {}
+    for phrase in enter_keywords: all_triggers[phrase] = "Enter"
+    for phrase in escape_keywords: all_triggers[phrase] = "Escape"
+    for phrase, action_char in replacements.items():
+        # Avoid overwriting Enter/Escape if they happen to be in replacements
+        if phrase not in all_triggers:
+            all_triggers[phrase] = action_char
+
+    # --- Sort triggers by length, longest first --- >
+    sorted_trigger_phrases = sorted(all_triggers.keys(), key=len, reverse=True)
+    # --- End Combine and Sort --- >
+
+    # --- Check for triggers at the end of the transcript (NEW LOGIC) --- >
+    trigger_found = False
+    action_to_confirm = None
+    trigger_phrase_length = 0
+    text_segment_to_process = final_transcript # Default to full transcript
+    # Process transcript: lowercase and strip ONLY trailing period for matching
+    processed_transcript_for_match = final_transcript.lower()
+    if processed_transcript_for_match.endswith('.'):
+        processed_transcript_for_match = processed_transcript_for_match[:-1]
+
+    for phrase in sorted_trigger_phrases:
+        # Check if the processed transcript ENDS WITH the trigger phrase
+        # Add a space before the phrase for matching whole words, unless it's the only word
+        match_phrase = f" {phrase}"
+        # Ensure phrase is not empty before checking
+        if phrase and (processed_transcript_for_match == phrase or processed_transcript_for_match.endswith(match_phrase)):
+            trigger_found = True
+            action_to_confirm = all_triggers[phrase]
+
+            # --- Use simple approximation for trigger length --- >
+            if processed_transcript_for_match == phrase:
+                 # Phrase is the entire transcript
+                 trigger_phrase_length = len(final_transcript)
+            else:
+                 # Assume preceding space, use phrase length + 1
+                 trigger_phrase_length = len(phrase) + 1
+            logging.info(f"Trigger phrase found: '{phrase}' -> Action: '{action_to_confirm}'. Approx len: {trigger_phrase_length}")
+            # --- End simple approximation --- >
+
+            # Determine text segment to process (text before the trigger)
+            text_segment_to_process = final_transcript[:-trigger_phrase_length].rstrip()
+
+            # Show confirmation UI
+            logging.info(f"Showing confirmation for action: '{action_to_confirm}'")
+            try:
+                pos = pyautogui.position()
+                action_confirm_queue.put_nowait(("show", {"action": action_to_confirm, "pos": pos}))
+                g_pending_action = action_to_confirm
+                g_action_confirmed = False
+            except Exception as e:
+                logging.error(f"Error sending 'show' for '{action_to_confirm}' to ActionConfirmManager: {e}")
+
+            break # Stop after finding the longest match
+    # --- End trigger checking logic --- >
+
+    # --- Process the determined text segment --- >
+    # This part uses target_words, calculated based on the segment
+    target_words = [entry['text'] for entry in history] # Start with existing words
+    logging.debug(f"Initial target_words from history: {target_words}")
+
+    original_words_segment = text_segment_to_process.split()
+    punctuation_to_strip = '.,!?;:' # Keep this for backspace processing
+
+    # Process the segment for backspace or adding words
+    for word in original_words_segment:
         if not word: continue
         cleaned_word = word.rstrip(punctuation_to_strip).lower()
 
-        # --- Check for Action Keywords FIRST --- >
-        if cleaned_word in enter_keywords:
-            logging.info(f"Action keyword detected: '{cleaned_word}'. Showing confirmation.")
-            # --- Send command to confirmation UI --- >
-            try:
-                pos = pyautogui.position() # Get current mouse pos
-                action_confirm_queue.put_nowait(("show", {"action": "Enter", "pos": pos}))
-                g_pending_action = "Enter" # Set global pending action state
-                g_action_confirmed = False # Reset confirmation flag
-            except Exception as e:
-                logging.error(f"Error sending 'show' to ActionConfirmManager: {e}")
-            continue
-        elif cleaned_word in escape_keywords:
-            logging.info(f"Action keyword detected: '{cleaned_word}'. Showing confirmation.")
-            # --- Send command to confirmation UI --- >
-            try:
-                pos = pyautogui.position() # Get current mouse pos
-                action_confirm_queue.put_nowait(("show", {"action": "Escape", "pos": pos}))
-                g_pending_action = "Escape" # Set global pending action state
-                g_action_confirmed = False # Reset confirmation flag
-            except Exception as e:
-                logging.error(f"Error sending 'show' to ActionConfirmManager: {e}")
-            continue
-        # --- End Check Action Keywords --- >
-
-        # --- Then check for Backspace Keywords --- >
-        elif cleaned_word in back_keywords:
+        # ONLY check for backspace here now
+        if cleaned_word in back_keywords:
             if target_words:
                 removed = target_words.pop()
                 logging.info(f"Processing backspace keyword ('{cleaned_word}'), removed '{removed}' from target_words.")
@@ -1130,13 +1177,14 @@ async def on_message(self, result, **kwargs):
             if result.is_final:
                 logging.debug(f"Processing final dictation result: '{transcript}'")
                 # --- Apply replacements BEFORE handling final --- >
-                processed_transcript = apply_dictation_replacements(transcript, SELECTED_LANGUAGE)
-                # Pass the processed transcript and activation ID
-                updated_history, text_typed_this_segment = handle_dictation_final(processed_transcript, typed_word_history, current_activation_id)
+                # Comment out the premature replacement call
+                # processed_transcript = apply_dictation_replacements(transcript, SELECTED_LANGUAGE)
+                # Pass the ORIGINAL transcript and activation ID instead of the processed one
+                updated_history, text_typed_this_segment = handle_dictation_final(transcript, typed_word_history, current_activation_id)
                 typed_word_history = updated_history
-                # Update final_source_text based on the processed transcript's history
+                # Update final_source_text based on the potentially modified history
                 final_source_text = " ".join([entry['text'] for entry in typed_word_history])
-                logging.debug(f"Dictation final source text updated (post-replacement): '{final_source_text}'")
+                logging.debug(f"Dictation final source text updated (from history): '{final_source_text}'")
                 # --- End Apply replacements --- >
 
                 last_interim_transcript = "" # Clear interim after processing a final part
@@ -1613,6 +1661,14 @@ async def main():
                             simulate_key_press_release(Key.enter)
                         elif g_pending_action == "Escape":
                             simulate_key_press_release(Key.esc)
+                        # --- NEW: Handle single characters (punctuation, etc.) --- >
+                        elif isinstance(g_pending_action, str) and len(g_pending_action) == 1:
+                             logging.info(f"Simulating typing for confirmed character: '{g_pending_action}'")
+                             simulate_typing(g_pending_action)
+                        else:
+                            logging.warning(f"Unhandled confirmed action type: {g_pending_action}")
+                        # --- End Handle Character --- >
+
                         # --- Hide UI Immediately --- >
                         try: action_confirm_queue.put_nowait(("hide", None))
                         except queue.Full: logging.warning("Action confirm queue full sending hide after immediate execution.")

@@ -761,6 +761,9 @@ def handle_dictation_final(final_transcript, history, activation_id):
         tuple: (updated_history_list, final_text_string_typed)
                The final_text_string_typed includes the trailing space if added.
     """
+    # --- Action Confirmation Globals (NEEDED HERE!) --- >
+    global g_pending_action, g_action_confirmed
+    
     logging.debug(f"Handling final dictation segment '{final_transcript}' for activation ID {activation_id}")
 
     # --- Hide the interim tooltip for this specific activation --- >
@@ -1456,6 +1459,8 @@ async def main():
     global ui_interaction_cancelled, config, SELECTED_LANGUAGE, TARGET_LANGUAGE, ACTIVE_MODE
     global initial_activation_pos
     global status_mgr
+    # --- Action Confirmation Globals (NEEDED HERE!) --- >
+    global g_pending_action, g_action_confirmed
 
     logging.info("Starting Vibe App...")
     # --- Initialize Systray ---
@@ -1560,6 +1565,8 @@ async def main():
             # --- Handle UI Actions FIRST (Keep this high priority) --- >
             try:
                 action_command, action_data = ui_action_queue.get_nowait()
+                
+                # --- Process Language/Mode Selection FIRST --- >
                 if action_command == "select_language":
                     lang_type = action_data.get("type"); new_lang = action_data.get("lang")
                     config_key = "selected_language" if lang_type == "source" else "target_language"
@@ -1593,6 +1600,29 @@ async def main():
                     if is_stopping: ui_interaction_cancelled = True
                     # Original code had ui_interaction_cancelled = True here always, let's keep it
                     ui_interaction_cancelled = True
+                
+                # --- THEN Check for Action Confirmation Message --- >
+                elif action_command == "action_confirmed":
+                    confirmed_action = action_data
+                    if confirmed_action == g_pending_action: # Check if it matches the currently pending action
+                        logging.info(f"Executing confirmed action immediately: {g_pending_action}")
+                        # --- Execute Immediately --- >
+                        if g_pending_action == "Enter":
+                            simulate_key_press_release(Key.enter)
+                        elif g_pending_action == "Escape":
+                            simulate_key_press_release(Key.esc)
+                        # --- Hide UI Immediately --- >
+                        try: action_confirm_queue.put_nowait(("hide", None))
+                        except queue.Full: logging.warning("Action confirm queue full sending hide after immediate execution.")
+                        # --- Reset State Immediately --- >
+                        g_pending_action = None
+                        g_action_confirmed = False # Reset confirmation flag too
+                    else:
+                         logging.warning(f"Received confirmation for '{confirmed_action}' but '{g_pending_action}' was pending (or already executed/reset).")
+                         # Maybe hide here too if state is inconsistent?
+                         # try: action_confirm_queue.put_nowait(("hide", None))
+                         # except queue.Full: pass
+                # --- End Action Confirmation Check --- >
 
             except queue.Empty: pass
             except Exception as e: logging.error(f"Error processing UI action queue: {e}", exc_info=True)
@@ -1823,33 +1853,55 @@ async def main():
                 if perform_action:
                     if duration >= MIN_DURATION_SEC:
                         logging.debug(f"Performing action post-stop for {active_mode_on_stop} (duration: {duration:.2f}s)")
-                        if active_mode_on_stop == MODE_DICTATION:
-                             # Check if translation is needed
-                            # --- MODIFIED: Check final_source_text before proceeding ---
-                            if final_source_text and TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE:
-                                logging.info(f"Requesting translation post-stop for: '{final_source_text.strip()}'")
-                                action_task = asyncio.create_task(translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE))
-                            # --- MODIFIED: Check final_source_text here too ---
-                            elif final_source_text:
-                                logging.info("Dictation finished post-stop. No translation needed. Typing handled by on_message/handle_dictation_final.")
-                                # action_task remains None
-                            else:
-                                 logging.debug("Stop flow action check: No final_source_text for Dictation, likely connection/stop issue.")
-                        elif active_mode_on_stop == MODE_COMMAND: # Renamed mode
-                             # --- MODIFIED: Check final_command_text before proceeding --- Renamed variable
-                            if final_command_text:
-                                 logging.info(f"Processing command input post-stop: '{final_command_text}'") # Renamed variable
-                                 # Call the renamed handler
-                                 action_task = asyncio.create_task(handle_command_final(final_command_text)) # Renamed handler and variable
-                            else:
-                                 logging.debug("Stop flow action check: No final_command_text for Command mode.") # Renamed variable and mode
-                        # --- REMOVED incorrect else block that duplicated dictation logic ---
+                        
+                        # --- NEW: Check for Confirmed Action Execution --- >
+                        action_executed_this_stop = False
+                        if g_pending_action and g_action_confirmed:
+                            logging.info(f"Executing confirmed action from main loop: {g_pending_action}")
+                            if g_pending_action == "Enter":
+                                simulate_key_press_release(Key.enter)
+                            elif g_pending_action == "Escape":
+                                simulate_key_press_release(Key.esc)
+                            # Add other actions here if needed
+                            action_executed_this_stop = True
+                        # --- End Confirmed Action Execution Check --- >
+                        
+                        # --- Normal Post-Processing (Only if no action was executed) --- >
+                        if not action_executed_this_stop:
+                            if active_mode_on_stop == MODE_DICTATION:
+                                 # Check if translation is needed
+                                # --- MODIFIED: Check final_source_text before proceeding ---
+                                if final_source_text and TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE:
+                                    logging.info(f"Requesting translation post-stop for: '{final_source_text.strip()}'")
+                                    action_task = asyncio.create_task(translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE))
+                                # --- MODIFIED: Check final_source_text here too ---
+                                elif final_source_text:
+                                    logging.info("Dictation finished post-stop. No translation needed. Typing handled by on_message/handle_dictation_final.")
+                                    # action_task remains None
+                                else:
+                                     logging.debug("Stop flow action check: No final_source_text for Dictation, likely connection/stop issue.")
+                            elif active_mode_on_stop == MODE_COMMAND: # Renamed mode
+                                 # --- MODIFIED: Check final_command_text before proceeding --- Renamed variable
+                                if final_command_text:
+                                     logging.info(f"Processing command input post-stop: '{final_command_text}'") # Renamed variable
+                                     # Call the renamed handler
+                                     action_task = asyncio.create_task(handle_command_final(final_command_text)) # Renamed handler and variable
+                                else:
+                                     logging.debug("Stop flow action check: No final_command_text for Command mode.") # Renamed variable and mode
+                            # --- REMOVED incorrect else block that duplicated dictation logic ---
 
                     else: # Discard short
                          logging.info(f"Duration < min ({MIN_DURATION_SEC}s), discarding action post-stop for {active_mode_on_stop}.")
                          # State cleared below
 
-                # --- Clear state relevant to the *just completed* action regardless --- >
+                # # --- Clear state relevant to the *just completed* action regardless --- >
+                # # --- MODIFIED: Always clear pending action state here --- >
+                # if g_pending_action:
+                #      logging.debug(f"Clearing pending action state ({g_pending_action}, confirmed={g_action_confirmed}) after stop flow.")
+                #      g_pending_action = None
+                #      g_action_confirmed = False
+                # # --- End Clear pending action state --- >
+                
                 if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
                 elif active_mode_on_stop == MODE_COMMAND: final_command_text = "" # Renamed mode and variable
 

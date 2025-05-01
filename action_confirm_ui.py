@@ -5,6 +5,7 @@ import queue
 import logging
 import time # Keep time for logging/debugging if needed
 
+
 class ActionConfirmManager:
     """Manages a Tkinter confirmation icon window for pending actions."""
     def __init__(self, command_q, action_q):
@@ -27,6 +28,8 @@ class ActionConfirmManager:
         self.last_hover_pos = (0, 0)
         self.confirmation_sent = False # Flag to prevent sending multiple confirmations
         self.initial_pos = None # Store position where the icon should appear
+        self.show_time = 0 # Track when the icon was shown
+        self.auto_hide_after_sec = 3.0 # Timeout duration
 
         # --- Simplified Icon Drawing Properties --- >
         self.icon_width = 65  # Adjusted width for text like "[Entrée]"
@@ -111,11 +114,14 @@ class ActionConfirmManager:
                             target_state = "visible"
                             self.initial_pos = pos
                             position_needs_update = True
+                            self.show_time = time.monotonic()
                         if action != self.pending_action:
                             self.pending_action = action
                             self.confirmation_sent = False
                             needs_redraw = True
                             action_changed = True
+                            if not self.confirmation_sent:
+                                self.show_time = time.monotonic()
                         logging.debug(f"ActionConfirm showing for: {action} at {pos}")
                     else:
                         logging.warning(f"ActionConfirm received invalid 'show' data: {data}")
@@ -151,6 +157,7 @@ class ActionConfirmManager:
             if self.current_state == "hidden":
                 self.pending_action = None
                 self.confirmation_sent = False
+                self.show_time = 0
 
         is_hovering = False
         last_confirmation_state = self.confirmation_sent
@@ -171,10 +178,23 @@ class ActionConfirmManager:
 
         hover_state_changed = (last_confirmation_state != self.confirmation_sent)
 
+        timeout_triggered = False
+        if self.current_state == "visible" and not self.confirmation_sent and self.show_time > 0:
+            elapsed = time.monotonic() - self.show_time
+            if elapsed > self.auto_hide_after_sec:
+                logging.debug(f"Action confirm timeout ({self.auto_hide_after_sec}s) reached for {self.pending_action}. Hiding.")
+                target_state = "hidden"
+                self.current_state = "hidden"
+                self.pending_action = None
+                self.confirmation_sent = False
+                self.show_time = 0
+                state_actually_changed = True
+                timeout_triggered = True
+
         if (state_actually_changed or needs_redraw or action_changed or hover_state_changed) and self.root and not self._stop_event.is_set():
              if position_needs_update and self.initial_pos:
                  self._position_window(self.initial_pos)
-             self._draw_icon(is_hovering and self.confirmation_sent) # Pass hover state for visual feedback
+             self._draw_icon(self.confirmation_sent)
              if self.current_state == "hidden":
                  if self.root.winfo_viewable(): self.root.withdraw()
              else:
@@ -218,7 +238,7 @@ class ActionConfirmManager:
             padding = 2
             self.canvas.create_rectangle(padding, padding,
                                          self.canvas_width - padding, self.canvas_height - padding,
-                                         fill=bg, outline=self.icon_border, width=1)
+                                         fill=bg, outline=self.icon_border, width=1, tags="background")
             display_text = self.pending_action
             if display_text == "Enter": display_text = "Entrée"
             elif display_text == "Escape": display_text = "Échap"

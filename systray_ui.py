@@ -10,7 +10,7 @@ from functools import partial # Import partial for cleaner callbacks
 
 # --- i18n Import --- >
 import i18n
-from i18n import load_translations, _
+from i18n import load_translations, _, ALL_DICTATION_REPLACEMENTS, get_current_language
 
 # --- Configuration Handling (Mirrors vibe_app.py logic initially) ---
 CONFIG_FILE = "config.json"
@@ -452,124 +452,97 @@ def build_language_target_menu():
         # --- Translate "No other languages" --- >
         target_lang_items.append(item(_('systray.menu.no_other_languages', default="No other languages available"), None, enabled=False))
 
-    return menu(*target_lang_items)
+    target_lang_menu = menu(*target_lang_items)
 
-# Renamed from build_general_menu -> builds the content of "Personnalisation"
-def build_personalisation_submenu_content():
-    general_cfg = config.get("general", {})
 
-    # --- Min Duration (Display only, translated) --- >
-    min_dur = general_cfg.get("min_duration_sec", "N/A")
-    min_dur_item = item(_('systray.menu.min_duration', default=f'Min Duration (s): {min_dur}', value=min_dur), None, enabled=False)
 
-    # --- OpenAI Model (Display only, translated) --- >
-    openai_model = general_cfg.get("openai_model", "N/A")
-    model_item = item(_('systray.menu.translation_model', default=f'Translation Model: {openai_model}', value=openai_model), None, enabled=False)
-
-    # --- Return list including submenus for triggers and tooltip ---
-    return [
-        item(_('systray.menu.triggers', default='Déclencheurs'), menu(*build_triggers_menu())), # Translate submenu title
-        item(_('systray.menu.tooltip', default='Info-bulle'), menu(*build_tooltip_menu())), # Translate submenu title
-        menu.SEPARATOR,
-        min_dur_item,
-        model_item
-    ]
-
-def build_triggers_menu():
-    # --- Dictation Button Submenu ---
-    current_dict_btn = config.get("triggers", {}).get("dictation_button", "middle")
-    dictation_items = []
-    for btn in BUTTON_OPTIONS:
-        dictation_items.append(
-            item(
-                btn.capitalize(),
-                partial(update_trigger_setting_callback, setting_key='dictation_button', value=btn),
-                checked=lambda item, b=btn: config.get("triggers", {}).get("dictation_button") == b,
-                radio=True
-            )
-        )
-    dictation_submenu = menu(*dictation_items)
-
-    # --- Command Button Submenu ---
-    current_cmd_btn = config.get("triggers", {}).get("command_button")
+    # --- NEW: Create Available Commands Submenu --- >
     command_items = []
-    for btn in COMMAND_BUTTON_OPTIONS:
-        btn_str = str(btn) if btn is not None else "None"
-        command_items.append(
-            item(
-                btn_str.capitalize(),
-                partial(update_trigger_setting_callback, setting_key='command_button', value=btn),
-                checked=lambda item, b=btn: config.get("triggers", {}).get("command_button") == b,
-                radio=True
-            )
-        )
-    command_submenu = menu(*command_items)
+    # Get keywords
+    try:
+        # Make sure i18n context is set correctly before this
+        # Ensure load_translations was called with the correct lang
+        enter_kws_str = _("dictation.enter_keywords", default="")
+        escape_kws_str = _("dictation.escape_keywords", default="")
+        back_kws_str = _("dictation.backspace_keywords", default="")
 
-    # --- Command Modifier Submenu ---
-    current_cmd_mod = config.get("triggers", {}).get("command_modifier")
-    modifier_items = []
-    for mod in MODIFIER_OPTIONS:
-        mod_str = str(mod) if mod is not None else "None"
-        modifier_items.append(
-            item(
-                mod_str.capitalize(),
-                partial(update_trigger_setting_callback, setting_key='command_modifier', value=mod),
-                checked=lambda item, m=mod: config.get("triggers", {}).get("command_modifier") == m,
-                radio=True
-            )
-        )
-    modifier_submenu = menu(*modifier_items)
+        enter_kws = [k.strip() for k in enter_kws_str.split(',') if k.strip()]
+        escape_kws = [k.strip() for k in escape_kws_str.split(',') if k.strip()]
+        back_kws = [k.strip() for k in back_kws_str.split(',') if k.strip()]
 
-    return [
-        item(_('systray.menu.dictation_button', default='Dictation Button'), dictation_submenu),
-        item(_('systray.menu.command_button', default='Command Button'), command_submenu),
-        item(_('systray.menu.command_modifier', default='Command Modifier'), modifier_submenu)
-    ]
+        # Use translated labels for command types
+        enter_label = _("systray.commands.enter", default="Enter")
+        escape_label = _("systray.commands.escape", default="Escape")
+        backspace_label = _("systray.commands.backspace", default="Backspace")
+        replacements_label = _("systray.commands.replacements", default="Replacements")
+        none_label = _("systray.commands.none", default="(No commands defined)")
+        title_label = _("systray.commands.title", default="Voice Commands")
 
-def build_tooltip_menu():
-    alpha = config.get("tooltip", {}).get("alpha", "N/A")
-    bg = config.get("tooltip", {}).get("bg_color", "N/A")
-    fg = config.get("tooltip", {}).get("fg_color", "N/A")
-    font = config.get("tooltip", {}).get("font_family", "N/A")
-    size = config.get("tooltip", {}).get("font_size", "N/A")
+        if enter_kws: command_items.append(item(f"{enter_label}: {', '.join(enter_kws)}", None, enabled=False))
+        if escape_kws: command_items.append(item(f"{escape_label}: {', '.join(escape_kws)}", None, enabled=False))
+        if back_kws: command_items.append(item(f"{backspace_label}: {', '.join(back_kws)}", None, enabled=False))
 
-    # TODO: Add actions to change these settings
-    return [
-        item(_('systray.menu.tooltip_transparency', default=f'Transparency: {alpha}', value=alpha), None, enabled=False),
-        item(_('systray.menu.tooltip_background', default=f'Background: {bg}', value=bg), None, enabled=False),
-        item(_('systray.menu.tooltip_text_color', default=f'Text Color: {fg}', value=fg), None, enabled=False),
-        item(_('systray.menu.tooltip_font', default=f'Font: {font}', value=font), None, enabled=False),
-        item(_('systray.menu.tooltip_font_size', default=f'Font Size: {size}', value=size), None, enabled=False)
-    ]
+        # Get replacements (using lang_prefix determined earlier)
+        replacements = ALL_DICTATION_REPLACEMENTS.get(lang_prefix, {})
+        if replacements:
+            if command_items: command_items.append(menu.SEPARATOR)
+            command_items.append(item(replacements_label, None, enabled=False))
+            # Limit number of replacements shown
+            count = 0
+            MAX_REPLACEMENTS_SHOWN = 15
+            # Sort replacements by the spoken key for consistent order
+            sorted_replacements = sorted(replacements.items())
+            for spoken, typed in sorted_replacements:
+                command_items.append(item(f"  '{spoken}' -> '{typed}'", None, enabled=False))
+                count += 1
+                if count >= MAX_REPLACEMENTS_SHOWN:
+                     command_items.append(item("  ...", None, enabled=False))
+                     break
 
-def build_menu():
-    """Builds the main systray menu structure, showing current source language."""
-    current_build_lang = i18n.get_current_language()
-    logging.debug(f"Starting build_menu. Current i18n lang: {current_build_lang}")
+        # If no commands found at all
+        if not command_items:
+             command_items.append(item(none_label, None, enabled=False))
 
-    # --- Get Current Source Language Name for Display ---
-    general_cfg = config.get("general", {})
-    current_source_lang_code = general_cfg.get("selected_language", "N/A")
-    # Use native name logic
-    english_name = ALL_LANGUAGES.get(current_source_lang_code, current_source_lang_code)
-    native_name = NATIVE_LANGUAGE_NAMES.get(current_source_lang_code, english_name)
-    current_source_lang_display_name = native_name if current_source_lang_code != "N/A" else "N/A"
+    except Exception as e:
+        logging.error(f"Systray: Error building command list: {e}")
+        command_items = [item("Error loading commands", None, enabled=False)]
 
-    # --- Combine base label with current language ---
-    source_lang_label_base = _('systray.menu.source_language', default='Langue Source')
-    source_lang_menu_text = f"{source_lang_label_base}: {current_source_lang_display_name}"
+    # Use language code in the title
+    command_menu_title = f"{title_label} ({current_lang_code or 'N/A'})"
+    commands_menu = menu(*command_items)
+    # --- End Available Commands Submenu --- >
 
-    return menu(
-        item(_('systray.menu.mode', default='Mode'), build_mode_menu()),
-        # --- Use the combined text for the menu item --- >
-        item(source_lang_menu_text, build_language_source_menu()),
-        item(_('systray.menu.target_language', default='Langue Cible'), build_language_target_menu()),
+    # --- Build Main Menu --- >
+    # Ensure this part exists and add the commands_menu item to it
+    # (Example structure, adjust based on your existing main_menu)
+    main_menu = menu(
+        item(_("systray.menu.mode"), mode_menu),
+        item(_("systray.menu.source_language"), source_lang_menu),
+        item(_("systray.menu.target_language"), target_lang_menu),
+        item(command_menu_title, commands_menu), # <<< Add commands menu here
         menu.SEPARATOR,
-        item(_('systray.menu.customization', default='Personnalisation'), menu(*build_personalisation_submenu_content())),
-        menu.SEPARATOR,
-        item(_('systray.menu.reload_config', default='Recharger Config'), on_reload_config_clicked),
-        item(_('systray.menu.exit', default='Quitter'), on_exit_clicked)
+        item(_("systray.menu.exit"), on_exit_clicked) # <-- Ensure correct exit handler
     )
+
+    return main_menu
+
+# --- Build Menu Function (MOVED EARLIER) --- >
+def build_menu():
+    global exit_app_event # Ensure we use the event from this module
+    # Load latest config and translations
+    cfg = load_config()
+    # ... (reste du code de build_menu, y compris la création du sous-menu commandes) ...
+    # --- NEW: Create Available Commands Submenu --- >
+    # ... (logique du sous-menu commandes) ...
+    # --- Build Main Menu --- >
+    main_menu = menu(
+        # ... (items du menu principal) ...
+        item(command_menu_title, commands_menu), # <<< Add commands menu here
+        menu.SEPARATOR,
+        item(_("systray.menu.exit"), on_exit_clicked) # <-- Ensure correct exit handler
+    )
+    logging.debug("Systray: Menu rebuilt.")
+    return main_menu
 
 # --- Main Systray Function ---
 def run_systray(exit_event_arg):
@@ -581,7 +554,8 @@ def run_systray(exit_event_arg):
     try:
         image = create_image(64, 64, 'black', 'red')
         icon_title = _('systray.title', default="Vibe Assistant")
-        icon = pystray.Icon("vibe_assistant", image, icon_title, menu=build_menu())
+        # --- Call build_menu() AFTER it has been defined --- >
+        icon = pystray.Icon("vibe_assistant", image, icon_title, menu=build_menu()) 
 
         logging.info("Starting systray icon detached...")
         icon.run_detached() # Use run_detached instead of run

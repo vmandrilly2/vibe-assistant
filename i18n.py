@@ -8,6 +8,59 @@ DEFAULT_LOCALE = "en" # Default language if selected one is not found
 _translations = {}
 _current_lang = None
 
+# --- Dictation Replacements (Moved from vibe_app.py) --- >
+# Maps spoken words (lowercase) to characters for replacement in Dictation mode.
+DICTATION_REPLACEMENTS_FR = {
+    # Punctuation
+    "point": ".",
+    "virgule": ",",
+    "point virgule": ";",
+    "deux points": ":", # Adjusted from "2 points" for likely spoken form
+    "point d'interrogation": "?",
+    "point d'exclamation": "!",
+    # Symbols
+    "arobase": "@",
+    "dièse": "#", # Also known as croisillon
+    "dollar": "$",
+    "pourcent": "%",
+    "et commercial": "&",
+    "astérisque": "*",
+    "plus": "+",
+    "moins": "-",
+    "égal": "=",
+    "barre oblique": "/", # Slash
+    "barre oblique inversée": "\\", # Backslash
+    "barre verticale": "|", # Pipe
+    "soulignement": "_", # Underscore
+    "trait d'union": "-", # Hyphen
+    "tiret": "-", # Added hyphen alternative
+    "slash": "/", # Added Slash
+    # Quotes
+    "apostrophe": "'",
+    "guillemet": '"',
+    "guillemet simple": "'",
+    "guillemet double": '"',
+    # Parentheses/Brackets
+    "parenthèse ouvrante": "(",
+    "parenthèse fermante": ")",
+    "crochet ouvrant": "[",
+    "crochet fermant": "]",
+    "accolade ouvrante": "{",
+    "accolade fermante": "}",
+    "chevron ouvrant": "<",
+    "chevron fermant": ">",
+}
+
+# Add replacement dicts for other languages here
+# DICTATION_REPLACEMENTS_EN = { ... }
+
+ALL_DICTATION_REPLACEMENTS = {
+    "fr": DICTATION_REPLACEMENTS_FR,
+    # "en": DICTATION_REPLACEMENTS_EN,
+}
+
+# --- End Dictation Replacements --- >
+
 def load_translations(lang_code):
     """Loads translation strings for the given language code."""
     global _translations, _current_lang

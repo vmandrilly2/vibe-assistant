@@ -1244,7 +1244,8 @@ def on_click(x, y, button, pressed):
             # The main loop stop flow should NOT handle hiding anymore.
             try:
                 logging.debug("Button released (no hover selection): Sending immediate hide command to status indicator.")
-                hide_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}
+                hide_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": "",
+                             "connection_status": "idle"} # <-- Reset connection status
                 status_queue.put_nowait(("state", hide_data))
                 if ACTIVE_MODE == MODE_DICTATION:
                      tooltip_queue.put_nowait(("hide", None))
@@ -1293,7 +1294,8 @@ def on_press(key):
             try: tooltip_queue.put_nowait(("hide", None))
             except queue.Full: pass
             try:
-                status_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}
+                status_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": "",
+                               "connection_status": "idle"} # <-- Reset connection status
                 status_queue.put_nowait(("state", status_data))
             except queue.Full: pass
 

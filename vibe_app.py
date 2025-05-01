@@ -1021,12 +1021,13 @@ async def translate_and_type(text_to_translate, source_lang_code, target_lang_co
 # --- Deepgram Event Handlers ---
 async def on_open(self, open, **kwargs):
     logging.info("Deepgram connection opened.")
-    # --- NEW: Update status indicator to OK --- >
+    # --- MODIFIED: Update status indicator to CONNECTED --- >
     try:
         if status_mgr and status_mgr.thread.is_alive():
-            status_mgr.queue.put_nowait(("connection_update", {"status": "ok"}))
+            # Send "connected" to signify successful connection
+            status_mgr.queue.put_nowait(("connection_update", {"status": "connected"}))
     except queue.Full:
-        logging.warning("Status queue full sending connection_update=ok on open.")
+        logging.warning("Status queue full sending connection_update=connected on open.")
     except Exception as e:
         logging.error(f"Error sending status update on DG open: {e}")
 
@@ -1091,6 +1092,7 @@ async def on_utterance_end(self, utterance_end, **kwargs):
 async def on_error(self, error, **kwargs):
     logging.error(f"Deepgram Handled Error: {error}")
     # --- NEW: Update status indicator to ERROR --- >
+    # --- MODIFIED: Update status indicator to ERROR --- >
     try:
         if status_mgr and status_mgr.thread.is_alive():
             status_mgr.queue.put_nowait(("connection_update", {"status": "error"}))
@@ -1101,6 +1103,19 @@ async def on_error(self, error, **kwargs):
 
 async def on_close(self, close, **kwargs):
     logging.info("Deepgram connection closed.")
+    # --- NEW: Optionally set status to idle on close if not error --- >
+    # Check current status *before* setting to idle
+    # Avoid reverting an 'error' state back to 'idle' on close.
+    try:
+        if status_mgr and status_mgr.thread.is_alive():
+            # Only reset to idle if the status wasn't already error
+            # This requires accessing the status indicator's state, which is tricky.
+            # Let's simplify: Assume a close means idle unless an error already occurred.
+            # The main loop will handle setting error state more reliably.
+            # Let's *not* set to idle here, let the main loop manage idle state.
+            pass # status_mgr.queue.put_nowait(("connection_update", {"status": "idle"}))
+    except Exception as e:
+        logging.error(f"Error sending status update on DG close: {e}")
 
 async def on_unhandled(self, unhandled, **kwargs):
     logging.warning(f"Deepgram Unhandled Websocket Message: {unhandled}")
@@ -1396,6 +1411,15 @@ async def main():
     start_time = None # Make sure it's initialized
     stopping_start_time = None # NEW: Store the start_time for the specific stop cycle being processed
 
+    # --- NEW: Connection Retry Constants --- (Simplified Timeout)
+    MAX_CONNECT_ATTEMPTS = 3
+    CONNECT_RETRY_DELAY_SEC = 0.5
+    OVERALL_CONNECT_TIMEOUT_SEC = 5.0 # Total time allowed for all attempts
+    # --- Removed individual attempt timeouts ---
+
+    # --- NEW: Event for connection success --- >
+    connection_established_event = asyncio.Event()
+
     try:
         while not systray_ui.exit_app_event.is_set():
             current_time = time.time()
@@ -1464,108 +1488,158 @@ async def main():
             # --- Start Transcription Flow --- >
             # Only start if the event is set AND we are not in the process of stopping
             if transcription_active_event.is_set() and not is_stopping and dg_connection is None:
-                # --- NEW: Set status to OK *before* attempting connection --- >
+                # --- NEW: Set status to CONNECTING *before* attempting connection --- >
                 try:
                     if status_mgr and status_mgr.thread.is_alive():
-                        status_mgr.queue.put_nowait(("connection_update", {"status": "ok"}))
-                except queue.Full: logging.warning("Status queue full setting status to OK before connect.")
-                except Exception as e: logging.error(f"Error setting status to OK before connect: {e}")
+                        status_mgr.queue.put_nowait(("connection_update", {"status": "connecting"})) # Yellow state
+                except queue.Full: logging.warning("Status queue full setting status to CONNECTING before connect attempt.")
+                except Exception as e: logging.error(f"Error setting status to CONNECTING before connect attempt: {e}")
                 # --- End New --- >
+
                 logging.info(f"Activating transcription in {ACTIVE_MODE} mode...")
-                # Clear state based on ACTIVE_MODE
                 if ACTIVE_MODE == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
                 elif ACTIVE_MODE == MODE_KEYBOARD: final_keyboard_input_text = ""
 
-                try:
-                    dg_connection = deepgram.listen.asyncwebsocket.v("1")
-                    # --- Register ALL handlers --- >
-                    dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
-                    dg_connection.on(LiveTranscriptionEvents.Open, on_open)
-                    dg_connection.on(LiveTranscriptionEvents.Close, on_close)
-                    dg_connection.on(LiveTranscriptionEvents.Error, on_error)
-                    dg_connection.on(LiveTranscriptionEvents.Unhandled, on_unhandled)
-                    dg_connection.on(LiveTranscriptionEvents.Metadata, on_metadata)
-                    dg_connection.on(LiveTranscriptionEvents.SpeechStarted, on_speech_started)
-                    dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, on_utterance_end)
-                    # --- End Handlers --- >
-                    options = LiveOptions(model="nova-2", language=SELECTED_LANGUAGE, interim_results=True, smart_format=True,
-                                          encoding="linear16", channels=1, sample_rate=16000, punctuate=True, numerals=True,
-                                          utterance_end_ms="1000", vad_events=True, endpointing=300)
-                    await dg_connection.start(options)
-                    pre_activation_buffer = buffered_audio_input.get_buffer()
-                    # --- Send Buffer with Yielding --- >
-                    if pre_activation_buffer:
-                        total_bytes = sum(len(chunk) for chunk in pre_activation_buffer)
-                        logging.info(f"Sending pre-activation buffer: {len(pre_activation_buffer)} chunks, {total_bytes} bytes.")
-                        for chunk in pre_activation_buffer:
-                            if dg_connection and await dg_connection.is_connected():
-                                try:
-                                    await dg_connection.send(chunk)
-                                    await asyncio.sleep(0.001) # <-- ADD SMALL SLEEP HERE
-                                except Exception as send_err:
-                                    logging.warning(f"Error sending buffer chunk: {send_err}")
-                                    break
-                            else:
-                                logging.warning("DG connection lost while sending buffer.")
-                                break
-                    # --- End Buffer Sending --- >
+                # --- Connection Retry Loop --- >
+                connection_successful = False
+                microphone = None # Reset microphone state here
+                connection_established_event.clear() # Clear event before attempts
+                start_connect_time = time.time() # Track start of overall connection process
 
-                    # --- Microphone Setup --- >
-                    original_send = dg_connection.send
-                    async def logging_send_wrapper(data):
-                        is_conn_connected = False
+                for attempt in range(MAX_CONNECT_ATTEMPTS):
+                    if time.time() - start_connect_time > OVERALL_CONNECT_TIMEOUT_SEC:
+                        logging.warning(f"Overall connection timeout ({OVERALL_CONNECT_TIMEOUT_SEC}s) exceeded during attempt {attempt + 1}. Aborting.")
+                        break # Exit retry loop
+
+                    logging.info(f"Attempting Deepgram connection (Attempt {attempt + 1}/{MAX_CONNECT_ATTEMPTS})...")
+                    # Status should already be 'connecting'
+
+                    try:
+                        dg_connection = deepgram.listen.asyncwebsocket.v("1")
+                        # Register handlers
+                        dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
+                        # --- MODIFIED: Wrap on_open to set event --- >
+                        async def on_open_wrapper(self, open, **kwargs):
+                            await on_open(self, open, **kwargs)
+                            connection_established_event.set() # Signal success
+                        dg_connection.on(LiveTranscriptionEvents.Open, on_open_wrapper)
+                        # --- End Modified --- >
+                        dg_connection.on(LiveTranscriptionEvents.Close, on_close)
+                        dg_connection.on(LiveTranscriptionEvents.Error, on_error)
+                        dg_connection.on(LiveTranscriptionEvents.Unhandled, on_unhandled)
+                        dg_connection.on(LiveTranscriptionEvents.Metadata, on_metadata)
+                        dg_connection.on(LiveTranscriptionEvents.SpeechStarted, on_speech_started)
+                        dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, on_utterance_end)
+
+                        options = LiveOptions(model="nova-2", language=SELECTED_LANGUAGE, interim_results=True, smart_format=True,
+                                              encoding="linear16", channels=1, sample_rate=16000, punctuate=True, numerals=True,
+                                              utterance_end_ms="1000", vad_events=True, endpointing=300)
+
+                        # --- Start Connection (No wait_for) --- >
+                        await dg_connection.start(options)
+
+                        # --- Wait for connection success event OR timeout --- >
+                        remaining_timeout = max(0, OVERALL_CONNECT_TIMEOUT_SEC - (time.time() - start_connect_time))
+                        logging.debug(f"Waiting for connection event with remaining timeout: {remaining_timeout:.2f}s")
+                        try:
+                            await asyncio.wait_for(connection_established_event.wait(), timeout=remaining_timeout)
+                            logging.info(f"Connection established (on_open received) on attempt {attempt + 1}.")
+                            connection_successful = True
+                            # Don't set status here, on_open handler does it.
+                            break # Exit retry loop on success
+                        except asyncio.TimeoutError:
+                             logging.warning(f"Did not receive on_open within timeout on attempt {attempt + 1}.")
+                             # Clean up connection before next attempt
+                             if dg_connection:
+                                 try: await dg_connection.finish() # Try to close gracefully
+                                 except Exception: pass
+                                 finally: dg_connection = None
+
+                    except Exception as e:
+                        logging.error(f"Error during DG connection attempt {attempt + 1}: {e}", exc_info=(attempt == MAX_CONNECT_ATTEMPTS - 1))
+                        # Clean up connection before next attempt
                         if dg_connection:
-                            try: is_conn_connected = await dg_connection.is_connected()
+                            try: await dg_connection.finish() # Try to close gracefully
                             except Exception: pass
-                        if is_conn_connected:
-                            try: await original_send(data)
-                            except Exception as mic_send_err: logging.warning(f"Error sending mic data: {mic_send_err}")
-                        # else: # Optional: Log if trying to send when not connected
-                        #    logging.debug("Attempted to send mic data while DG not connected.")
-                    microphone = Microphone(logging_send_wrapper)
+                            finally: dg_connection = None
 
-                    # --- REMOVED DELAY --- >
-                    # await asyncio.sleep(0.1) # 100ms delay
+                    # --- Retry Logic --- >
+                    if not connection_successful and attempt < MAX_CONNECT_ATTEMPTS - 1:
+                        logging.info(f"Retrying connection in {CONNECT_RETRY_DELAY_SEC} seconds...")
+                        # Status remains 'connecting'
+                        await asyncio.sleep(CONNECT_RETRY_DELAY_SEC)
+                    elif not connection_successful and attempt == MAX_CONNECT_ATTEMPTS - 1:
+                         logging.error("All Deepgram connection attempts failed or timed out.")
+                         # --- Set status to ERROR after all retries fail --- >
+                         try:
+                             if status_mgr and status_mgr.thread.is_alive():
+                                 status_mgr.queue.put_nowait(("connection_update", {"status": "error"})) # Red state
+                                 logging.info("Set status indicator to ERROR due to connection failure.")
+                             else:
+                                  logging.warning("Status manager not available to set error state.")
+                         except queue.Full: logging.warning("Status queue full setting status to ERROR after failed attempts.")
+                         except Exception as status_err: logging.error(f"Error setting status to ERROR after failed attempts: {status_err}")
+                # --- End Connection Retry Loop --- >
 
-                    microphone.start()
-                    logging.info("Deepgram connection and microphone started.")
+                # --- Start Mic and Send Buffer ONLY if connection was successful --- >
+                if connection_successful and dg_connection:
+                    try:
+                        # --- Send Buffer --- >
+                        pre_activation_buffer = buffered_audio_input.get_buffer()
+                        if pre_activation_buffer:
+                            total_bytes = sum(len(chunk) for chunk in pre_activation_buffer)
+                            logging.info(f"Sending pre-activation buffer: {len(pre_activation_buffer)} chunks, {total_bytes} bytes.")
+                            for chunk in pre_activation_buffer:
+                                if dg_connection and await dg_connection.is_connected():
+                                    try: await dg_connection.send(chunk); await asyncio.sleep(0.001)
+                                    except Exception as send_err: logging.warning(f"Error sending buffer chunk: {send_err}"); break
+                                else: logging.warning("DG connection lost while sending buffer."); break
+                        # --- Microphone Setup --- >
+                        original_send = dg_connection.send
+                        async def logging_send_wrapper(data):
+                            is_conn_connected = False
+                            if dg_connection:
+                                try: is_conn_connected = await dg_connection.is_connected()
+                                except Exception: pass
+                            if is_conn_connected:
+                                try: await original_send(data)
+                                except Exception as mic_send_err: logging.warning(f"Error sending mic data: {mic_send_err}")
+                        microphone = Microphone(logging_send_wrapper)
+                        microphone.start()
+                        logging.info("Deepgram microphone started and streaming.")
+                        # Status should already be 'connected' from on_open
+                    except Exception as mic_buf_err:
+                         logging.error(f"Error sending buffer or starting microphone: {mic_buf_err}", exc_info=True)
+                         # Set error state if mic/buffer fails
+                         try: status_mgr.queue.put_nowait(("connection_update", {"status": "error"}))
+                         except Exception: pass
+                         if microphone: microphone.finish(); microphone = None
+                         if dg_connection: await dg_connection.finish(); dg_connection = None
+                         connection_successful = False # Mark as failed
+                # --- End Mic/Buffer Start ---
 
-                    # --- IMMEDIATE CHECK AFTER START --- >
-                    if not transcription_active_event.is_set():
-                        logging.warning("Stop event detected immediately after DG/Mic start. Initiating stop.")
-                        # Manually trigger the stop logic *now* by setting the flag
-                        # The main loop will pick this up in the next iteration's 'if is_stopping:' block
-                        is_stopping = True
-                        stop_initiated_time = time.time() # Use current time
-                        stopping_start_time = start_time # CAPTURE start_time for this stop cycle too
-                        active_mode_on_stop = ACTIVE_MODE # Capture mode
-                        # UI should have been hidden by the main stop signal check,
-                        # but log if it wasn't, just in case.
-                        if start_time is not None: # Check if start_time was set before stop
-                            logging.debug("Ensuring UI is hidden due to stop during startup.")
-                            try: status_mgr.queue.put_nowait(("state", {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}))
-                            except Exception as e: logging.error(f"Error sending hide message during startup stop: {e}")
-                            if ACTIVE_MODE == MODE_DICTATION:
-                                try: tooltip_mgr.queue.put_nowait(("hide", None))
-                                except Exception as e: logging.error(f"Error sending tooltip hide during startup stop: {e}")
-
-                except Exception as e:
-                    logging.error(f"Failed to start DG/Mic: {e}", exc_info=True)
-                    if dg_connection:
-                       try: await dg_connection.finish()
-                       except Exception: pass
-                       finally: dg_connection = None
-                    if microphone: microphone.finish(); microphone = None # Ensure mic is stopped
-                    # Clear flags if start failed
-                    transcription_active_event.clear() # Ensure it's clear
-                    initial_activation_pos = None
-                    start_time = None # Reset start time too
-                    is_stopping = False # Not stopping if start failed
-                    # Ensure UI is hidden
+                # --- IMMEDIATE CHECK AFTER START/RETRY Block --- >
+                # If connection was marked successful but stop event is now set
+                if connection_successful and not transcription_active_event.is_set():
+                    logging.warning("Stop event detected immediately after successful DG/Mic start. Initiating stop.")
+                    is_stopping = True
+                    stop_initiated_time = time.time()
+                    stopping_start_time = start_time
+                    active_mode_on_stop = ACTIVE_MODE
+                    # Ensure UI hidden (redundant if stop signal handler already did it, but safe)
                     try: status_mgr.queue.put_nowait(("state", {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}))
                     except Exception: pass
-                    try: tooltip_mgr.queue.put_nowait(("hide", None))
-                    except Exception: pass
+                    if ACTIVE_MODE == MODE_DICTATION:
+                        try: tooltip_mgr.queue.put_nowait(("hide", None))
+                        except Exception: pass
+
+                # --- Handle case where ALL connection attempts failed --- >
+                elif not connection_successful:
+                     # Ensure mic/connection are None if we exit the loop due to failure
+                     microphone = None
+                     dg_connection = None
+                     # Status should be 'error' from loop exit logic
+                     logging.debug("Connection failed, skipping mic/buffer start.")
 
             # --- Process Stop Flow --- >
             # If stopping has been initiated

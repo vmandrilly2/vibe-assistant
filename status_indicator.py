@@ -74,7 +74,7 @@ class StatusIndicatorManager:
         self.hovered_label_widget = None # Track the specific label widget being hovered
         self.hovered_data = None # {type: ..., value: ...} corresponding to hovered_label_widget
         # --- NEW: Connection Status --- >
-        self.connection_status = "ok" # ok, error
+        self.connection_status = "idle" # Changed initial state to 'idle'
 
         # Icon drawing properties
         self.icon_base_width = 24 # Original icon width
@@ -90,15 +90,17 @@ class StatusIndicatorManager:
                              self.lang_text_width_estimate)
 
         # Colors
-        self.mic_body_color = "#CCCCCC" # Light grey for mic body
+        self.mic_body_color = "#CCCCCC" # Light grey for mic body (Initial/Idle)
         self.mic_stand_color = "#AAAAAA" # Darker grey for stand
         # self.volume_fill_color = "#FF0000" # REMOVED - Now mode-dependent
         self.dictation_volume_color = "#FF0000" # Red for Dictation volume
         self.keyboard_volume_color = "#0000FF" # Blue for Keyboard volume
         self.command_volume_color = "#008000" # Green for Command volume (placeholder)
-        # --- NEW: Error Color --- >
+        # --- NEW/UPDATED Colors --- >
+        self.mic_connecting_color = "#FFD700" # Gold/Yellow for connecting
         self.mic_error_color = "#FF6347" # Tomato red for error state
-        # self.idle_indicator_color = "#ADD8E6" # REMOVED - No longer needed
+        self.mic_connected_color = "#90EE90" # Light Green for successful connection
+        # --- End NEW/UPDATED Colors --- >
         self.text_color = "#333333" # Color for language text
         self.inactive_text_color = "#AAAAAA" # Lighter gray for inactive target lang
         self.mode_text_color = "#333333" # Color for mode text
@@ -347,13 +349,18 @@ class StatusIndicatorManager:
                         # Hiding handled above
                 # --- NEW: Handle Connection Status Update --- >
                 elif command == "connection_update":
-                    new_status = data.get("status", "ok")
-                    if new_status != self.connection_status:
-                        self.connection_status = new_status
-                        logging.debug(f"StatusIndicator connection status updated: {self.connection_status}")
-                        # Redraw needed only if the indicator is currently visible
-                        if self.current_state != "hidden":
-                            needs_redraw = True
+                    new_status = data.get("status", "idle") # Default to idle if not specified
+                    # --- MODIFIED: Accept only simplified states ---
+                    # Accept "idle", "connecting", "connected", "error"
+                    if new_status in ["idle", "connecting", "connected", "error"]:
+                        if new_status != self.connection_status:
+                            self.connection_status = new_status
+                            logging.debug(f"StatusIndicator connection status updated: {self.connection_status}")
+                            # Redraw needed only if the indicator is currently visible
+                            if self.current_state != "hidden":
+                                needs_redraw = True
+                    else:
+                        logging.warning(f"Received unknown connection status: {new_status}")
                 elif command == "selection_made":
                     logging.debug(f"StatusIndicator received selection_made: {data}")
                     self._blink_and_hide(data) # Handles hiding popups and main window
@@ -552,14 +559,21 @@ class StatusIndicatorManager:
             base_h = h * 0.1; base_y = stand_y + stand_h; base_w = w * 0.8; base_x = icon_x_offset + (w - base_w) / 2
             self.canvas.create_rectangle(stand_x, stand_y, stand_x + stand_w, stand_y + stand_h, fill=self.mic_stand_color, outline="")
             self.canvas.create_rectangle(base_x, base_y, base_x + base_w, base_y + base_h, fill=self.mic_stand_color, outline="")
-            # --- MODIFIED: Use error color if connection status is error --- >
-            current_mic_body_color = self.mic_error_color if self.connection_status == "error" else self.mic_body_color
+            # --- Determine Mic Body Color based on connection_status --- >
+            if self.connection_status == "connected":
+                current_mic_body_color = self.mic_connected_color # Green for connected
+            elif self.connection_status == "connecting":
+                current_mic_body_color = self.mic_connecting_color # Yellow for connecting
+            elif self.connection_status == "error":
+                current_mic_body_color = self.mic_error_color # Red for final error
+            else: # Includes "idle"
+                current_mic_body_color = self.mic_body_color # Default grey
             mic_body = self.canvas.create_rectangle(body_x, body_y, body_x + body_w, body_y + body_h, fill=current_mic_body_color, outline=self.mic_stand_color)
-            # --- End Modified --- >
+            # --- End Mic Body --- >
 
             # Volume Indicator
-            # --- MODIFIED: Don't draw volume indicator if connection status is error --- >
-            if self.current_state == "active" and self.connection_status == "ok":
+            # --- MODIFIED: Only draw volume if successfully connected ('connected') --- >
+            if self.current_state == "active" and self.connection_status == "connected":
                  volume_color = self.dictation_volume_color
                  if self.current_mode == "Keyboard": volume_color = self.keyboard_volume_color
                  fill_h = body_h * self.current_volume; fill_y = body_y + body_h - fill_h

@@ -431,8 +431,11 @@ final_keyboard_input_text = "" # Store final text from Keyboard Input Mode
 # --- Tooltip Manager Class ---
 class TooltipManager:
     """Manages a simple Tkinter tooltip window in a separate thread."""
-    def __init__(self, q):
+    # --- MODIFIED: Add transcription_active_event parameter --- >
+    def __init__(self, q, transcription_active_event):
         self.queue = q
+        # --- Store the event --- >
+        self.transcription_active_event = transcription_active_event
         self.root = None
         self.label = None
         self.thread = threading.Thread(target=self._run_tkinter, daemon=True)
@@ -589,6 +592,12 @@ class TooltipManager:
                 logging.error(f"Unexpected error during Tkinter destroy: {e}", exc_info=True)
 
     def _update_tooltip(self, text, x, y, activation_id):
+        # --- NEW: Check if transcription is still active --- >
+        if not self.transcription_active_event.is_set():
+            logging.debug("Tooltip update ignored: transcription_active_event is not set.")
+            return
+        # --- END NEW ---
+
         # Check if root exists and stop event isn't set
         if self.root and self.label and not self._stop_event.is_set():
             try:
@@ -603,6 +612,12 @@ class TooltipManager:
                  self._stop_event.set() # Stop if window is broken
 
     def _show_tooltip(self, activation_id):
+        # --- NEW: Check if transcription is still active --- >
+        if not self.transcription_active_event.is_set():
+            logging.debug("Tooltip show ignored: transcription_active_event is not set.")
+            return
+        # --- END NEW ---
+
         if self.root and not self._stop_event.is_set():
             try:
                 self.root.deiconify() # Show the window
@@ -1382,7 +1397,7 @@ async def main():
     logging.info("Systray UI thread started.")
 
     # --- Start Tooltip Manager ---
-    tooltip_mgr = TooltipManager(tooltip_queue)
+    tooltip_mgr = TooltipManager(tooltip_queue, transcription_active_event)
     tooltip_mgr.start()
     logging.info("Tooltip Manager started.")
 

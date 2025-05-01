@@ -263,6 +263,8 @@ def apply_config(cfg):
     global COMMAND_MODIFIER_KEY, MIN_DURATION_SEC, SELECTED_LANGUAGE
     global TOOLTIP_ALPHA, TOOLTIP_BG, TOOLTIP_FG, TOOLTIP_FONT_FAMILY, TOOLTIP_FONT_SIZE
     global TARGET_LANGUAGE, OPENAI_MODEL, ACTIVE_MODE # Add ACTIVE_MODE
+        # --- Action Confirmation Globals (NEEDED HERE!) --- >
+    global g_pending_action, g_action_confirmed
 
     logging.info("Applying configuration...")
     old_source_lang = SELECTED_LANGUAGE # Store old language
@@ -1449,6 +1451,8 @@ def save_config_local(cfg_dict):
 
 # --- Main Application Logic ---
 async def main():
+    # --- Action Confirmation Globals (NEEDED HERE!) --- >
+    global g_pending_action, g_action_confirmed
     # Remove current_mode from globals
     global tooltip_mgr, status_mgr, buffered_audio_input, deepgram, start_time
     global mouse_controller
@@ -1459,8 +1463,6 @@ async def main():
     global ui_interaction_cancelled, config, SELECTED_LANGUAGE, TARGET_LANGUAGE, ACTIVE_MODE
     global initial_activation_pos
     global status_mgr
-    # --- Action Confirmation Globals (NEEDED HERE!) --- >
-    global g_pending_action, g_action_confirmed
 
     logging.info("Starting Vibe App...")
     # --- Initialize Systray ---

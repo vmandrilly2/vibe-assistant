@@ -51,7 +51,7 @@
   },
   "dictation": {
       "backspace_keywords": "back,effacer,efface,effacé",
-      "enter_keywords": "entrée,entrer,retour à la ligne",
+      "enter_keywords": "entrée,entrer,entrez,retour à la ligne",
       "escape_keywords": "échap,échappe,escape"
   }
 } 

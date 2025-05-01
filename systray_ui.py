@@ -389,7 +389,6 @@ def build_language_source_menu():
 
 def build_language_target_menu():
     """Builds the Langue Cible submenu (extracted logic)."""
-    MAX_RECENT_DISPLAY = 3 # How many recent languages to show directly
     MAX_RECENT_TARGET_DISPLAY = 7
     general_cfg = config.get("general", {})
     recent_target_codes = general_cfg.get("recent_target_languages", [])[:MAX_RECENT_TARGET_DISPLAY]
@@ -454,14 +453,30 @@ def build_language_target_menu():
 
     target_lang_menu = menu(*target_lang_items)
 
+    return target_lang_menu # Return only the target language menu
 
+# --- Build Menu Function (MOVED EARLIER) --- >
+def build_menu():
+    global exit_app_event # Ensure we use the event from this module
+    # Load latest config and translations
+    cfg = load_config()
+    # Get current language for menu building (Needed for command menu title/content)
+    current_lang_code = cfg.get("general", {}).get("selected_language", "en-US")
+    lang_prefix = current_lang_code.split('-')[0] if current_lang_code else 'en'
 
-    # --- NEW: Create Available Commands Submenu --- >
-    command_items = []
-    # Get keywords
+    # --- Build Standard Submenus --- >
+    mode_menu = build_mode_menu()
+    source_lang_menu = build_language_source_menu()
+    target_lang_menu = build_language_target_menu()
+
+    # --- Build Available Commands Submenu (MOVED BACK HERE) --- >
+    # Initialize command menu variables BEFORE the try block
+    default_cmd_title = _("systray.commands.title", default="Voice Commands")
+    command_menu_title = f"{default_cmd_title} ({_('systray.commands.error', default='Error')})" # Default title in case of error
+    commands_menu = menu(item(_('systray.commands.error_loading', default="Error loading commands"), None, enabled=False)) # Default menu
+
     try:
-        # Make sure i18n context is set correctly before this
-        # Ensure load_translations was called with the correct lang
+        # Get keywords
         enter_kws_str = _("dictation.enter_keywords", default="")
         escape_kws_str = _("dictation.escape_keywords", default="")
         back_kws_str = _("dictation.backspace_keywords", default="")
@@ -470,13 +485,16 @@ def build_language_target_menu():
         escape_kws = [k.strip() for k in escape_kws_str.split(',') if k.strip()]
         back_kws = [k.strip() for k in back_kws_str.split(',') if k.strip()]
 
+        # Build command items list
+        command_items = []
+
         # Use translated labels for command types
         enter_label = _("systray.commands.enter", default="Enter")
         escape_label = _("systray.commands.escape", default="Escape")
         backspace_label = _("systray.commands.backspace", default="Backspace")
         replacements_label = _("systray.commands.replacements", default="Replacements")
         none_label = _("systray.commands.none", default="(No commands defined)")
-        title_label = _("systray.commands.title", default="Voice Commands")
+        title_label = default_cmd_title # Use the title fetched earlier
 
         if enter_kws: command_items.append(item(f"{enter_label}: {', '.join(enter_kws)}", None, enabled=False))
         if escape_kws: command_items.append(item(f"{escape_label}: {', '.join(escape_kws)}", None, enabled=False))
@@ -490,7 +508,6 @@ def build_language_target_menu():
             # Limit number of replacements shown
             count = 0
             MAX_REPLACEMENTS_SHOWN = 15
-            # Sort replacements by the spoken key for consistent order
             sorted_replacements = sorted(replacements.items())
             for spoken, typed in sorted_replacements:
                 command_items.append(item(f"  '{spoken}' -> '{typed}'", None, enabled=False))
@@ -503,42 +520,23 @@ def build_language_target_menu():
         if not command_items:
              command_items.append(item(none_label, None, enabled=False))
 
+        # --- Assign final menu and title ONLY IF successful --- >
+        commands_menu = menu(*command_items)
+        # Use current_lang_code which is defined in build_menu's scope
+        command_menu_title = f"{title_label} ({current_lang_code or 'N/A'})"
+
     except Exception as e:
         logging.error(f"Systray: Error building command list: {e}")
-        command_items = [item("Error loading commands", None, enabled=False)]
-
-    # Use language code in the title
-    command_menu_title = f"{title_label} ({current_lang_code or 'N/A'})"
-    commands_menu = menu(*command_items)
-    # --- End Available Commands Submenu --- >
+        # Default error menu and title will be used
 
     # --- Build Main Menu --- >
-    # Ensure this part exists and add the commands_menu item to it
-    # (Example structure, adjust based on your existing main_menu)
     main_menu = menu(
         item(_("systray.menu.mode"), mode_menu),
         item(_("systray.menu.source_language"), source_lang_menu),
         item(_("systray.menu.target_language"), target_lang_menu),
-        item(command_menu_title, commands_menu), # <<< Add commands menu here
+        item(command_menu_title, commands_menu), # <<< Use the command menu (either successful or default error)
         menu.SEPARATOR,
-        item(_("systray.menu.exit"), on_exit_clicked) # <-- Ensure correct exit handler
-    )
-
-    return main_menu
-
-# --- Build Menu Function (MOVED EARLIER) --- >
-def build_menu():
-    global exit_app_event # Ensure we use the event from this module
-    # Load latest config and translations
-    cfg = load_config()
-    # ... (reste du code de build_menu, y compris la création du sous-menu commandes) ...
-    # --- NEW: Create Available Commands Submenu --- >
-    # ... (logique du sous-menu commandes) ...
-    # --- Build Main Menu --- >
-    main_menu = menu(
-        # ... (items du menu principal) ...
-        item(command_menu_title, commands_menu), # <<< Add commands menu here
-        menu.SEPARATOR,
+        item(_("systray.menu.reload_config"), on_reload_config_clicked), # Add reload config item
         item(_("systray.menu.exit"), on_exit_clicked) # <-- Ensure correct exit handler
     )
     logging.debug("Systray: Menu rebuilt.")

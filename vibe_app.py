@@ -14,6 +14,7 @@ import sys # Import sys for exiting on critical config error
 import numpy as np # Import numpy
 import pyaudio     # Import PyAudio
 from openai import OpenAI, AsyncOpenAI # Use AsyncOpenAI for non-blocking calls
+from action_confirm_ui import ActionConfirmManager
 
 # --- Systray UI Import ---
 # We need threading anyway, so let's use it for the systray
@@ -69,12 +70,12 @@ DEFAULT_CONFIG = {
 
 # --- Mode Constants ---
 MODE_DICTATION = "Dictation"
-MODE_KEYBOARD = "Keyboard"
-# Add MODE_COMMAND = "Command" later if reimplemented
+MODE_COMMAND = "Command" # Renamed from MODE_KEYBOARD
+# Add MODE_COMMAND = "Command" later if reimplemented # This comment seems outdated now
 
 # Define available modes and their display names (matches status_indicator)
 # This could be moved to a shared config/constants file later
-AVAILABLE_MODES = DEFAULT_MODES
+AVAILABLE_MODES = DEFAULT_MODES # This will be updated later based on the import
 
 # --- Global Configurable Variables ---
 # These will be updated by apply_config()
@@ -95,7 +96,7 @@ ACTIVE_MODE = MODE_DICTATION # Initialize with default
 
 # --- NEW: State Variables for Dictation Flow ---
 last_interim_transcript = "" # Store the most recent interim result
-final_processed_this_session = False # Flag to ensure final processing happens only once
+# --- REMOVED final_processed_this_session ---
 
 # --- Pynput Mappings ---
 PYNPUT_BUTTON_MAP = {
@@ -410,8 +411,14 @@ tooltip_queue = queue.Queue()
 status_queue = queue.Queue()
 modifier_keys_pressed = set()
 ui_action_queue = queue.Queue()
+# --- NEW: Queue for Action Confirmation UI --- >
+action_confirm_queue = queue.Queue()
 ui_interaction_cancelled = False # Flag specifically for UI hover interactions
 initial_activation_pos = None
+
+# --- NEW: State for Pending Action Confirmation --- >
+g_pending_action = None      # Stores the name of the action detected (e.g., "Enter")
+g_action_confirmed = False # Set by the confirmation UI via action_queue
 
 # --- Keyboard Controller (for typing simulation) ---
 kb_controller = keyboard.Controller()
@@ -426,7 +433,7 @@ current_command_transcript = "" # Store the transcript for command mode
 last_command_executed = None # For potential undo feature
 
 # --- State for Keyboard Input Mode ---
-final_keyboard_input_text = "" # Store final text from Keyboard Input Mode
+final_command_text = "" # Renamed from final_keyboard_input_text
 
 # --- Tooltip Manager Class ---
 class TooltipManager:
@@ -769,17 +776,56 @@ def handle_dictation_final(final_transcript, history, activation_id):
     original_words = final_transcript.split()
     punctuation_to_strip = '.,!?;:'
 
+    # --- Get translated backspace keywords --- >
+    back_keywords_str = _("dictation.backspace_keywords", default="back")
+    back_keywords = set(kw.strip().lower() for kw in back_keywords_str.split(',') if kw.strip())
+    logging.debug(f"Using backspace keywords: {back_keywords}")
+    # --- Get translated action keywords --- >
+    enter_keywords_str = _("dictation.enter_keywords", default="enter")
+    enter_keywords = set(kw.strip().lower() for kw in enter_keywords_str.split(',') if kw.strip())
+    escape_keywords_str = _("dictation.escape_keywords", default="escape")
+    escape_keywords = set(kw.strip().lower() for kw in escape_keywords_str.split(',') if kw.strip())
+    logging.debug(f"Using enter keywords: {enter_keywords}")
+    logging.debug(f"Using escape keywords: {escape_keywords}")
+    # --- End Get keywords --- >
+
     # Process the new transcript segment against the target list
     for word in original_words:
         if not word: continue
         cleaned_word = word.rstrip(punctuation_to_strip).lower()
 
-        if cleaned_word == "back":
+        # --- Check for Action Keywords FIRST --- >
+        if cleaned_word in enter_keywords:
+            logging.info(f"Action keyword detected: '{cleaned_word}'. Showing confirmation.")
+            # --- Send command to confirmation UI --- >
+            try:
+                pos = pyautogui.position() # Get current mouse pos
+                action_confirm_queue.put_nowait(("show", {"action": "Enter", "pos": pos}))
+                g_pending_action = "Enter" # Set global pending action state
+                g_action_confirmed = False # Reset confirmation flag
+            except Exception as e:
+                logging.error(f"Error sending 'show' to ActionConfirmManager: {e}")
+            continue
+        elif cleaned_word in escape_keywords:
+            logging.info(f"Action keyword detected: '{cleaned_word}'. Showing confirmation.")
+            # --- Send command to confirmation UI --- >
+            try:
+                pos = pyautogui.position() # Get current mouse pos
+                action_confirm_queue.put_nowait(("show", {"action": "Escape", "pos": pos}))
+                g_pending_action = "Escape" # Set global pending action state
+                g_action_confirmed = False # Reset confirmation flag
+            except Exception as e:
+                logging.error(f"Error sending 'show' to ActionConfirmManager: {e}")
+            continue
+        # --- End Check Action Keywords --- >
+
+        # --- Then check for Backspace Keywords --- >
+        elif cleaned_word in back_keywords:
             if target_words:
                 removed = target_words.pop()
-                logging.info(f"Processing 'back', removed '{removed}' from target_words.")
+                logging.info(f"Processing backspace keyword ('{cleaned_word}'), removed '{removed}' from target_words.")
             else:
-                logging.info(f"Processing 'back', but target_words already empty.")
+                logging.info(f"Processing backspace keyword ('{cleaned_word}'), but target_words already empty.")
         else:
             target_words.append(word) # Append original word with punctuation
 
@@ -865,19 +911,19 @@ def undo_last_command():
     pass
 
 # --- UPDATED: Keyboard Input Final Handling ---
-async def handle_keyboard_input_final(final_transcript):
-    """Handles final transcript for Keyboard Input Mode: Sends to OpenAI, parses keys, simulates."""
-    global final_keyboard_input_text, openai_client, OPENAI_MODEL
+async def handle_command_final(final_transcript): # Renamed from handle_keyboard_input_final
+    """Handles final transcript for Command Mode: Sends to OpenAI, parses keys, simulates."""
+    global final_command_text, openai_client, OPENAI_MODEL # Renamed variable
 
-    logging.info(f"Final Keyboard Input Transcript: '{final_transcript}'")
-    final_keyboard_input_text = final_transcript # Store the raw text
+    logging.info(f"Final Command Transcript (for AI processing): '{final_transcript}'")
+    final_command_text = final_transcript # Store the raw text
 
-    if not final_keyboard_input_text:
-        logging.warning("Keyboard Input: Empty transcript received.")
+    if not final_command_text:
+        logging.warning("Command Mode: Empty transcript received for OpenAI.")
         return
 
     if not openai_client:
-        logging.error("OpenAI client not available. Cannot process keyboard input.")
+        logging.error("OpenAI client not available. Cannot process command input.")
         return
 
     # --- Prepare OpenAI Request ---
@@ -900,9 +946,9 @@ If the user says "press" followed by a key name, output that key name. Example: 
 If the user asks for a combination, output the list. Example: "press control alt delete" -> [["ctrl", "alt", "delete"]].
 Be precise. If unsure, return an empty list [].
 """
-    user_prompt = f"User input: \"{final_keyboard_input_text}\""
+    user_prompt = f"User input: \"{final_command_text}\"" # Renamed variable
 
-    logging.info(f"Requesting keyboard key interpretation for: '{final_keyboard_input_text}'")
+    logging.info(f"Requesting AI key interpretation for command: '{final_command_text}'") # Renamed variable
 
     try:
         response = await openai_client.chat.completions.create(
@@ -990,7 +1036,7 @@ Be precise. If unsure, return an empty list [].
                 logging.warning(f"Unexpected item type in parsed keys list: {item}")
 
     except Exception as e:
-        logging.error(f"Error during OpenAI keyboard interpretation request: {e}", exc_info=True)
+        logging.error(f"Error during OpenAI command interpretation request: {e}", exc_info=True)
 
 
 # --- Translation Function ---
@@ -1064,7 +1110,7 @@ async def on_open(self, open, **kwargs):
         logging.error(f"Error sending status update on DG open: {e}")
 
 async def on_message(self, result, **kwargs):
-    global typed_word_history, final_source_text, final_keyboard_input_text # Add final_keyboard_input_text
+    global typed_word_history, final_source_text, final_command_text # Renamed final_keyboard_input_text
     # --- ADDED GLOBALS ---
     global last_interim_transcript # REMOVED final_processed_this_session
     try:
@@ -1077,17 +1123,17 @@ async def on_message(self, result, **kwargs):
         # Determine action based on the globally set ACTIVE_MODE
         if ACTIVE_MODE == MODE_DICTATION:
             if result.is_final:
-                # --- REMOVED CHECK for final processed flag ---
                 logging.debug(f"Processing final dictation result: '{transcript}'")
-                final_part = transcript
-                # Note: handle_dictation_final expects the final segment transcript
-                # Pass the current activation ID
-                updated_history, text_typed_this_segment = handle_dictation_final(final_part, typed_word_history, current_activation_id)
+                # --- Apply replacements BEFORE handling final --- >
+                processed_transcript = apply_dictation_replacements(transcript, SELECTED_LANGUAGE)
+                # Pass the processed transcript and activation ID
+                updated_history, text_typed_this_segment = handle_dictation_final(processed_transcript, typed_word_history, current_activation_id)
                 typed_word_history = updated_history
+                # Update final_source_text based on the processed transcript's history
                 final_source_text = " ".join([entry['text'] for entry in typed_word_history])
-                logging.debug(f"Dictation final source text updated: '{final_source_text}'")
+                logging.debug(f"Dictation final source text updated (post-replacement): '{final_source_text}'")
+                # --- End Apply replacements --- >
 
-                # --- REMOVED flag setting and log message ---
                 last_interim_transcript = "" # Clear interim after processing a final part
             else:
                 # --- Update last interim transcript ---
@@ -1096,17 +1142,20 @@ async def on_message(self, result, **kwargs):
                 # Pass the current activation ID
                 handle_dictation_interim(transcript, current_activation_id)
 
-        elif ACTIVE_MODE == MODE_KEYBOARD:
-            # Keyboard mode might only care about the final result
+        elif ACTIVE_MODE == MODE_COMMAND: # Renamed from MODE_KEYBOARD
+            # Command mode might only care about the final result
             if result.is_final:
-                 handle_keyboard_input_final(transcript)
+                 # --- Call renamed handler ---
+                 # The task creation will happen in the stop flow, just store it here
+                 final_command_text = transcript # Store for later processing
+                 logging.debug(f"Stored final transcript for Command Mode: '{final_command_text}'")
             else:
-                 # Optional: Show interim results in tooltip for keyboard mode too?
-                 # handle_dictation_interim(transcript) # Reuse tooltip for now
-                 pass # Or do nothing for interim in keyboard mode
+                 # Optional: Show interim results in tooltip for command mode too?
+                 handle_dictation_interim(transcript, current_activation_id) # Reuse tooltip for now
+                 # pass # Or do nothing for interim in command mode
 
-        # elif ACTIVE_MODE == MODE_COMMAND: # If command mode is added back
-        #    if result.is_final: handle_command_final(transcript)
+        # elif ACTIVE_MODE == MODE_COMMAND: # This logic block is now MODE_COMMAND
+        #    if result.is_final: handle_command_final(transcript) # handle_command_final is now the main one
         #    else: handle_command_interim(transcript)
 
     except (AttributeError, IndexError) as e:
@@ -1159,14 +1208,15 @@ def on_click(x, y, button, pressed):
     # Use transcription_active_event as the main gatekeeper
     global start_time, status_queue, ui_interaction_cancelled, ui_action_queue # ADDED ui_action_queue
     global transcription_active_event # Use this event
-    global typed_word_history, final_source_text, final_keyboard_input_text
+    global typed_word_history, final_source_text, final_command_text # Renamed
     global SELECTED_LANGUAGE, TARGET_LANGUAGE, ACTIVE_MODE
     global initial_activation_pos
     global status_mgr
+    # --- Action Confirmation Globals --- >
+    global g_pending_action, g_action_confirmed, action_confirm_queue
+
     # --- ADDED GLOBALS ---
     global last_interim_transcript # REMOVED final_processed_this_session
-    # --- ADDED Activation ID --- >
-    global current_activation_id
 
     # Determine trigger based only on DICTATION_TRIGGER_BUTTON for now
     is_primary_trigger = (button == DICTATION_TRIGGER_BUTTON)
@@ -1186,8 +1236,8 @@ def on_click(x, y, button, pressed):
                 final_source_text = ""
                 last_interim_transcript = "" # Reset interim transcript
                 # final_processed_this_session = False # REMOVED - No longer used
-            elif ACTIVE_MODE == MODE_KEYBOARD: final_keyboard_input_text = ""
-            # elif ACTIVE_MODE == MODE_COMMAND: current_command_transcript = ""
+            elif ACTIVE_MODE == MODE_COMMAND: final_command_text = "" # Renamed mode and variable
+            # elif ACTIVE_MODE == MODE_COMMAND: current_command_transcript = "" # Already handled above
 
             # Set general active flag and time/pos
             transcription_active_event.set()
@@ -1291,18 +1341,25 @@ def on_click(x, y, button, pressed):
             except Exception as e: logging.error(f"Error sending immediate hide on release: {e}")
             # --- End Immediate Hide ---
 
-            # --- Signal Transcription Stop (Normal Release - No Hover Selection) ---
+            # --- Normal Stop Flow Signal --- >
+            # We still clear the event, but the main loop handles backend stop
+            # only if duration is sufficient AND no action was just confirmed/executed.
+            # The action execution check is now in the main loop.
             duration = time.time() - start_time if 'start_time' in globals() and start_time else 0
-            logging.info(f"Trigger button released (no hover selection, duration: {duration:.2f}s). Signaling backend stop for {ACTIVE_MODE}.")
-            # Clear the event to signal the main loop stop flow
+            logging.info(f"Trigger button released (no hover selection, duration: {duration:.2f}s). Signaling backend stop for {ACTIVE_MODE}. Pending Action: {g_pending_action}")
+
+            # Always clear the event to signal the main loop stop flow might be needed
             transcription_active_event.clear()
             initial_activation_pos = None
-            # --- REMOVED explicit hide message sending - UI is hidden above, main loop handles backend ---
+            # --- REMOVED explicit hide message sending - UI is hidden above, main loop handles backend --- 
 
 def on_press(key):
     global modifier_keys_pressed, status_queue
     global is_command_active, transcription_active_event
     global modifier_log_buffer, modifier_log_last_time
+    # --- Action Confirmation Globals --- >
+    global g_pending_action, g_action_confirmed, action_confirm_queue
+
     # Only log the first press (not repeats)
     if key in PYNPUT_MODIFIER_MAP.values() and key is not None:
         if key not in modifier_keys_pressed:
@@ -1328,9 +1385,17 @@ def on_press(key):
         if transcription_active_event.is_set() and key == keyboard.Key.esc:
             logging.info(f"ESC pressed during {ACTIVE_MODE} - cancelling action.")
             ui_interaction_cancelled = True
-            transcription_active_event.clear()
+            transcription_active_event.clear() 
+            # --- Hide Confirmation UI if pending --- >
+            if g_pending_action:
+                try: action_confirm_queue.put_nowait(("hide", None))
+                except queue.Full: pass
+                g_pending_action = None
+                g_action_confirmed = False
+            # --- Hide Tooltip --- >
             try: tooltip_queue.put_nowait(("hide", None))
             except queue.Full: pass
+            # --- Hide Status Indicator --- >
             try:
                 status_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": "",
                                "connection_status": "idle"} # <-- Reset connection status
@@ -1384,8 +1449,10 @@ async def main():
     # Remove current_mode from globals
     global tooltip_mgr, status_mgr, buffered_audio_input, deepgram, start_time
     global mouse_controller
+    # --- Add Action Confirm Manager --- >
+    global action_confirm_mgr
     global current_command_transcript, final_source_text, typed_word_history
-    global final_keyboard_input_text
+    global final_command_text # Renamed
     global ui_interaction_cancelled, config, SELECTED_LANGUAGE, TARGET_LANGUAGE, ACTIVE_MODE
     global initial_activation_pos
     global status_mgr
@@ -1413,6 +1480,11 @@ async def main():
                                         available_modes=AVAILABLE_MODES)
     status_mgr.start()
     logging.info("Status Indicator Manager started.")
+
+    # --- Start Action Confirmation UI Manager (NEW) --- >
+    action_confirm_mgr = ActionConfirmManager(action_confirm_queue, ui_action_queue)
+    action_confirm_mgr.start()
+    logging.info("Action Confirmation UI Manager started.")
 
     # --- Start Buffered Audio Input ---
     buffered_audio_input = BufferedAudioInput(status_queue)
@@ -1538,7 +1610,7 @@ async def main():
 
                 logging.info(f"Activating transcription in {ACTIVE_MODE} mode...")
                 if ACTIVE_MODE == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
-                elif ACTIVE_MODE == MODE_KEYBOARD: final_keyboard_input_text = ""
+                elif ACTIVE_MODE == MODE_COMMAND: final_command_text = "" # Renamed mode and variable
 
                 # --- Connection Retry Loop --- >
                 connection_successful = False
@@ -1763,13 +1835,14 @@ async def main():
                                 # action_task remains None
                             else:
                                  logging.debug("Stop flow action check: No final_source_text for Dictation, likely connection/stop issue.")
-                        elif active_mode_on_stop == MODE_KEYBOARD:
-                             # --- MODIFIED: Check final_keyboard_input_text before proceeding ---
-                            if final_keyboard_input_text:
-                                 logging.info(f"Processing keyboard input post-stop for: '{final_keyboard_input_text}'")
-                                 action_task = asyncio.create_task(handle_keyboard_input_final(final_keyboard_input_text))
+                        elif active_mode_on_stop == MODE_COMMAND: # Renamed mode
+                             # --- MODIFIED: Check final_command_text before proceeding --- Renamed variable
+                            if final_command_text:
+                                 logging.info(f"Processing command input post-stop: '{final_command_text}'") # Renamed variable
+                                 # Call the renamed handler
+                                 action_task = asyncio.create_task(handle_command_final(final_command_text)) # Renamed handler and variable
                             else:
-                                 logging.debug("Stop flow action check: No final_keyboard_input_text for Keyboard mode.")
+                                 logging.debug("Stop flow action check: No final_command_text for Command mode.") # Renamed variable and mode
                         # --- REMOVED incorrect else block that duplicated dictation logic ---
 
                     else: # Discard short
@@ -1778,7 +1851,7 @@ async def main():
 
                 # --- Clear state relevant to the *just completed* action regardless --- >
                 if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
-                elif active_mode_on_stop == MODE_KEYBOARD: final_keyboard_input_text = ""
+                elif active_mode_on_stop == MODE_COMMAND: final_command_text = "" # Renamed mode and variable
 
                 # --- Reset state AFTER processing stop flow --- >
                 logging.debug("Stop flow processing complete. Resetting state.")
@@ -1826,6 +1899,7 @@ async def main():
             # --- Thread Health Checks --- >
             if not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set(): logging.error("Tooltip thread died."); break
             if not status_mgr.thread.is_alive() and not status_mgr._stop_event.is_set(): logging.error("Status Indicator thread died."); break
+            if not action_confirm_mgr.thread.is_alive() and not action_confirm_mgr._stop_event.is_set(): logging.error("Action Confirmation thread died."); break
 
             # --- At the end of main loop, flush modifier log buffer --- >
             flush_modifier_log(force=True)
@@ -1845,6 +1919,7 @@ async def main():
         # --- Signal GUI Managers to Stop ---
         if 'tooltip_mgr' in locals() and tooltip_mgr: tooltip_mgr.stop()
         if 'status_mgr' in locals() and status_mgr: status_mgr.stop()
+        if 'action_confirm_mgr' in locals() and action_confirm_mgr: action_confirm_mgr.stop()
         logging.info("GUI Managers stop requested.")
 
         # --- Systray Stop Logic ---
@@ -1928,9 +2003,121 @@ ALL_LANGUAGES_TARGET.update(ALL_LANGUAGES) # Use the ALL_LANGUAGES defined above
 # --- Define Available Modes --- >
 AVAILABLE_MODES = {
     "Dictation": "Dictation Mode",
-    "Keyboard": "Keyboard Input Mode",
-    # Add "Command" later if needed
+    "Command": "Command Mode", # Renamed from Keyboard
+    # Add "Command" later if needed # Comment updated
 }
+
+# --- Dictation Replacements (NEW) ---
+# Maps spoken words (lowercase) to characters for replacement in Dictation mode.
+# TODO: Internationalize this mapping based on SELECTED_LANGUAGE.
+DICTATION_REPLACEMENTS_FR = {
+    # Punctuation
+    "point": ".",
+    "virgule": ",",
+    "point virgule": ";",
+    "2 points": ":", # Exact match for Deepgram output
+    "point d'interrogation": "?",
+    "point d'exclamation": "!",
+    # Symbols
+    "arobase": "@",
+    "dièse": "#", # Also known as croisillon
+    "dollar": "$",
+    "pourcent": "%",
+    "et commercial": "&",
+    "astérisque": "*",
+    "plus": "+",
+    "moins": "-",
+    "égal": "=",
+    "barre oblique": "/", # Slash
+    "barre oblique inversée": "\\", # Backslash
+    "barre verticale": "|", # Pipe
+    "soulignement": "_", # Underscore
+    "trait d'union": "-", # Hyphen
+    "tiret": "-", # Added hyphen alternative
+    "slash": "/", # Added Slash
+    # Quotes
+    "apostrophe": "'",
+    "guillemet": '"',
+    "guillemet simple": "'",
+    "guillemet double": '"',
+    # Parentheses/Brackets
+    "parenthèse ouvrante": "(",
+    "parenthèse fermante": ")",
+    "crochet ouvrant": "[",
+    "crochet fermant": "]",
+    "accolade ouvrante": "{",
+    "accolade fermante": "}",
+    "chevron ouvrant": "<",
+    "chevron fermant": ">",
+    # Spacing related (might need adjustments)
+    # "espace": " ", # Usually handled by word separation
+    # "nouvelle ligne": "\n", # Needs key simulation (Enter), handle separately?
+    # "tabulation": "\t",   # Needs key simulation (Tab), handle separately?
+}
+
+def apply_dictation_replacements(text: str, lang: str) -> str:
+    """Applies keyword replacements to the transcript in Dictation mode."""
+    # Currently only supports French replacements
+    # TODO: Load the correct map based on lang
+    if lang.startswith("fr"):
+        replacements = DICTATION_REPLACEMENTS_FR
+    else:
+        return text # No replacements for other languages yet
+
+    # Sort keys by length descending to match longer phrases first
+    sorted_keys = sorted(replacements.keys(), key=len, reverse=True)
+
+    result_parts = []
+    current_pos = 0
+    text_lower = text.lower() # For case-insensitive search
+
+    while current_pos < len(text):
+        found_match = False
+        for key in sorted_keys:
+            # Check if key matches at current position (case-insensitive)
+            if text_lower.startswith(key, current_pos):
+                # Basic boundary check: ensure match isn't part of a larger word
+                # or require a space/punctuation after? Let's start simple: requires space or end of string.
+                end_of_key = current_pos + len(key)
+                # Boundary check (end of string or space/punctuation after)
+                is_boundary = end_of_key == len(text) or text[end_of_key].isspace() or text[end_of_key] in '.,;:?!)\]}>'
+                if is_boundary:
+                    result_parts.append(replacements[key])
+                    # Advance position past the key
+                    current_pos = end_of_key
+                    
+                    # --- Check and skip optional trailing period OR space --- >
+                    char_to_skip = None
+                    if end_of_key < len(text):
+                        char_after = text[end_of_key]
+                        if char_after == '.': # Priority 1: Skip trailing period
+                            char_to_skip = '.'
+                        elif char_after.isspace(): # Priority 2: Skip trailing space
+                             char_to_skip = ' '
+                    
+                    if char_to_skip:
+                        current_pos += 1
+                        # logging.debug(f"Skipped trailing '{char_to_skip}' after key '{key}'")
+                    # --- End skip --- >
+
+                    found_match = True
+                    break
+        if not found_match:
+            # No keyword matched at current_pos. Append the original character.
+            result_parts.append(text[current_pos])
+            current_pos += 1
+
+    # Join the collected parts without adding extra spaces
+    output = "".join(result_parts)
+
+    if text != output:
+        logging.info(f"Applied dictation replacements: '{text}' -> '{output}'")
+
+    # We might still want basic cleanup like removing space before punctuation
+    output = output.replace( ' .' , '.' ).replace( ' ,' , ',' ).replace( ' ;' , ';' ).replace( ' :' , ':' ).replace( ' ?' , '?' ).replace( ' !' , '!' )
+    output = ' '.join(output.split()) # Normalize multiple spaces into one
+
+    return output # Return potentially modified text
 
 if __name__ == "__main__":
     # Ensure logs directory exists

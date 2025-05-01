@@ -24,7 +24,7 @@ except ImportError as e:
 # Consider a shared constants file later if needed.
 DEFAULT_MODES = {
     "Dictation": "Dictation Mode",
-    "Keyboard": "Keyboard Input Mode"
+    "Command": "Command Mode"
     # Add "Command" later if desired
 }
 
@@ -94,8 +94,7 @@ class StatusIndicatorManager:
         self.mic_stand_color = "#AAAAAA" # Darker grey for stand
         # self.volume_fill_color = "#FF0000" # REMOVED - Now mode-dependent
         self.dictation_volume_color = "#FF0000" # Red for Dictation volume
-        self.keyboard_volume_color = "#0000FF" # Blue for Keyboard volume
-        self.command_volume_color = "#008000" # Green for Command volume (placeholder)
+        self.command_volume_color = "#0000FF" # Blue for Command volume (was keyboard)
         # --- NEW/UPDATED Colors --- >
         self.mic_connecting_color = "#FFD700" # Gold/Yellow for connecting
         self.mic_error_color = "#FF6347" # Tomato red for error state
@@ -588,7 +587,7 @@ class StatusIndicatorManager:
             # --- MODIFIED: Only draw volume if successfully connected ('connected') --- >
             if self.current_state == "active" and self.connection_status == "connected":
                  volume_color = self.dictation_volume_color
-                 if self.current_mode == "Keyboard": volume_color = self.keyboard_volume_color
+                 if self.current_mode == "Command": volume_color = self.command_volume_color
                  fill_h = body_h * self.current_volume; fill_y = body_y + body_h - fill_h
                  if fill_h > 0:
                     vol_x0 = body_x; vol_y0 = max(body_y, fill_y); vol_x1 = body_x + body_w; vol_y1 = body_y + body_h

@@ -306,7 +306,7 @@ def build_mode_menu():
     # Consider a shared constants file later.
     AVAILABLE_MODES = {
         "Dictation": "Dictation Mode",
-        "Keyboard": "Keyboard Input Mode",
+        "Command": "Command Mode", # Renamed from Keyboard
         # Add "Command" later if desired
     }
 

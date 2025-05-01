@@ -19,7 +19,7 @@
   },
   "mode_names": {
     "Dictation": "Mode Dictée",
-    "Keyboard": "Mode Clavier"
+    "Command": "Mode Commande"
   },
   "systray": {
     "title": "Assistant Vibe",
@@ -48,5 +48,10 @@
   },
   "status_indicator": {
       "none_target": "Aucune"
+  },
+  "dictation": {
+      "backspace_keywords": "back,effacer,efface,effacé",
+      "enter_keywords": "entrée,entrer,retour à la ligne",
+      "escape_keywords": "échap,échappe,escape"
   }
 } 

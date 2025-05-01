@@ -326,6 +326,9 @@ class StatusIndicatorManager:
                     rcvd_source_lang = data.get("source_lang", "")
                     rcvd_target_lang = data.get("target_lang", None)
                     rcvd_mode = data.get("mode", self.current_mode)
+                    # --- NEW: Process connection_status if included in state message --- >
+                    rcvd_conn_status = data.get("connection_status")
+                    # --- END NEW --- >
                     # Handle showing/hiding main indicator
                     if target_state != "hidden" and self.current_state == "hidden":
                         if pos:
@@ -340,7 +343,17 @@ class StatusIndicatorManager:
                     mode_changed = rcvd_mode != self.current_mode
                     if lang_changed: self.source_lang = rcvd_source_lang; self.target_lang = rcvd_target_lang
                     if mode_changed: self.current_mode = rcvd_mode
-                    if (lang_changed or mode_changed) and self.current_state != "hidden": needs_redraw = True
+                    # --- NEW: Update internal connection status if provided in state message --- >
+                    conn_status_changed = False
+                    if rcvd_conn_status is not None and rcvd_conn_status != self.connection_status:
+                        if rcvd_conn_status in ["idle", "connecting", "connected", "error"]:
+                            self.connection_status = rcvd_conn_status
+                            conn_status_changed = True
+                            logging.debug(f"StatusIndicator connection status updated via state cmd: {self.connection_status}")
+                        else:
+                            logging.warning(f"Received unknown connection status in state cmd: {rcvd_conn_status}")
+                    # --- END NEW --- >
+                    if (lang_changed or mode_changed or conn_status_changed) and self.current_state != "hidden": needs_redraw = True
                     # Handle state change
                     if target_state != self.current_state:
                         logging.debug(f"StatusIndicator state change: {self.current_state} -> {target_state}, Mode: {self.current_mode}")

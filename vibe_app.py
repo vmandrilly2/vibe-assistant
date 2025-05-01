@@ -1198,7 +1198,8 @@ def on_click(x, y, button, pressed):
                 # Send current ACTIVE_MODE to status indicator
                 status_data = {"state": "active", "pos": initial_activation_pos,
                                "mode": ACTIVE_MODE,
-                               "source_lang": SELECTED_LANGUAGE, "target_lang": TARGET_LANGUAGE}
+                               "source_lang": SELECTED_LANGUAGE, "target_lang": TARGET_LANGUAGE,
+                               "connection_status": "connecting"} # <-- ADD initial connecting status
                 status_queue.put_nowait(("state", status_data))
             except queue.Full: logging.warning("Status queue full showing indicator.")
             except Exception as e: logging.error(f"Error sending initial state to status indicator: {e}")

@@ -71,6 +71,10 @@ from dictation_processor import DictationProcessor
 from command_processor import CommandProcessor
 # --- End Import --- >
 
+# --- NEW: Import Tooltip Manager --- >
+from tooltip_manager import TooltipManager
+# --- End Import --- >
+
 from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
@@ -523,298 +527,6 @@ last_command_executed = None # For potential undo feature
 
 # --- State for Keyboard Input Mode ---
 final_command_text = "" # Renamed from final_keyboard_input_text
-
-# --- Tooltip Manager Class ---
-class TooltipManager:
-    """Manages a simple Tkinter tooltip window in a separate thread."""
-    # --- MODIFIED: Add transcription_active_event parameter --- >
-    def __init__(self, q, transcription_active_event):
-        self.queue = q
-        # --- Store the event --- >
-        self.transcription_active_event = transcription_active_event
-        self.root = None
-        self.label = None
-        self.thread = threading.Thread(target=self._run_tkinter, daemon=True)
-        self._stop_event = threading.Event()
-        self._tk_ready = threading.Event() # Signal when Tkinter root is ready
-        self.active_tooltip_id = None # <<< NEW: Store the ID of the currently active tooltip
-        # --- Add config references ---
-        self._apply_tooltip_config()
-
-    def _apply_tooltip_config(self):
-        """Applies tooltip config to internal variables."""
-        # Use the global config variables directly
-        self.alpha = TOOLTIP_ALPHA
-        self.bg_color = TOOLTIP_BG
-        self.fg_color = TOOLTIP_FG
-        self.font_family = TOOLTIP_FONT_FAMILY
-        self.font_size = TOOLTIP_FONT_SIZE
-        logging.debug(f"Tooltip config applied: Alpha={self.alpha}, BG={self.bg_color}, FG={self.fg_color}")
-
-    def reload_config(self):
-        """Called when main config reloads to update tooltip appearance."""
-        self._apply_tooltip_config()
-        # If the window exists, update its attributes
-        if self.root and self.label:
-            try:
-                self.root.attributes('-alpha', self.alpha)
-                self.label.config(bg=self.bg_color, fg=self.fg_color,
-                                  font=(self.font_family, self.font_size))
-                logging.info("Tooltip appearance updated from reloaded config.")
-            except tk.TclError as e:
-                logging.warning(f"Could not update tooltip appearance on reload: {e}")
-
-    def start(self):
-        self.thread.start()
-        # Wait briefly for Tkinter to initialize to prevent race conditions on early commands
-        self._tk_ready.wait(timeout=2.0)
-        if not self._tk_ready.is_set():
-            logging.warning("Tooltip Tkinter thread did not become ready in time.")
-
-    def stop(self):
-        """Signals the Tkinter thread to stop and cleanup."""
-        logging.debug("Stop requested for TooltipManager.")
-        self._stop_event.set()
-        # Put a stop command on the queue to ensure the _check_queue loop wakes up
-        # Use put_nowait as the thread might be shutting down anyway
-        try:
-            self.queue.put_nowait(("stop", None))
-        except queue.Full:
-            logging.warning("Tooltip queue full when sending stop command.")
-        # Do NOT join the thread here - let the daemon thread exit naturally
-        # or let the Tkinter thread handle its own cleanup.
-
-    def _run_tkinter(self):
-        logging.info("Tooltip thread started.")
-        try:
-            self.root = tk.Tk()
-            self.root.withdraw() # Start hidden
-            self.root.overrideredirect(True) # No border, title bar, etc.
-            self.root.wm_attributes("-topmost", True) # Keep on top
-            # Apply config settings during creation
-            self.root.attributes('-alpha', self.alpha)
-            self.label = tk.Label(self.root, text="", bg=self.bg_color, fg=self.fg_color,
-                                  font=(self.font_family, self.font_size),
-                                  justify=tk.LEFT, padx=5, pady=2)
-            self.label.pack()
-
-            self._tk_ready.set() # Signal that Tkinter objects are created
-            logging.debug("Tooltip Tkinter objects created and ready.")
-
-            # Start the queue checking loop using root.after
-            self._check_queue()
-
-            # Run the Tkinter main event loop.
-            # This will block until the window is destroyed or tk.quit() is called.
-            logging.debug("Starting Tkinter mainloop...")
-            self.root.mainloop()
-            logging.debug("Tkinter mainloop finished.")
-
-        except Exception as e:
-            logging.error(f"Error during Tkinter mainloop/setup in tooltip thread: {e}", exc_info=True)
-            self._tk_ready.set() # Set ready even on error to prevent blocking start()
-        finally:
-            # Cleanup happens automatically when mainloop exits after root is destroyed
-            logging.info("Tooltip thread finished.")
-            # Ensure stop event is set if mainloop exited unexpectedly
-            self._stop_event.set()
-
-    def _check_queue(self):
-        """Processes messages from the queue using root.after."""
-        # Check stop event first
-        if self._stop_event.is_set():
-            logging.debug("Stop event set, initiating Tkinter cleanup.")
-            self._cleanup_tk()
-            return # Stop rescheduling
-
-        try:
-            # Process all available messages in the queue
-            while not self.queue.empty():
-                command, data = self.queue.get_nowait()
-                if command == "update":
-                    # Unpack data including the activation ID
-                    text, x, y, activation_id = data
-                    self._update_tooltip(text, x, y, activation_id)
-                elif command == "show":
-                    # Get the activation ID
-                    activation_id = data
-                    self._show_tooltip(activation_id)
-                elif command == "hide":
-                    # Get the activation ID
-                    activation_id = data # May be None for general hide
-                    self._hide_tooltip(activation_id)
-                elif command == "stop":
-                    # This command ensures we wake up and check the _stop_event
-                    logging.debug("Received stop command in queue.")
-                    self._stop_event.set() # Ensure it's set
-                    # We don't break the loop here, let the check at the start handle it
-                    # This ensures cleanup happens before returning
-
-        except queue.Empty:
-            pass # No messages, just reschedule
-        except tk.TclError as e:
-            logging.warning(f"Tkinter error during queue processing: {e}. Stopping tooltip.")
-            self._stop_event.set()
-            self._cleanup_tk()
-            return # Stop rescheduling
-        except Exception as e:
-            logging.error(f"Error processing tooltip queue: {e}", exc_info=True)
-            # Consider stopping if there's a persistent error
-            # self._stop_event.set()
-            # self._cleanup_tk()
-            # return
-
-        # Reschedule the check if not stopping
-        if not self._stop_event.is_set() and self.root:
-             try:
-                 self.root.after(50, self._check_queue)
-             except tk.TclError:
-                 logging.warning("Tooltip root destroyed before rescheduling queue check.")
-                 self._stop_event.set()
-                 self._cleanup_tk() # Attempt cleanup just in case
-
-    def _cleanup_tk(self):
-        """Safely destroys the Tkinter window from the Tkinter thread."""
-        logging.debug("Executing _cleanup_tk.")
-        if self.root:
-            try:
-                logging.debug("Destroying tooltip root window...")
-                self.root.destroy()
-                logging.info("Tkinter root window destroyed successfully.")
-                self.root = None # Prevent further access
-            except tk.TclError as e:
-                logging.warning(f"Error destroying Tkinter root (already destroyed?): {e}")
-            except Exception as e:
-                logging.error(f"Unexpected error during Tkinter destroy: {e}", exc_info=True)
-
-    def _update_tooltip(self, text, x, y, activation_id):
-        # --- NEW: Check if transcription is still active --- >
-        if not self.transcription_active_event.is_set():
-            logging.debug("Tooltip update ignored: transcription_active_event is not set.")
-            return
-        # --- END NEW ---
-
-        # Check if root exists and stop event isn't set
-        if self.root and self.label and not self._stop_event.is_set():
-            try:
-                self.label.config(text=text)
-                offset_x = 15
-                offset_y = -30
-                self.root.geometry(f"+{x + offset_x}+{y + offset_y}")
-                # Store the ID associated with this visible tooltip
-                self.active_tooltip_id = activation_id
-            except tk.TclError as e:
-                 logging.warning(f"Failed to update tooltip (window likely closed): {e}")
-                 self._stop_event.set() # Stop if window is broken
-
-    def _show_tooltip(self, activation_id):
-        # --- NEW: Check if transcription is still active --- >
-        if not self.transcription_active_event.is_set():
-            logging.debug("Tooltip show ignored: transcription_active_event is not set.")
-            return
-        # --- END NEW ---
-
-        if self.root and not self._stop_event.is_set():
-            try:
-                self.root.deiconify() # Show the window
-                # Store the ID associated with this visible tooltip
-                self.active_tooltip_id = activation_id
-                logging.debug(f"Tooltip shown for activation ID: {activation_id}")
-            except tk.TclError as e:
-                 logging.warning(f"Failed to show tooltip (window likely closed): {e}")
-                 self._stop_event.set()
-
-    def _hide_tooltip(self, activation_id):
-        # Only hide if not stopping AND the activation ID matches the currently shown tooltip
-        # --- Allow hiding even if ID doesn't match if activation_id is None (general hide) ---
-        if self.root and not self._stop_event.is_set():
-            should_hide = activation_id is None or self.active_tooltip_id == activation_id
-            if should_hide:
-                try:
-                    self.root.withdraw() # Hide the window
-                    logging.debug(f"Tooltip hidden (requested ID: {activation_id}, current: {self.active_tooltip_id})")
-                    self.active_tooltip_id = None # Clear the ID since it's hidden
-                except tk.TclError as e:
-                     logging.warning(f"Failed to hide tooltip (window likely closed): {e}")
-                     self._stop_event.set()
-            elif self.root.winfo_viewable(): # Only log if the tooltip is actually visible
-                logging.debug(f"Ignored hide tooltip command for activation ID {activation_id} (current: {self.active_tooltip_id})")
-
-
-# --- Placeholder/Handler Functions (REMOVED - Now in KeyboardSimulator) ---
-# def simulate_typing(text):
-#     """Simulates typing the given text."""
-#     logging.info(f"Simulating type: '{text}'")
-#     kb_controller.type(text)
-#
-# def simulate_backspace(count):
-#     """Simulates pressing backspace multiple times."""
-#     logging.info(f"Simulating {count} backspaces")
-#     for _ in range(count):
-#         kb_controller.press(keyboard.Key.backspace)
-#         kb_controller.release(keyboard.Key.backspace)
-#         time.sleep(0.01) # Small delay between key presses
-#
-# def simulate_key_press_release(key_obj):
-#     """Simulates pressing and releasing a single key."""
-#     try:
-#         kb_controller.press(key_obj)
-#         kb_controller.release(key_obj)
-#         logging.debug(f"Simulated press/release: {key_obj}")
-#         time.sleep(0.02) # Small delay between keys
-#     except Exception as e:
-#         logging.error(f"Failed to simulate key {key_obj}: {e}")
-#
-# def simulate_key_combination(keys):
-#     """Simulates pressing modifier keys, then a main key, then releasing all."""
-#     if not keys: return
-#     modifiers = []
-#     main_key = None
-#     try:
-#         # Separate modifiers from the main key
-#         for key_obj in keys:
-#             # Check if key is a modifier using pynput's attributes
-#             if hasattr(key_obj, 'is_modifier') and key_obj.is_modifier:
-#                  modifiers.append(key_obj)
-#             elif main_key is None: # First non-modifier is the main key
-#                 main_key = key_obj
-#             else:
-#                  logging.warning(f"Multiple non-modifier keys found in combination: {keys}. Using first: {main_key}")
-#
-#         if not main_key: # Maybe it was just modifiers? (e.g., "press control") - less common
-#             if modifiers:
-#                 logging.info(f"Simulating modifier press/release only: {modifiers}")
-#                 for mod in modifiers: kb_controller.press(mod)
-#                 time.sleep(0.05) # Hold briefly
-#                 for mod in reversed(modifiers): kb_controller.release(mod)
-#             else:
-#                 logging.warning("No main key or modifiers found in combination.")
-#             return
-#
-#         # Press modifiers
-#         logging.info(f"Simulating combo: Modifiers={modifiers}, Key={main_key}")
-#         for mod in modifiers:
-#             kb_controller.press(mod)
-#         time.sleep(0.05) # Brief pause after modifiers
-#
-#         # Press and release main key
-#         kb_controller.press(main_key)
-#         kb_controller.release(main_key)
-#         time.sleep(0.05) # Brief pause after main key
-#
-#         # Release modifiers (in reverse order)
-#         for mod in reversed(modifiers):
-#             kb_controller.release(mod)
-#
-#     except Exception as e:
-#         logging.error(f"Error simulating key combination {keys}: {e}")
-#         # Attempt to release any potentially stuck keys
-#         if main_key:
-#             try: kb_controller.release(main_key)
-#             except: pass
-#         for mod in reversed(modifiers):
-#             try: kb_controller.release(mod)
-#             except: pass
 
 # --- REFACTORED: Now calls DictationProcessor --- >
 def handle_dictation_interim(dictation_processor: DictationProcessor, transcript, activation_id):
@@ -1346,12 +1058,13 @@ async def main():
     logging.info("Systray UI thread started.")
 
     # --- Start Tooltip Manager (Conditional) --- >
-    tooltip_mgr = None # Initialize as None
+    tooltip_mgr = None  # Initialize as None
     # Use a distinct variable name for the check
     is_tooltip_enabled = module_settings.get("tooltip_enabled", True)
     logging.debug(f"Re-checked tooltip_enabled value for IF condition: {is_tooltip_enabled}") # Add another check
     if is_tooltip_enabled:
-        tooltip_mgr = TooltipManager(tooltip_queue, transcription_active_event)
+        # --- MODIFIED: Pass initial config --- >
+        tooltip_mgr = TooltipManager(tooltip_queue, transcription_active_event, config)
         tooltip_mgr.start()
         logging.info("Tooltip Manager activé et démarré.")
 
@@ -1739,7 +1452,9 @@ async def main():
                 old_source = SELECTED_LANGUAGE
                 config = load_config()
                 apply_config(config)
-                tooltip_mgr.reload_config()
+                # --- MODIFIED: Pass reloaded config to tooltip manager --- >
+                if tooltip_mgr:
+                    tooltip_mgr.reload_config(config)
                 if status_mgr:
                     status_mgr.config = config # Update config reference
                     # apply_config (called earlier) should handle translation reload if necessary

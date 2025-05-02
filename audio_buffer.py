@@ -34,7 +34,7 @@ class BufferedAudioInput:
         self.thread = None
 
         # Buffer setup
-        self.buffer_max_chunks = int((RATE / CHUNK_SIZE) * self.buffer_seconds)
+        self.buffer_max_chunks = int((MONITOR_RATE / MONITOR_CHUNK_SIZE) * self.buffer_seconds)
         self._audio_buffer = collections.deque(maxlen=self.buffer_max_chunks)
         self._buffer_lock = threading.Lock()
 
@@ -59,11 +59,11 @@ class BufferedAudioInput:
         stream_opened = False
         try:
             self.p = pyaudio.PyAudio()
-            self.stream = self.p.open(format=FORMAT,
-                                      channels=CHANNELS,
-                                      rate=RATE,
+            self.stream = self.p.open(format=MONITOR_FORMAT,
+                                      channels=MONITOR_CHANNELS,
+                                      rate=MONITOR_RATE,
                                       input=True,
-                                      frames_per_buffer=CHUNK_SIZE,
+                                      frames_per_buffer=MONITOR_CHUNK_SIZE,
                                       input_device_index=self.device_index)
             stream_opened = True
             logging.info(f"[BufferedAudioInput] PyAudio stream opened (Device: {self.device_index or 'Default'}).")
@@ -73,7 +73,7 @@ class BufferedAudioInput:
 
         while self.running.is_set() and stream_opened:
             try:
-                data = self.stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                data = self.stream.read(MONITOR_CHUNK_SIZE, exception_on_overflow=False)
 
                 # --- MODIFIED: Store timestamp with data --- >
                 current_time = time.monotonic()

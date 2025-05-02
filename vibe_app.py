@@ -217,13 +217,6 @@ def load_config():
 
 config = load_config()
 
-# --- PyAudio Constants --- (Define globally for AudioMonitor)
-MONITOR_CHUNK_SIZE = 1024
-MONITOR_FORMAT = pyaudio.paInt16
-MONITOR_CHANNELS = 1
-MONITOR_RATE = 16000
-MAX_RMS = 5000 # Adjust based on microphone sensitivity
-
 def apply_config(cfg):
     """Applies the loaded configuration to the global variables."""
     global DICTATION_TRIGGER_BUTTON, COMMAND_TRIGGER_BUTTON, COMMAND_MODIFIER_KEY_STR
@@ -1521,118 +1514,6 @@ AVAILABLE_MODES = {
     "Command": "Command Mode", # Renamed from Keyboard
     # Add "Command" later if needed # Comment updated
 }
-
-# --- Dictation Replacements (NEW) ---
-# Maps spoken words (lowercase) to characters for replacement in Dictation mode.
-# TODO: Internationalize this mapping based on SELECTED_LANGUAGE.
-DICTATION_REPLACEMENTS_FR = {
-    # Punctuation
-    "point": ".",
-    "virgule": ",",
-    "point virgule": ";",
-    "2 points": ":", # Exact match for Deepgram output
-    "point d'interrogation": "?",
-    "point d'exclamation": "!",
-    # Symbols
-    "arobase": "@",
-    "dièse": "#", # Also known as croisillon
-    "dollar": "$",
-    "pourcent": "%",
-    "et commercial": "&",
-    "astérisque": "*",
-    "plus": "+",
-    "moins": "-",
-    "égal": "=",
-    "barre oblique": "/", # Slash
-    "barre oblique inversée": "\\", # Backslash
-    "barre verticale": "|", # Pipe
-    "soulignement": "_", # Underscore
-    "trait d'union": "-", # Hyphen
-    "tiret": "-", # Added hyphen alternative
-    "slash": "/", # Added Slash
-    # Quotes
-    "apostrophe": "'",
-    "guillemet": '"',
-    "guillemet simple": "'",
-    "guillemet double": '"',
-    # Parentheses/Brackets
-    "parenthèse ouvrante": "(",
-    "parenthèse fermante": ")",
-    "crochet ouvrant": "[",
-    "crochet fermant": "]",
-    "accolade ouvrante": "{",
-    "accolade fermante": "}",
-    "chevron ouvrant": "<",
-    "chevron fermant": ">",
-    # Spacing related (might need adjustments)
-    # "espace": " ", # Usually handled by word separation
-    # "nouvelle ligne": "\n", # Needs key simulation (Enter), handle separately?
-    # "tabulation": "\t",   # Needs key simulation (Tab), handle separately?
-}
-
-def apply_dictation_replacements(text: str, lang: str) -> str:
-    """Applies keyword replacements to the transcript in Dictation mode."""
-    # Currently only supports French replacements
-    # TODO: Load the correct map based on lang
-    if lang.startswith("fr"):
-        replacements = DICTATION_REPLACEMENTS_FR
-    else:
-        return text # No replacements for other languages yet
-
-    # Sort keys by length descending to match longer phrases first
-    sorted_keys = sorted(replacements.keys(), key=len, reverse=True)
-
-    result_parts = []
-    current_pos = 0
-    text_lower = text.lower() # For case-insensitive search
-
-    while current_pos < len(text):
-        found_match = False
-        for key in sorted_keys:
-            # Check if key matches at current position (case-insensitive)
-            if text_lower.startswith(key, current_pos):
-                # Basic boundary check: ensure match isn't part of a larger word
-                # or require a space/punctuation after? Let's start simple: requires space or end of string.
-                end_of_key = current_pos + len(key)
-                # Boundary check (end of string or space/punctuation after)
-                is_boundary = end_of_key == len(text) or text[end_of_key].isspace() or text[end_of_key] in '.,;:?!)\]}>'
-                if is_boundary:
-                    result_parts.append(replacements[key])
-                    # Advance position past the key
-                    current_pos = end_of_key
-                    
-                    # --- Check and skip optional trailing period OR space --- >
-                    char_to_skip = None
-                    if end_of_key < len(text):
-                        char_after = text[end_of_key]
-                        if char_after == '.': # Priority 1: Skip trailing period
-                            char_to_skip = '.'
-                        elif char_after.isspace(): # Priority 2: Skip trailing space
-                             char_to_skip = ' '
-                    
-                    if char_to_skip:
-                        current_pos += 1
-                        # logging.debug(f"Skipped trailing '{char_to_skip}' after key '{key}'")
-                    # --- End skip --- >
-
-                    found_match = True
-                    break
-        if not found_match:
-            # No keyword matched at current_pos. Append the original character.
-            result_parts.append(text[current_pos])
-            current_pos += 1
-
-    # Join the collected parts without adding extra spaces
-    output = "".join(result_parts)
-
-    if text != output:
-        logging.info(f"Applied dictation replacements: '{text}' -> '{output}'")
-
-    # We might still want basic cleanup like removing space before punctuation
-    output = output.replace( ' .' , '.' ).replace( ' ,' , ',' ).replace( ' ;' , ';' ).replace( ' :' , ':' ).replace( ' ?' , '?' ).replace( ' !' , '!' )
-    output = ' '.join(output.split()) # Normalize multiple spaces into one
-
-    return output # Return potentially modified text
 
 if __name__ == "__main__":
     # Ensure logs directory exists

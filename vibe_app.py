@@ -63,6 +63,10 @@ from openai_manager import OpenAIManager
 from deepgram_manager import DeepgramManager
 # --- End Import --- >
 
+# --- NEW: Import Dictation Processor --- >
+from dictation_processor import DictationProcessor
+# --- End Import --- >
+
 from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
@@ -808,216 +812,64 @@ class TooltipManager:
 #             try: kb_controller.release(mod)
 #             except: pass
 
-def handle_dictation_interim(transcript, activation_id):
+# --- REFACTORED: Now calls DictationProcessor --- >
+def handle_dictation_interim(dictation_processor: DictationProcessor, transcript, activation_id):
     """Handles interim dictation results by displaying them in a temporary tooltip
        for a specific activation ID.
     """
-    global last_simulated_text # Keep variable for now, but don't use for typing
-    if not transcript:
-        return
+    if dictation_processor:
+        dictation_processor.handle_interim(transcript, activation_id)
+    else:
+        logging.error("DictationProcessor instance not available in handle_dictation_interim")
 
-    # Log the interim transcript
-    logging.debug(f"Interim Received (for Tooltip): '{transcript}'")
-
-    # --- Tooltip Update Logic ---
-    try:
-        # Get current mouse position
-        x, y = pyautogui.position()
-        # Send update command to the tooltip manager thread with the activation ID
-        # --- Add check: Only send if tooltip_mgr exists --- >
-        if tooltip_mgr:
-            tooltip_queue.put(("update", (transcript, x, y, activation_id)))
-            # Send show command with the activation ID
-            tooltip_queue.put(("show", activation_id))
-        # --- End Add check --- >
-    except pyautogui.FailSafeException:
-         logging.warning("PyAutoGUI fail-safe triggered (mouse moved to corner?).")
-    except Exception as e:
-        logging.error(f"Error getting mouse position or updating tooltip: {e}")
-
-    # --- REMOVED TYPING/BACKSPACE LOGIC ---
-    # last_simulated_text = transcript # DO NOT UPDATE STATE HERE
-
-def handle_dictation_final(final_transcript, history, activation_id):
+# --- REFACTORED: Now calls DictationProcessor and handles returned values --- >
+def handle_dictation_final(dictation_processor: DictationProcessor, final_transcript, history, activation_id):
     """Handles the final dictation transcript segment based on history.
-    Calculates target state, determines diff from current state, executes typing, updates history.
-    Also hides the interim tooltip FOR THE CORRECT ACTIVATION.
+    Calls DictationProcessor to perform calculations, typing, and action detection.
+    Updates local state (history, pending action) based on processor results.
 
     Returns:
         tuple: (updated_history_list, final_text_string_typed)
-               The final_text_string_typed includes the trailing space if added.
+               The updated history and the text string typed by the processor.
     """
-    # --- Action Confirmation Globals (NEEDED HERE!) --- >
+    # --- Action Confirmation Globals (Needed for updating pending action) --- >
     global g_pending_action, g_action_confirmed
-    
-    logging.debug(f"Handling final dictation segment '{final_transcript}' for activation ID {activation_id}")
 
-    # --- Hide the interim tooltip for this specific activation --- >
-    try:
-        # --- Add check: Only send if tooltip_mgr exists --- >
-        if tooltip_mgr:
-            tooltip_queue.put_nowait(("hide", activation_id))
-        # --- End Add check --- >
-    except queue.Full:
-        logging.warning(f"Tooltip queue full when trying to hide on final for activation ID {activation_id}.")
+    logging.debug(f"Handling final dictation segment '{final_transcript}' via processor (Activation ID: {activation_id})")
 
-    # --- Step A: Calculate Target Word List ---
-    target_words = [entry['text'] for entry in history] # Start with existing words
-    logging.debug(f"Initial target_words from history: {target_words}")
+    if dictation_processor:
+        try:
+            # Call the processor to handle the final transcript
+            new_history, text_typed, detected_action = dictation_processor.handle_final(
+                final_transcript, history, activation_id
+            )
 
-    original_words = final_transcript.split()
-    punctuation_to_strip = '.,!?;:'
-
-    # --- Get translated backspace keywords --- >
-    back_keywords_str = _("dictation.backspace_keywords", default="back")
-    back_keywords = set(kw.strip().lower() for kw in back_keywords_str.split(',') if kw.strip())
-    logging.debug(f"Using backspace keywords: {back_keywords}")
-    # --- Get translated action keywords --- >
-    enter_keywords_str = _("dictation.enter_keywords", default="enter")
-    enter_keywords = set(kw.strip().lower() for kw in enter_keywords_str.split(',') if kw.strip())
-    escape_keywords_str = _("dictation.escape_keywords", default="escape")
-    escape_keywords = set(kw.strip().lower() for kw in escape_keywords_str.split(',') if kw.strip())
-    logging.debug(f"Using enter keywords: {enter_keywords}")
-    logging.debug(f"Using escape keywords: {escape_keywords}")
-    # --- Get replacements for the current language --- >
-    current_lang_base = get_current_language()
-    replacements = ALL_DICTATION_REPLACEMENTS.get(current_lang_base, {})
-    logging.debug(f"Using replacements for '{current_lang_base}': {len(replacements)} entries")
-    # --- End Get i18n data --- >
-
-    # --- Combine all potential triggers (spoken phrases) --- >
-    # Map spoken phrase -> action identifier ("Enter", "Escape", or character)
-    all_triggers = {}
-    for phrase in enter_keywords: all_triggers[phrase] = "Enter"
-    for phrase in escape_keywords: all_triggers[phrase] = "Escape"
-    for phrase, action_char in replacements.items():
-        # Avoid overwriting Enter/Escape if they happen to be in replacements
-        if phrase not in all_triggers:
-            all_triggers[phrase] = action_char
-
-    # --- Sort triggers by length, longest first --- >
-    sorted_trigger_phrases = sorted(all_triggers.keys(), key=len, reverse=True)
-    # --- End Combine and Sort --- >
-
-    # --- Check for triggers at the end of the transcript (NEW LOGIC) --- >
-    trigger_found = False
-    action_to_confirm = None
-    trigger_phrase_length = 0
-    text_segment_to_process = final_transcript # Default to full transcript
-    # Process transcript: lowercase and strip ONLY trailing period for matching
-    processed_transcript_for_match = final_transcript.lower()
-    if processed_transcript_for_match.endswith('.'):
-        processed_transcript_for_match = processed_transcript_for_match[:-1]
-
-    for phrase in sorted_trigger_phrases:
-        # Check if the processed transcript ENDS WITH the trigger phrase
-        # Add a space before the phrase for matching whole words, unless it's the only word
-        match_phrase = f" {phrase}"
-        # Ensure phrase is not empty before checking
-        if phrase and (processed_transcript_for_match == phrase or processed_transcript_for_match.endswith(match_phrase)):
-            trigger_found = True
-            action_to_confirm = all_triggers[phrase]
-
-            # --- Use simple approximation for trigger length --- >
-            if processed_transcript_for_match == phrase:
-                 # Phrase is the entire transcript
-                 trigger_phrase_length = len(final_transcript)
+            # --- Update global state if an action was detected --- >
+            if detected_action:
+                logging.info(f"DictationProcessor detected action: '{detected_action}'")
+                # The processor should have already triggered the UI via action_confirm_queue
+                # We just need to store it locally for potential later use (though UI handles confirmation)
+                g_pending_action = detected_action
+                g_action_confirmed = False # Reset confirmation status
             else:
-                 # Assume preceding space, use phrase length + 1
-                 trigger_phrase_length = len(phrase) + 1
-            logging.info(f"Trigger phrase found: '{phrase}' -> Action: '{action_to_confirm}'. Approx len: {trigger_phrase_length}")
-            # --- End simple approximation --- >
-
-            # Determine text segment to process (text before the trigger)
-            text_segment_to_process = final_transcript[:-trigger_phrase_length].rstrip()
-
-            # Show confirmation UI
-            logging.info(f"Showing confirmation for action: '{action_to_confirm}'")
-            try:
-                pos = pyautogui.position()
-                # --- Add check: Only send if action_confirm_mgr exists --- >
-                if action_confirm_mgr:
-                    action_confirm_queue.put_nowait(("show", {"action": action_to_confirm, "pos": pos}))
-                    g_pending_action = action_to_confirm
+                # If no action was detected by the processor, ensure pending action is cleared
+                # (in case a previous segment had one that wasn't confirmed/cancelled)
+                if g_pending_action:
+                    logging.debug("Clearing previously pending action as new final transcript has no action.")
+                    g_pending_action = None
                     g_action_confirmed = False
-                else:
-                    logging.warning("Action Confirm UI disabled, cannot show confirmation.")
-                    # If UI is disabled, maybe execute directly? Or just ignore?
-                    # For now, just ignore the action trigger.
-                    action_to_confirm = None # Prevent action execution later
-                    trigger_found = False # Mark as not found
-                # --- End Add check --- >
-            except Exception as e:
-                logging.error(f"Error sending 'show' for '{action_to_confirm}' to ActionConfirmManager: {e}")
 
-            break # Stop after finding the longest match
-    # --- End trigger checking logic --- >
+            # Return the results from the processor
+            return new_history, text_typed
 
-    # --- Process the determined text segment --- >
-    # This part uses target_words, calculated based on the segment
-    target_words = [entry['text'] for entry in history] # Start with existing words
-    logging.debug(f"Initial target_words from history: {target_words}")
-
-    original_words_segment = text_segment_to_process.split()
-    punctuation_to_strip = '.,!?;:' # Keep this for backspace processing
-
-    # Process the segment for backspace or adding words
-    for word in original_words_segment:
-        if not word: continue
-        cleaned_word = word.rstrip(punctuation_to_strip).lower()
-
-        # ONLY check for backspace here now
-        if cleaned_word in back_keywords:
-            if target_words:
-                removed = target_words.pop()
-                logging.info(f"Processing backspace keyword ('{cleaned_word}'), removed '{removed}' from target_words.")
-            else:
-                logging.info(f"Processing backspace keyword ('{cleaned_word}'), but target_words already empty.")
-        else:
-            target_words.append(word) # Append original word with punctuation
-
-    logging.debug(f"Final target_words after processing segment: {target_words}")
-
-    # --- Step B: Calculate Target Text ---
-    target_text = " ".join(target_words) + (' ' if target_words else '') # Add trailing space
-    logging.debug(f"Calculated target_text (with space): '{target_text}'")
-
-    # --- Step C: Calculate Current Text on Screen (Estimate from OLD history) ---
-    current_text_estimate = " ".join([entry['text'] for entry in history]) + (' ' if history else '')
-    logging.debug(f"Estimated current text (from old history, with space): '{current_text_estimate}'")
-
-    # --- Step D: Calculate Diff ---
-    common_prefix_len = 0
-    min_len = min(len(current_text_estimate), len(target_text))
-    while common_prefix_len < min_len and current_text_estimate[common_prefix_len] == target_text[common_prefix_len]:
-        common_prefix_len += 1
-
-    backspaces_needed = len(current_text_estimate) - common_prefix_len
-    text_to_type = target_text[common_prefix_len:]
-
-    logging.debug(f"Diff Calculation: Prefix={common_prefix_len}, Backspaces={backspaces_needed}, Type='{text_to_type}'")
-
-    # --- Step E: Execute Typing Actions --- >
-    # Use keyboard_simulator instance
-    if backspaces_needed > 0:
-        keyboard_sim.simulate_backspace(backspaces_needed)
-    if text_to_type:
-        keyboard_sim.simulate_typing(text_to_type)
-
-    # --- Step F: Update History to Match Target State --- >
-    new_history = []
-    if target_words:
-        logging.debug(f"Rebuilding history with: {target_words}")
-        for word in target_words:
-            if word:
-                length_with_space = len(word) + 1
-                entry = {"text": word, "length_with_space": length_with_space}
-                new_history.append(entry)
+        except Exception as e:
+            logging.error(f"Error calling DictationProcessor.handle_final: {e}", exc_info=True)
+            # Return original history and empty typed string on error
+            return history, ""
     else:
-        logging.debug("History cleared as target_words is empty.")
-
-    # Return the updated history AND the final text string *as typed* (including space)
-    return new_history, target_text
+        logging.error("DictationProcessor instance not available in handle_dictation_final")
+        # Return original history and empty typed string if processor is missing
+        return history, ""
 
 def handle_command_interim(transcript):
     """Displays interim command transcript (e.g., in a UI)."""
@@ -1720,6 +1572,15 @@ async def main():
             systray_ui.exit_app_event.set()
         return # Stop main function
 
+    # --- NEW: Initialize Dictation Processor (depends on kb_sim) --- >
+    dictation_processor = DictationProcessor(
+        tooltip_q=tooltip_queue,
+        keyboard_sim=keyboard_sim,
+        action_confirm_q=action_confirm_queue,
+        transcription_active_event=transcription_active_event
+    )
+    # --- End Init --- >
+
     # --- Initialize Deepgram Client --- >
     deepgram_client = None
     try:
@@ -2091,13 +1952,14 @@ async def main():
                 # Ensure we only process transcripts for the *current* activation
                 if activation_id == current_activation_id:
                     if msg_type == "interim":
-                        if ACTIVE_MODE == MODE_DICTATION:
-                             handle_dictation_interim(transcript, activation_id)
-                        elif ACTIVE_MODE == MODE_COMMAND:
-                             handle_dictation_interim(transcript, activation_id) # Reuse tooltip for interim command
+                        # --- FIXED: Pass dictation_processor first --- >
+                        if ACTIVE_MODE == MODE_DICTATION or ACTIVE_MODE == MODE_COMMAND:
+                            handle_dictation_interim(dictation_processor, transcript, activation_id)
                     elif msg_type == "final":
                         if ACTIVE_MODE == MODE_DICTATION:
-                             updated_history, text_typed = handle_dictation_final(transcript, typed_word_history, activation_id)
+                             updated_history, text_typed = handle_dictation_final(
+                                 dictation_processor, transcript, typed_word_history, activation_id
+                             )
                              typed_word_history = updated_history
                              final_source_text = " ".join([entry['text'] for entry in typed_word_history])
                              last_interim_transcript = "" # Clear interim after final

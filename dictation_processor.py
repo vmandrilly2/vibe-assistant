@@ -136,21 +136,26 @@ class DictationProcessor:
                 logging.info(f"Detected trigger phrase: '{phrase}' -> Action: '{action_to_confirm}'. Text to process: '{text_segment_to_process}'")
 
                 # --- Show confirmation UI --- >
-                # This part is now HANDLED BY vibe_app.py using the returned action_to_confirm
-                # try:
-                #     pos = pyautogui.position()
-                #     if self.action_confirm_queue:
-                #         self.action_confirm_queue.put_nowait(("show", {"action": action_to_confirm, "pos": pos}))
-                #         # g_pending_action = action_to_confirm # Managed by caller
-                #         # g_action_confirmed = False # Managed by caller
-                #     else:
-                #         logging.warning("Action Confirm queue not available, cannot show confirmation.")
-                #         action_to_confirm = None # Ignore action if UI unavailable
-                #         trigger_found = False
-                # except Exception as e:
-                #     logging.error(f"Error sending 'show' for '{action_to_confirm}' to ActionConfirmManager: {e}")
-                #     action_to_confirm = None # Ignore action on error
-                #     trigger_found = False
+                try:
+                    pos = pyautogui.position()
+                    if self.action_confirm_queue:
+                        self.action_confirm_queue.put_nowait(("show", {"action": action_to_confirm, "pos": pos}))
+                        logging.debug(f"Sent '{action_to_confirm}' action to confirmation queue.")
+                        # g_pending_action = action_to_confirm # Managed by caller (vibe_app)
+                        # g_action_confirmed = False # Managed by caller (vibe_app)
+                    else:
+                        logging.warning("Action Confirm queue not available, cannot show confirmation.")
+                        # Don't reset action_to_confirm here, let vibe_app decide based on config
+                        # action_to_confirm = None
+                        # trigger_found = False # Keep trigger found, let vibe_app handle execution if needed
+                except queue.Full:
+                    logging.warning(f"Action confirmation queue full. Cannot show confirmation UI for '{action_to_confirm}'.")
+                    # Keep action, let vibe_app handle execution if needed and confirmation disabled
+                except Exception as e:
+                    logging.error(f"Error sending 'show' for '{action_to_confirm}' to ActionConfirmManager: {e}")
+                    # Keep action, maybe vibe_app can still execute if confirmation disabled
+                    # action_to_confirm = None
+                    # trigger_found = False
 
                 break # Stop after finding the longest match
         # --- End trigger checking logic --- >

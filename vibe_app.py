@@ -67,6 +67,10 @@ from deepgram_manager import DeepgramManager
 from dictation_processor import DictationProcessor
 # --- End Import --- >
 
+# --- NEW: Import Command Processor --- >
+from command_processor import CommandProcessor
+# --- End Import --- >
+
 from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
@@ -871,189 +875,6 @@ def handle_dictation_final(dictation_processor: DictationProcessor, final_transc
         # Return original history and empty typed string if processor is missing
         return history, ""
 
-def handle_command_interim(transcript):
-    """Displays interim command transcript (e.g., in a UI)."""
-    global current_command_transcript
-    logging.info(f"Interim Command: '{transcript}'")
-    current_command_transcript = transcript
-    # TODO: Update command feedback UI
-    pass
-
-def handle_command_final(final_transcript):
-    """Stores the final command transcript."""
-    global current_command_transcript
-    logging.info(f"Final Command Transcript: '{final_transcript}'")
-    current_command_transcript = final_transcript
-    # Final command execution happens on button release in main loop
-    pass
-
-def execute_command(command_text):
-    """Interprets and executes the command."""
-    global last_command_executed
-    logging.info(f"Executing Command: '{command_text}'")
-    last_command_executed = None # Reset undo state
-    # TODO: Send to AI for interpretation
-    # TODO: Map interpretation to action (keyboard sim / script exec)
-    # Example: Simple mapping
-    if "press enter" in command_text.lower():
-        logging.info("Action: Simulating Enter key")
-        keyboard_sim.simulate_key_press_release(Key.enter)
-        last_command_executed = ("key_press", keyboard.Key.enter)
-    # TODO: Execute action safely
-    # TODO: Store action details in last_command_executed for undo
-    pass
-
-def undo_last_command():
-    """Attempts to undo the last executed command."""
-    logging.info(f"Attempting Undo for: {last_command_executed}")
-    # TODO: Implement undo logic based on stored action
-    pass
-
-# --- UPDATED: Keyboard Input Final Handling ---
-async def handle_command_final(final_transcript): # Renamed from handle_keyboard_input_final
-    """Handles final transcript for Command Mode: Sends to OpenAI, parses keys, simulates."""
-    # Access the global manager instance
-    global openai_manager, keyboard_sim, OPENAI_MODEL, module_settings, final_command_text
-
-    logging.info(f"Final Command Transcript (for AI processing): '{final_transcript}'")
-    final_command_text = final_transcript # Store the raw text
-
-    if not final_command_text:
-        logging.warning("Command Mode: Empty transcript received for OpenAI.")
-        return
-
-    # --- Check if openai_manager is available --- >
-    if not openai_manager:
-        logging.error("OpenAI Manager not available. Cannot process command input.")
-        return # This return is now inside the async function
-    # --- End Check --- >
-
-    # --- Check if command interpretation module is enabled --- >
-    if not module_settings.get("command_interpretation_enabled", False):
-        logging.info("Command Interpretation module disabled in config. Skipping OpenAI call.")
-        return
-    # --- End Check --- >
-
-    # --- Prepare OpenAI Request --- >
-    # Define valid keys for the prompt context - helps guide the LLM
-    # Create a simplified list of key names for the prompt
-    valid_key_names_str = ", ".join(list(PYNPUT_KEY_MAP.keys())[:40]) + ", etc. (standard alphanumeric keys also valid)" # Limit length
-
-    system_prompt = f"""
-You are an AI assistant that translates natural language commands into keyboard actions.
-The user will provide text representing desired keyboard input.
-Analyze the input and determine the sequence of keys to press.
-Output *only* a JSON list of strings, where each string is either:
-1. A special key name exactly as found in this list (lowercase): {valid_key_names_str}
-2. A single character to be typed (e.g., "a", "b", "1", "$", "?").
-3. A combination represented as a list within the list, e.g., ["ctrl", "c"] or ["shift", "a"].
-Modifiers should always come first in combinations. Do NOT output phrases like "press", "type", "key".
-Focus on interpreting common keyboard commands like "enter", "delete", "control c", "page down", "type hello", "shift 1".
-If the user says "type" followed by text, represent each character as a string in the list. Example: "type abc" -> ["a", "b", "c"].
-If the user says "press" followed by a key name, output that key name. Example: "press delete" -> ["delete"].
-If the user asks for a combination, output the list. Example: "press control alt delete" -> [["ctrl", "alt", "delete"]].
-Be precise. If unsure, return an empty list [].
-"""
-    user_prompt = f"User input: \"{final_command_text}\"" # Renamed variable
-
-    logging.info(f"Requesting AI key interpretation for command: '{final_command_text}'") # Renamed variable
-
-    try:
-        # --- Call the generic method in OpenAIManager --- >
-        response_content = await openai_manager.get_openai_completion(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1,
-            max_tokens=150,
-            response_format={"type": "json_object"} # Pass format here
-        )
-        # --- End Call --- >
-
-        # --- Check if response is None (indicating an API error) --- >
-        if response_content is None:
-            logging.error("Failed to get command interpretation from OpenAI.")
-            return
-        # --- End Check --- >
-
-        logging.debug(f"OpenAI Keyboard Response Raw: {response_content}")
-
-        # --- Parse the JSON response ---
-        parsed_keys = []
-        try:
-            # The response should be a JSON object containing a key, e.g., {"keys": ["enter"]}
-            response_data = json.loads(response_content)
-            if isinstance(response_data, dict) and "keys" in response_data and isinstance(response_data["keys"], list):
-                 parsed_keys = response_data["keys"]
-                 logging.info(f"Parsed keys from OpenAI: {parsed_keys}")
-            else:
-                 logging.error(f"OpenAI response JSON structure incorrect: {response_content}")
-
-        except json.JSONDecodeError:
-            logging.error(f"Failed to decode OpenAI JSON response: {response_content}")
-        except Exception as e:
-            logging.error(f"Error parsing OpenAI response keys: {e}")
-
-        # --- Simulate Key Presses ---
-        if not parsed_keys:
-            logging.warning("No valid keys parsed from OpenAI response.")
-            return
-
-        for item in parsed_keys:
-            if isinstance(item, str): # Single key or character
-                key_name_lower = item.lower()
-                key_obj = PYNPUT_KEY_MAP.get(key_name_lower)
-                if key_obj:
-                    # It's a known special key or symbol mapped directly
-                    if isinstance(key_obj, str): # It's a character mapped from a word (e.g., "dot" -> ".")
-                         keyboard_sim.simulate_typing(key_obj)
-                    else: # It's a pynput.keyboard.Key object
-                        keyboard_sim.simulate_key_press_release(key_obj)
-                elif len(item) == 1:
-                    # Assume it's a single character to type
-                    keyboard_sim.simulate_typing(item)
-                else:
-                    logging.warning(f"Unknown single key name: '{item}'")
-
-            elif isinstance(item, list): # Key combination
-                combo_keys = []
-                valid_combo = True
-                for key_name in item:
-                    if isinstance(key_name, str):
-                         key_name_lower = key_name.lower()
-                         key_obj = PYNPUT_KEY_MAP.get(key_name_lower)
-                         if key_obj:
-                             if isinstance(key_obj, str) and len(key_obj) == 1: # Single char from map
-                                 combo_keys.append(KeyCode.from_char(key_obj))
-                             elif not isinstance(key_obj, str): # pynput Key object
-                                 combo_keys.append(key_obj)
-                             else: # Mapped to multi-char string? Invalid for combo.
-                                 logging.warning(f"Mapped key '{key_name}' -> '{key_obj}' invalid for combination.")
-                                 valid_combo = False; break
-                         elif len(key_name) == 1: # Single char directly
-                             try: combo_keys.append(KeyCode.from_char(key_name))
-                             except Exception: logging.warning(f"Could not get KeyCode for char '{key_name}'"); valid_combo = False; break
-                         else:
-                             logging.warning(f"Unknown key name in combination: '{key_name}'")
-                             valid_combo = False; break
-                    else:
-                         logging.warning(f"Invalid item type in combination list: {key_name}")
-                         valid_combo = False; break
-
-                if valid_combo and combo_keys:
-                    keyboard_sim.simulate_key_combination(combo_keys)
-                elif not combo_keys:
-                     logging.warning(f"Empty key list derived from combination: {item}")
-
-            else:
-                logging.warning(f"Unexpected item type in parsed keys list: {item}")
-
-    except Exception as e:
-        logging.error(f"Error during OpenAI command interpretation request: {e}", exc_info=True)
-
-
 # --- Translation Function ---
 async def translate_and_type(text_to_translate, source_lang_code, target_lang_code):
     """Translates text using OpenAI and types the result."""
@@ -1508,6 +1329,8 @@ async def main():
     global openai_manager
     # --- Add Deepgram Manager instance --- >
     global deepgram_mgr
+    # --- Add Manager/Processor Instances --- >
+    global keyboard_sim, dictation_processor, command_processor # <<< CORRECTED
 
     logging.info("Starting Vibe App...")
     # --- Read module settings early in main --- >
@@ -1579,6 +1402,22 @@ async def main():
         action_confirm_q=action_confirm_queue,
         transcription_active_event=transcription_active_event
     )
+    # --- End Init --- >
+
+    # --- NEW: Initialize Command Processor (depends on openai_mgr, kb_sim, config) --- >
+    command_processor = None # Initialize as None
+    # Only initialize if the module is potentially needed and dependencies exist
+    if module_settings.get("command_interpretation_enabled", False):
+        if openai_manager and keyboard_sim:
+            command_processor = CommandProcessor(
+                openai_manager=openai_manager,
+                keyboard_sim=keyboard_sim,
+                config=config # Pass the whole config dict
+            )
+        else:
+            logging.warning("Command Interpretation enabled, but dependencies (OpenAI Manager or Keyboard Sim) missing. CommandProcessor not initialized.")
+    else:
+        logging.info("Command Interpretation disabled. CommandProcessor not initialized.")
     # --- End Init --- >
 
     # --- Initialize Deepgram Client --- >
@@ -1849,13 +1688,14 @@ async def main():
                                 else:
                                      logging.debug("Stop flow action check: No final_source_text for Dictation, likely connection/stop issue.")
                             elif active_mode_on_stop == MODE_COMMAND: # Renamed mode
-                                 # --- MODIFIED: Check final_command_text before proceeding --- Renamed variable
-                                if final_command_text:
-                                     logging.info(f"Processing command input post-stop: '{final_command_text}'") # Renamed variable
-                                     # Call the renamed handler
-                                     action_task = asyncio.create_task(handle_command_final(final_command_text)) # Renamed handler and variable
+                                 # --- REFACTORED: Call CommandProcessor --- >
+                                if command_processor and final_command_text:
+                                     logging.info(f"Processing command input post-stop via CommandProcessor: '{final_command_text}'")
+                                     action_task = asyncio.create_task(command_processor.process_command(final_command_text))
+                                elif not command_processor:
+                                     logging.error("CommandProcessor not initialized, cannot process command.")
                                 else:
-                                     logging.debug("Stop flow action check: No final_command_text for Command mode.") # Renamed variable and mode
+                                     logging.debug("Stop flow action check: No final_command_text for Command mode.")
                             # --- REMOVED incorrect else block that duplicated dictation logic ---
 
                     else: # Discard short

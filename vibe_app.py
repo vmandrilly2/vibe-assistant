@@ -75,6 +75,14 @@ from command_processor import CommandProcessor
 from tooltip_manager import TooltipManager
 # --- End Import --- >
 
+# --- NEW: Import Constants ---
+from constants import (
+    MODE_DICTATION, MODE_COMMAND, AVAILABLE_MODES,
+    PYNPUT_BUTTON_MAP, PYNPUT_MODIFIER_MAP, PYNPUT_KEY_MAP,
+    ALL_LANGUAGES, ALL_LANGUAGES_TARGET
+)
+# --- End Import ---
+
 from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
@@ -120,15 +128,6 @@ DEFAULT_CONFIG = {
   # --- End added section ---
 }
 
-# --- Mode Constants ---
-MODE_DICTATION = "Dictation"
-MODE_COMMAND = "Command" # Renamed from MODE_KEYBOARD
-# Add MODE_COMMAND = "Command" later if reimplemented # This comment seems outdated now
-
-# Define available modes and their display names (matches status_indicator)
-# This could be moved to a shared config/constants file later
-AVAILABLE_MODES = DEFAULT_MODES # This will be updated later based on the import
-
 # --- Global Configurable Variables ---
 # These will be updated by apply_config()
 DICTATION_TRIGGER_BUTTON = None
@@ -150,113 +149,6 @@ ACTIVE_MODE = MODE_DICTATION # Initialize with default
 last_interim_transcript = "" # Store the most recent interim result
 # --- REMOVED final_processed_this_session ---
 
-# --- Pynput Mappings ---
-PYNPUT_BUTTON_MAP = {
-    "left": mouse.Button.left,
-    "right": mouse.Button.right,
-    "middle": mouse.Button.middle,
-    "x1": mouse.Button.x1,
-    "x2": mouse.Button.x2,
-    None: None
-}
-PYNPUT_MODIFIER_MAP = {
-    "shift": keyboard.Key.shift,
-    "shift_l": keyboard.Key.shift_l,
-    "shift_r": keyboard.Key.shift_r,
-    "ctrl": keyboard.Key.ctrl,
-    "ctrl_l": keyboard.Key.ctrl_l,
-    "ctrl_r": keyboard.Key.ctrl_r,
-    "alt": keyboard.Key.alt,
-    "alt_l": keyboard.Key.alt_l,
-    "alt_r": keyboard.Key.alt_r,
-    "cmd": keyboard.Key.cmd, # For Mac compatibility if needed later
-    None: None
-}
-
-# --- NEW: Pynput Key Name to Key Object Mapping ---
-# Add common keys here. Needs careful mapping.
-# Keys without a simple name (like ';') might need KeyCode.from_char(':')
-PYNPUT_KEY_MAP = {
-    # Special Keys
-    "enter": Key.enter,
-    "esc": Key.esc,
-    "escape": Key.esc,
-    "tab": Key.tab,
-    "space": Key.space,
-    "backspace": Key.backspace,
-    "delete": Key.delete,
-    "del": Key.delete,
-    "insert": Key.insert,
-    "home": Key.home,
-    "end": Key.end,
-    "pageup": Key.page_up,
-    "pagedown": Key.page_down,
-    "up": Key.up,
-    "down": Key.down,
-    "left": Key.left,
-    "right": Key.right,
-    "capslock": Key.caps_lock,
-    "numlock": Key.num_lock,
-    "scrolllock": Key.scroll_lock,
-    "printscreen": Key.print_screen,
-    # Modifiers (ensure consistency with PYNPUT_MODIFIER_MAP keys if possible)
-    "shift": Key.shift,
-    "shift_l": Key.shift_l,
-    "shift_r": Key.shift_r,
-    "ctrl": Key.ctrl,
-    "control": Key.ctrl,
-    "ctrl_l": Key.ctrl_l,
-    "ctrl_r": Key.ctrl_r,
-    "alt": Key.alt,
-    "alt_l": Key.alt_l,
-    "alt_r": Key.alt_r,
-    "cmd": Key.cmd, # Mac command key
-    "command": Key.cmd,
-    "win": Key.cmd, # Windows key often maps to cmd
-    "windows": Key.cmd,
-    # Function Keys
-    "f1": Key.f1, "f2": Key.f2, "f3": Key.f3, "f4": Key.f4,
-    "f5": Key.f5, "f6": Key.f6, "f7": Key.f7, "f8": Key.f8,
-    "f9": Key.f9, "f10": Key.f10, "f11": Key.f11, "f12": Key.f12,
-    "f13": Key.f13, "f14": Key.f14, "f15": Key.f15, "f16": Key.f16,
-    "f17": Key.f17, "f18": Key.f18, "f19": Key.f19, "f20": Key.f20,
-    # Alphanumeric and Symbols (handle single chars directly later)
-    # Simple symbols that might be spoken
-    "dot": ".",
-    "period": ".",
-    "comma": ",",
-    "question": "?",
-    "exclamation": "!",
-    "colon": ":",
-    "semicolon": ";",
-    "quote": "'",
-    "doublequote": '"',
-    "slash": "/",
-    "backslash": "\\",
-    "pipe": "|",
-    "dash": "-",
-    "hyphen": "-",
-    "underscore": "_",
-    "plus": "+",
-    "equal": "=",
-    "asterisk": "*",
-    "ampersand": "&",
-    "at": "@",
-    "hash": "#",
-    "dollar": "$",
-    "percent": "%",
-    "caret": "^",
-    "tilde": "~",
-    "backtick": "`",
-    "openparen": "(",
-    "closeparen": ")",
-    "openbracket": "[",
-    "closebracket": "]",
-    "openbrace": "{",
-    "closebrace": "}",
-    "less": "<",
-    "greater": ">",
-}
 
 def load_config():
     """Loads configuration from JSON file, creates default if not found."""
@@ -993,17 +885,6 @@ def on_release(key):
         modifier_log_buffer.append(f"[{key} released]")
         modifier_keys_pressed.discard(key)
 
-    # If the command modifier key is released while command mode is active
-    # if key == COMMAND_MODIFIER_KEY and is_command_active.is_set(): # If command mode exists
-    #      logging.info(f"Command modifier ({key}) released while command mode active. Stopping command.")
-    #      is_command_active.clear()
-    #      transcription_active_event.clear() # Signal stop
-    #      # Hide Status Indicator
-    #      try:
-    #          status_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}
-    #          status_queue.put_nowait(("state", status_data))
-    #      except queue.Full: logging.warning("Status queue full hiding indicator on cmd mod release.")
-
 # --- Config Saving Function ---
 def save_config_local(cfg_dict):
     """Saves the provided config dictionary back to the JSON file."""
@@ -1424,7 +1305,7 @@ async def main():
                 # # --- End Clear pending action state --- >
                 
                 if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
-                elif active_mode_on_stop == MODE_COMMAND: final_command_text = "" # Renamed mode and variable
+                elif active_mode_on_stop == MODE_COMMAND: final_command_text = "" 
 
                 # --- Reset state AFTER processing stop flow --- >
                 logging.debug("Stop flow processing complete. Resetting state.")

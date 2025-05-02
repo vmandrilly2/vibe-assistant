@@ -6,13 +6,13 @@ import logging
 import time
 import numpy as np
 
-# --- Constants (Copied from vibe_app.py for encapsulation) ---
-# TODO: Consider making these configurable or passing them in
-CHUNK_SIZE = 1024
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-RATE = 16000
+# --- PyAudio Constants --- (Moved from vibe_app.py)
+MONITOR_CHUNK_SIZE = 1024
+MONITOR_FORMAT = pyaudio.paInt16
+MONITOR_CHANNELS = 1
+MONITOR_RATE = 16000
 MAX_RMS = 5000 # Adjust based on microphone sensitivity
+# --- End Constants ---
 
 class BufferedAudioInput:
     """Manages continuous background audio recording, buffering, and RMS calculation."""

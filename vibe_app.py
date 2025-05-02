@@ -32,8 +32,37 @@ import i18n
 from i18n import load_translations, _ # Import the main translation function
 from i18n import get_current_language, ALL_DICTATION_REPLACEMENTS # Import replacements and confirmable set
 
+# --- Fallback if i18n is disabled/missing ---
+try:
+    import i18n
+    from i18n import load_translations, _
+    from i18n import get_current_language, ALL_DICTATION_REPLACEMENTS
+    i18n_enabled = True
+except ImportError:
+    logging.error("Module i18n non trouvé. L'internationalisation sera désactivée.")
+    # Define dummy functions/variables if i18n is missing
+    _ = lambda key, default=None, **kwargs: default if default is not None else key
+    load_translations = lambda lang_code: None
+    get_current_language = lambda: "en" # Default to 'en' or None?
+    ALL_DICTATION_REPLACEMENTS = {}
+    i18n_enabled = False
+# --- End Fallback ---
+
 from pynput import mouse, keyboard
 from pynput.keyboard import Key, KeyCode # Import KeyCode
+
+# --- NEW: Import Keyboard Simulator --- >
+from keyboard_simulator import KeyboardSimulator
+# --- End Import --- >
+
+# --- NEW: Import OpenAI Manager --- >
+from openai_manager import OpenAIManager
+# --- End Import --- >
+
+# --- NEW: Import Deepgram Manager --- >
+from deepgram_manager import DeepgramManager
+# --- End Import --- >
+
 from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
@@ -66,7 +95,17 @@ DEFAULT_CONFIG = {
     "fg_color": "black",
     "font_family": "Arial",
     "font_size": 10
+  },
+  # --- Added modules section ---
+  "modules": {
+    "tooltip_enabled": True,
+    "status_indicator_enabled": True,
+    "action_confirm_enabled": True,
+    "translation_enabled": True,
+    "command_interpretation_enabled": False, # Disabled by default
+    "audio_buffer_enabled": True # Added audio buffer toggle
   }
+  # --- End added section ---
 }
 
 # --- Mode Constants ---
@@ -228,14 +267,37 @@ def load_config():
                     if section not in loaded_config:
                         loaded_config[section] = defaults
                     elif isinstance(defaults, dict):
-                        for key, default_value in defaults.items():
-                            if key not in loaded_config[section]:
-                                loaded_config[section][key] = default_value
+                        # --- Handle potential None value for loaded_config[section] --- >
+                        if loaded_config[section] is None:
+                           loaded_config[section] = {}
+                           logging.warning(f"Config section '{section}' was null, reset to empty dict.")
+                        # --- End Handle potential None --- >
+                        # --- NEW: Check if the loaded section is actually a dictionary before merging --- >
+                        if not isinstance(loaded_config.get(section), dict):
+                            logging.warning(f"Config section '{section}' is not a dictionary in the file. Resetting to default.")
+                            loaded_config[section] = defaults # Reset the whole section to the default dict
+                        else:
+                             # Now we know loaded_config[section] IS a dictionary, proceed with merging keys
+                             for key, default_value in defaults.items():
+                              # --- Use .get() for safer access within section --- >
+                              if key not in loaded_config[section]:
+                                  loaded_config[section][key] = default_value
                 # Ensure recent lists exist even if loading an old config
                 if "recent_source_languages" not in loaded_config.get("general", {}):
                     loaded_config.setdefault("general", {})["recent_source_languages"] = []
                 if "recent_target_languages" not in loaded_config.get("general", {}):
-                     loaded_config.setdefault("general", {})["recent_target_languages"] = []
+                    loaded_config.setdefault("general", {})["recent_target_languages"] = []
+                # --- Ensure modules section exists and is merged ---
+                if "modules" not in loaded_config:
+                     loaded_config["modules"] = DEFAULT_CONFIG["modules"]
+                else:
+                     if loaded_config["modules"] is None:
+                          loaded_config["modules"] = {}
+                          logging.warning("Config section 'modules' was null, reset to empty dict.")
+                     for key, default_value in DEFAULT_CONFIG["modules"].items():
+                         if key not in loaded_config.get("modules",{}): # Safely get modules dict
+                               loaded_config["modules"][key] = default_value
+                # --- End Ensure modules section ---
 
                 logging.info(f"Loaded and merged configuration from {CONFIG_FILE}")
                 return loaded_config
@@ -330,22 +392,38 @@ if not OPENAI_API_KEY:
 
 # Apply the initially loaded config
 apply_config(config)
-# --- Load Initial Translations --- >
-load_translations(SELECTED_LANGUAGE)
-logging.info(f"Initial translations loaded for language: {i18n.get_current_language()}")
-
-# --- Initialize OpenAI Client ---
-# Initialize AsyncOpenAI client if key exists
-openai_client = None
-if OPENAI_API_KEY:
-    try:
-        # Use the correct model name from config if needed during init, though usually not required here
-        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        logging.info("OpenAI client initialized.")
-    except Exception as e:
-        logging.error(f"Failed to initialize OpenAI client: {e}")
+# --- Load Initial Translations (Conditional) --- >
+if i18n_enabled:
+    load_translations(SELECTED_LANGUAGE)
+    logging.info(f"Initial translations loaded for language: {i18n.get_current_language()}")
 else:
-    logging.warning("OpenAI client not initialized due to missing API key. Translation disabled.")
+    logging.info("Skipping initial translation loading as i18n is disabled.")
+
+# --- Initialize OpenAI Client (Conditional based on config) --- >
+openai_client = None
+# --- NEW: Initialize OpenAI Manager --- >
+openai_manager = None
+module_settings = config.get("modules", {})
+# Check both API key existence AND config setting
+if module_settings.get("translation_enabled", True) or module_settings.get("command_interpretation_enabled", False):
+    if OPENAI_API_KEY:
+        try:
+            openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+            # --- Instantiate the manager --- >
+            openai_manager = OpenAIManager(openai_client)
+            logging.info("OpenAI client and manager initialized (needed for Translation and/or Command Interpretation).")
+        except Exception as e:
+            logging.error(f"Failed to initialize OpenAI client or manager: {e}")
+    else:
+        logging.warning("OpenAI API Key missing, but required by enabled modules (Translation/Command Interpretation). These features will fail.")
+else:
+    logging.info("OpenAI client not initialized as Translation and Command Interpretation modules are disabled in config.")
+
+# --- NEW: Check if openai_manager is available --- >
+# if not openai_manager:
+#     logging.error("OpenAI Manager not available. Cannot process command input.")
+#     return
+# --- End Check --- >
 
 logging.info(f"Using Source Language: {SELECTED_LANGUAGE}")
 logging.info(f"Initial Active Mode: {ACTIVE_MODE}") # Log initial mode
@@ -423,8 +501,8 @@ initial_activation_pos = None
 g_pending_action = None      # Stores the name of the action detected (e.g., "Enter")
 g_action_confirmed = False # Set by the confirmation UI via action_queue
 
-# --- Keyboard Controller (for typing simulation) ---
-kb_controller = keyboard.Controller()
+# --- Keyboard Controller (REMOVED - Handled by KeyboardSimulator) ---
+# kb_controller = keyboard.Controller()
 
 # --- State for Dictation Typing Simulation ---
 last_simulated_text = "" # Store the transcript corresponding to the last simulation action
@@ -555,7 +633,7 @@ class TooltipManager:
                     self._show_tooltip(activation_id)
                 elif command == "hide":
                     # Get the activation ID
-                    activation_id = data
+                    activation_id = data # May be None for general hide
                     self._hide_tooltip(activation_id)
                 elif command == "stop":
                     # This command ensures we wake up and check the _stop_event
@@ -640,11 +718,13 @@ class TooltipManager:
 
     def _hide_tooltip(self, activation_id):
         # Only hide if not stopping AND the activation ID matches the currently shown tooltip
+        # --- Allow hiding even if ID doesn't match if activation_id is None (general hide) ---
         if self.root and not self._stop_event.is_set():
-            if self.active_tooltip_id == activation_id:
+            should_hide = activation_id is None or self.active_tooltip_id == activation_id
+            if should_hide:
                 try:
                     self.root.withdraw() # Hide the window
-                    logging.debug(f"Tooltip hidden for activation ID: {activation_id}")
+                    logging.debug(f"Tooltip hidden (requested ID: {activation_id}, current: {self.active_tooltip_id})")
                     self.active_tooltip_id = None # Clear the ID since it's hidden
                 except tk.TclError as e:
                      logging.warning(f"Failed to hide tooltip (window likely closed): {e}")
@@ -653,80 +733,80 @@ class TooltipManager:
                 logging.debug(f"Ignored hide tooltip command for activation ID {activation_id} (current: {self.active_tooltip_id})")
 
 
-# --- Placeholder/Handler Functions ---
-def simulate_typing(text):
-    """Simulates typing the given text."""
-    logging.info(f"Simulating type: '{text}'")
-    kb_controller.type(text)
-
-def simulate_backspace(count):
-    """Simulates pressing backspace multiple times."""
-    logging.info(f"Simulating {count} backspaces")
-    for _ in range(count):
-        kb_controller.press(keyboard.Key.backspace)
-        kb_controller.release(keyboard.Key.backspace)
-        time.sleep(0.01) # Small delay between key presses
-
-def simulate_key_press_release(key_obj):
-    """Simulates pressing and releasing a single key."""
-    try:
-        kb_controller.press(key_obj)
-        kb_controller.release(key_obj)
-        logging.debug(f"Simulated press/release: {key_obj}")
-        time.sleep(0.02) # Small delay between keys
-    except Exception as e:
-        logging.error(f"Failed to simulate key {key_obj}: {e}")
-
-def simulate_key_combination(keys):
-    """Simulates pressing modifier keys, then a main key, then releasing all."""
-    if not keys: return
-    modifiers = []
-    main_key = None
-    try:
-        # Separate modifiers from the main key
-        for key_obj in keys:
-            # Check if key is a modifier using pynput's attributes
-            if hasattr(key_obj, 'is_modifier') and key_obj.is_modifier:
-                 modifiers.append(key_obj)
-            elif main_key is None: # First non-modifier is the main key
-                main_key = key_obj
-            else:
-                 logging.warning(f"Multiple non-modifier keys found in combination: {keys}. Using first: {main_key}")
-
-        if not main_key: # Maybe it was just modifiers? (e.g., "press control") - less common
-            if modifiers:
-                logging.info(f"Simulating modifier press/release only: {modifiers}")
-                for mod in modifiers: kb_controller.press(mod)
-                time.sleep(0.05) # Hold briefly
-                for mod in reversed(modifiers): kb_controller.release(mod)
-            else:
-                logging.warning("No main key or modifiers found in combination.")
-            return
-
-        # Press modifiers
-        logging.info(f"Simulating combo: Modifiers={modifiers}, Key={main_key}")
-        for mod in modifiers:
-            kb_controller.press(mod)
-        time.sleep(0.05) # Brief pause after modifiers
-
-        # Press and release main key
-        kb_controller.press(main_key)
-        kb_controller.release(main_key)
-        time.sleep(0.05) # Brief pause after main key
-
-        # Release modifiers (in reverse order)
-        for mod in reversed(modifiers):
-            kb_controller.release(mod)
-
-    except Exception as e:
-        logging.error(f"Error simulating key combination {keys}: {e}")
-        # Attempt to release any potentially stuck keys
-        if main_key:
-            try: kb_controller.release(main_key)
-            except: pass
-        for mod in reversed(modifiers):
-            try: kb_controller.release(mod)
-            except: pass
+# --- Placeholder/Handler Functions (REMOVED - Now in KeyboardSimulator) ---
+# def simulate_typing(text):
+#     """Simulates typing the given text."""
+#     logging.info(f"Simulating type: '{text}'")
+#     kb_controller.type(text)
+#
+# def simulate_backspace(count):
+#     """Simulates pressing backspace multiple times."""
+#     logging.info(f"Simulating {count} backspaces")
+#     for _ in range(count):
+#         kb_controller.press(keyboard.Key.backspace)
+#         kb_controller.release(keyboard.Key.backspace)
+#         time.sleep(0.01) # Small delay between key presses
+#
+# def simulate_key_press_release(key_obj):
+#     """Simulates pressing and releasing a single key."""
+#     try:
+#         kb_controller.press(key_obj)
+#         kb_controller.release(key_obj)
+#         logging.debug(f"Simulated press/release: {key_obj}")
+#         time.sleep(0.02) # Small delay between keys
+#     except Exception as e:
+#         logging.error(f"Failed to simulate key {key_obj}: {e}")
+#
+# def simulate_key_combination(keys):
+#     """Simulates pressing modifier keys, then a main key, then releasing all."""
+#     if not keys: return
+#     modifiers = []
+#     main_key = None
+#     try:
+#         # Separate modifiers from the main key
+#         for key_obj in keys:
+#             # Check if key is a modifier using pynput's attributes
+#             if hasattr(key_obj, 'is_modifier') and key_obj.is_modifier:
+#                  modifiers.append(key_obj)
+#             elif main_key is None: # First non-modifier is the main key
+#                 main_key = key_obj
+#             else:
+#                  logging.warning(f"Multiple non-modifier keys found in combination: {keys}. Using first: {main_key}")
+#
+#         if not main_key: # Maybe it was just modifiers? (e.g., "press control") - less common
+#             if modifiers:
+#                 logging.info(f"Simulating modifier press/release only: {modifiers}")
+#                 for mod in modifiers: kb_controller.press(mod)
+#                 time.sleep(0.05) # Hold briefly
+#                 for mod in reversed(modifiers): kb_controller.release(mod)
+#             else:
+#                 logging.warning("No main key or modifiers found in combination.")
+#             return
+#
+#         # Press modifiers
+#         logging.info(f"Simulating combo: Modifiers={modifiers}, Key={main_key}")
+#         for mod in modifiers:
+#             kb_controller.press(mod)
+#         time.sleep(0.05) # Brief pause after modifiers
+#
+#         # Press and release main key
+#         kb_controller.press(main_key)
+#         kb_controller.release(main_key)
+#         time.sleep(0.05) # Brief pause after main key
+#
+#         # Release modifiers (in reverse order)
+#         for mod in reversed(modifiers):
+#             kb_controller.release(mod)
+#
+#     except Exception as e:
+#         logging.error(f"Error simulating key combination {keys}: {e}")
+#         # Attempt to release any potentially stuck keys
+#         if main_key:
+#             try: kb_controller.release(main_key)
+#             except: pass
+#         for mod in reversed(modifiers):
+#             try: kb_controller.release(mod)
+#             except: pass
 
 def handle_dictation_interim(transcript, activation_id):
     """Handles interim dictation results by displaying them in a temporary tooltip
@@ -744,9 +824,12 @@ def handle_dictation_interim(transcript, activation_id):
         # Get current mouse position
         x, y = pyautogui.position()
         # Send update command to the tooltip manager thread with the activation ID
-        tooltip_queue.put(("update", (transcript, x, y, activation_id)))
-        # Send show command with the activation ID
-        tooltip_queue.put(("show", activation_id))
+        # --- Add check: Only send if tooltip_mgr exists --- >
+        if tooltip_mgr:
+            tooltip_queue.put(("update", (transcript, x, y, activation_id)))
+            # Send show command with the activation ID
+            tooltip_queue.put(("show", activation_id))
+        # --- End Add check --- >
     except pyautogui.FailSafeException:
          logging.warning("PyAutoGUI fail-safe triggered (mouse moved to corner?).")
     except Exception as e:
@@ -771,7 +854,10 @@ def handle_dictation_final(final_transcript, history, activation_id):
 
     # --- Hide the interim tooltip for this specific activation --- >
     try:
-        tooltip_queue.put_nowait(("hide", activation_id))
+        # --- Add check: Only send if tooltip_mgr exists --- >
+        if tooltip_mgr:
+            tooltip_queue.put_nowait(("hide", activation_id))
+        # --- End Add check --- >
     except queue.Full:
         logging.warning(f"Tooltip queue full when trying to hide on final for activation ID {activation_id}.")
 
@@ -849,9 +935,18 @@ def handle_dictation_final(final_transcript, history, activation_id):
             logging.info(f"Showing confirmation for action: '{action_to_confirm}'")
             try:
                 pos = pyautogui.position()
-                action_confirm_queue.put_nowait(("show", {"action": action_to_confirm, "pos": pos}))
-                g_pending_action = action_to_confirm
-                g_action_confirmed = False
+                # --- Add check: Only send if action_confirm_mgr exists --- >
+                if action_confirm_mgr:
+                    action_confirm_queue.put_nowait(("show", {"action": action_to_confirm, "pos": pos}))
+                    g_pending_action = action_to_confirm
+                    g_action_confirmed = False
+                else:
+                    logging.warning("Action Confirm UI disabled, cannot show confirmation.")
+                    # If UI is disabled, maybe execute directly? Or just ignore?
+                    # For now, just ignore the action trigger.
+                    action_to_confirm = None # Prevent action execution later
+                    trigger_found = False # Mark as not found
+                # --- End Add check --- >
             except Exception as e:
                 logging.error(f"Error sending 'show' for '{action_to_confirm}' to ActionConfirmManager: {e}")
 
@@ -902,13 +997,14 @@ def handle_dictation_final(final_transcript, history, activation_id):
 
     logging.debug(f"Diff Calculation: Prefix={common_prefix_len}, Backspaces={backspaces_needed}, Type='{text_to_type}'")
 
-    # --- Step E: Execute Typing Actions ---
+    # --- Step E: Execute Typing Actions --- >
+    # Use keyboard_simulator instance
     if backspaces_needed > 0:
-        simulate_backspace(backspaces_needed)
+        keyboard_sim.simulate_backspace(backspaces_needed)
     if text_to_type:
-        simulate_typing(text_to_type)
+        keyboard_sim.simulate_typing(text_to_type)
 
-    # --- Step F: Update History to Match Target State ---
+    # --- Step F: Update History to Match Target State --- >
     new_history = []
     if target_words:
         logging.debug(f"Rebuilding history with: {target_words}")
@@ -949,8 +1045,7 @@ def execute_command(command_text):
     # Example: Simple mapping
     if "press enter" in command_text.lower():
         logging.info("Action: Simulating Enter key")
-        kb_controller.press(keyboard.Key.enter)
-        kb_controller.release(keyboard.Key.enter)
+        keyboard_sim.simulate_key_press_release(Key.enter)
         last_command_executed = ("key_press", keyboard.Key.enter)
     # TODO: Execute action safely
     # TODO: Store action details in last_command_executed for undo
@@ -965,7 +1060,8 @@ def undo_last_command():
 # --- UPDATED: Keyboard Input Final Handling ---
 async def handle_command_final(final_transcript): # Renamed from handle_keyboard_input_final
     """Handles final transcript for Command Mode: Sends to OpenAI, parses keys, simulates."""
-    global final_command_text, openai_client, OPENAI_MODEL # Renamed variable
+    # Access the global manager instance
+    global openai_manager, keyboard_sim, OPENAI_MODEL, module_settings, final_command_text
 
     logging.info(f"Final Command Transcript (for AI processing): '{final_transcript}'")
     final_command_text = final_transcript # Store the raw text
@@ -974,11 +1070,19 @@ async def handle_command_final(final_transcript): # Renamed from handle_keyboard
         logging.warning("Command Mode: Empty transcript received for OpenAI.")
         return
 
-    if not openai_client:
-        logging.error("OpenAI client not available. Cannot process command input.")
-        return
+    # --- Check if openai_manager is available --- >
+    if not openai_manager:
+        logging.error("OpenAI Manager not available. Cannot process command input.")
+        return # This return is now inside the async function
+    # --- End Check --- >
 
-    # --- Prepare OpenAI Request ---
+    # --- Check if command interpretation module is enabled --- >
+    if not module_settings.get("command_interpretation_enabled", False):
+        logging.info("Command Interpretation module disabled in config. Skipping OpenAI call.")
+        return
+    # --- End Check --- >
+
+    # --- Prepare OpenAI Request --- >
     # Define valid keys for the prompt context - helps guide the LLM
     # Create a simplified list of key names for the prompt
     valid_key_names_str = ", ".join(list(PYNPUT_KEY_MAP.keys())[:40]) + ", etc. (standard alphanumeric keys also valid)" # Limit length
@@ -1003,18 +1107,25 @@ Be precise. If unsure, return an empty list [].
     logging.info(f"Requesting AI key interpretation for command: '{final_command_text}'") # Renamed variable
 
     try:
-        response = await openai_client.chat.completions.create(
-            model=OPENAI_MODEL, # Use the configured model
+        # --- Call the generic method in OpenAIManager --- >
+        response_content = await openai_manager.get_openai_completion(
+            model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1, # Low temperature for precise interpretation
-            response_format={"type": "json_object"}, # Request JSON output
-            max_tokens=150 # Adjust as needed
+            temperature=0.1,
+            max_tokens=150,
+            response_format={"type": "json_object"} # Pass format here
         )
+        # --- End Call --- >
 
-        response_content = response.choices[0].message.content
+        # --- Check if response is None (indicating an API error) --- >
+        if response_content is None:
+            logging.error("Failed to get command interpretation from OpenAI.")
+            return
+        # --- End Check --- >
+
         logging.debug(f"OpenAI Keyboard Response Raw: {response_content}")
 
         # --- Parse the JSON response ---
@@ -1045,12 +1156,12 @@ Be precise. If unsure, return an empty list [].
                 if key_obj:
                     # It's a known special key or symbol mapped directly
                     if isinstance(key_obj, str): # It's a character mapped from a word (e.g., "dot" -> ".")
-                         simulate_typing(key_obj)
+                         keyboard_sim.simulate_typing(key_obj)
                     else: # It's a pynput.keyboard.Key object
-                        simulate_key_press_release(key_obj)
+                        keyboard_sim.simulate_key_press_release(key_obj)
                 elif len(item) == 1:
                     # Assume it's a single character to type
-                    simulate_typing(item)
+                    keyboard_sim.simulate_typing(item)
                 else:
                     logging.warning(f"Unknown single key name: '{item}'")
 
@@ -1080,7 +1191,7 @@ Be precise. If unsure, return an empty list [].
                          valid_combo = False; break
 
                 if valid_combo and combo_keys:
-                    simulate_key_combination(combo_keys)
+                    keyboard_sim.simulate_key_combination(combo_keys)
                 elif not combo_keys:
                      logging.warning(f"Empty key list derived from combination: {item}")
 
@@ -1094,17 +1205,24 @@ Be precise. If unsure, return an empty list [].
 # --- Translation Function ---
 async def translate_and_type(text_to_translate, source_lang_code, target_lang_code):
     """Translates text using OpenAI and types the result."""
-    global openai_client, OPENAI_MODEL # Use configured model
-    if not openai_client:
-        logging.error("OpenAI client not available. Cannot translate.")
-        simulate_typing(" [Translation Error: OpenAI not configured]")
-        return
+    # Access the global manager instance
+    global openai_manager, keyboard_sim, OPENAI_MODEL, module_settings
+
+    # --- Check if openai_manager is available --- >
+    if not openai_manager:
+        logging.error("OpenAI Manager not available. Cannot translate.")
+        if keyboard_sim: # Check if keyboard sim is available too
+             keyboard_sim.simulate_typing(" [Translation Error: OpenAI Manager not initialized]")
+        return # This return is inside the async function
+    # --- End Check --- >
+
     if not text_to_translate:
         logging.warning("No text provided for translation.")
         return
     if not source_lang_code or not target_lang_code:
         logging.error(f"Missing source ({source_lang_code}) or target ({target_lang_code}) language for translation.")
-        simulate_typing(" [Translation Error: Language missing]")
+        # Use keyboard_simulator instance
+        keyboard_sim.simulate_typing(" [Translation Error: Language missing]")
         return
     if source_lang_code == target_lang_code:
          logging.info("Source and target languages are the same, skipping translation call.")
@@ -1118,34 +1236,47 @@ async def translate_and_type(text_to_translate, source_lang_code, target_lang_co
 
     logging.info(f"Requesting translation from '{source_lang_name}' to '{target_lang_name}' for: '{text_to_translate}' using model '{OPENAI_MODEL}'")
     # Indicate translation is starting *after* the source text's trailing space
-    simulate_typing("-> ") # Add space after arrow
+    # Use keyboard_simulator instance
+    keyboard_sim.simulate_typing("-> ") # Add space after arrow
 
     try:
         prompt = f"Translate the following text accurately from {source_lang_name} to {target_lang_name}. Output only the translated text:\n\n{text_to_translate}"
 
-        response = await openai_client.chat.completions.create(
-            model=OPENAI_MODEL, # Use the model from config
+        # --- Call the generic method in OpenAIManager --- >
+        translated_text = await openai_manager.get_openai_completion(
+            model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "You are an expert translation engine."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.2, # Lower temperature for more direct translation
-            max_tokens=int(len(text_to_translate) * 2.5 + 50) # Generous token estimate
+            temperature=0.2,
+            max_tokens=int(len(text_to_translate) * 2.5 + 50)
+            # No response_format needed for translation
         )
+        # --- End Call --- >
 
-        translated_text = response.choices[0].message.content.strip()
+        # --- Check if response is None (indicating an API error) --- >
+        if translated_text is None:
+            logging.error("Failed to get translation from OpenAI.")
+            keyboard_sim.simulate_typing(f"[Translation Error: API Call Failed]")
+            return
+        # --- End Check --- >
+
         logging.info(f"Translation received: '{translated_text}'")
 
         if translated_text:
             # Type the translation, followed by a space for subsequent typing
-            simulate_typing(translated_text + " ")
+            # Use keyboard_simulator instance
+            keyboard_sim.simulate_typing(translated_text + " ")
         else:
             logging.warning("OpenAI returned an empty translation.")
-            simulate_typing("[Translation Empty] ")
+            # Use keyboard_simulator instance
+            keyboard_sim.simulate_typing("[Translation Empty] ")
 
     except Exception as e:
         logging.error(f"Error during OpenAI translation request: {e}", exc_info=True)
-        simulate_typing(f"[Translation Error: {type(e).__name__}] ")
+        # Use keyboard_simulator instance
+        keyboard_sim.simulate_typing(f"[Translation Error: {type(e).__name__}] ")
 
 
 # --- Deepgram Event Handlers ---
@@ -1243,6 +1374,7 @@ async def on_close(self, close, **kwargs):
     # Check current status *before* setting to idle
     # Avoid reverting an 'error' state back to 'idle' on close.
     try:
+        # --- Add check: Only send if status_mgr exists --- >
         if status_mgr and status_mgr.thread.is_alive():
             # Only reset to idle if the status wasn't already error
             # This requires accessing the status indicator's state, which is tricky.
@@ -1300,16 +1432,16 @@ def on_click(x, y, button, pressed):
             logging.debug(f"Stored initial activation position: {initial_activation_pos} with ID: {current_activation_id}")
 
             # --- Send START command to main loop's queue --- >
+            # --- MODIFIED: Send specific command to initiate connection --- >
             try:
-                ui_action_queue.put_nowait(("start_transcription", None))
-                logging.debug("Sent start_transcription command to main loop queue.")
+                # ui_action_queue.put_nowait(("start_transcription", None))
+                ui_action_queue.put_nowait(("initiate_dg_connection", {"activation_id": current_activation_id}))
+                # logging.debug("Sent start_transcription command to main loop queue.")
+                logging.debug(f"Sent initiate_dg_connection command for ID {current_activation_id} to main loop queue.")
             except queue.Full:
-                logging.error("UI Action Queue full! Cannot send start_transcription command.")
+                logging.error("UI Action Queue full! Cannot send initiate_dg_connection command.")
                 # If queue is full, something is wrong, maybe clear the event?
                 transcription_active_event.clear()
-                start_time = None
-                initial_activation_pos = None
-                return
 
             # --- Send status update to indicator AFTER sending start command ---
             try:
@@ -1385,11 +1517,16 @@ def on_click(x, y, button, pressed):
             # The main loop stop flow should NOT handle hiding anymore.
             try:
                 logging.debug("Button released (no hover selection): Sending immediate hide command to status indicator.")
-                hide_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": "",
-                             "connection_status": "idle"} # <-- Reset connection status
-                status_queue.put_nowait(("state", hide_data))
-                if ACTIVE_MODE == MODE_DICTATION:
-                     tooltip_queue.put_nowait(("hide", None))
+                # --- Add check: Only send if status_mgr exists --- >
+                if status_mgr:
+                    hide_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": "",
+                                 "connection_status": "idle"} # <-- Reset connection status
+                    status_queue.put_nowait(("state", hide_data))
+                # --- End Add check --- >
+                # --- Add check: Only send if tooltip_mgr exists --- >
+                if tooltip_mgr and ACTIVE_MODE == MODE_DICTATION:
+                    tooltip_queue.put_nowait(("hide", None)) # Use None for general hide
+                # --- End Add check --- >
             except queue.Full: logging.warning("Queue full sending immediate hide on release.")
             except Exception as e: logging.error(f"Error sending immediate hide on release: {e}")
             # --- End Immediate Hide ---
@@ -1511,17 +1648,37 @@ async def main():
     global ui_interaction_cancelled, config, SELECTED_LANGUAGE, TARGET_LANGUAGE, ACTIVE_MODE
     global initial_activation_pos
     global status_mgr
+    # --- ADDED GLOBALS --- >
+    global module_settings # Ensure module_settings is accessible if needed elsewhere, though likely read locally
+    # --- Add Keyboard Simulator instance --- >
+    global keyboard_sim
+    # --- Add OpenAI Manager instance --- >
+    global openai_manager
+    # --- Add Deepgram Manager instance --- >
+    global deepgram_mgr
 
     logging.info("Starting Vibe App...")
-    # --- Initialize Systray ---
+    # --- Read module settings early in main --- >
+    module_settings = config.get("modules", {})
+    logging.debug(f"Module settings read at start of main: {module_settings}")
+    tooltip_setting_value = module_settings.get("tooltip_enabled", "KEY_MISSING") # Default to indicate missing key
+    logging.debug(f"Value of 'tooltip_enabled' read in main: {tooltip_setting_value}")
+    # --- End Read --- >
+
+    # --- Initialize Systray --- >
     systray_thread = threading.Thread(target=systray_ui.run_systray, args=(systray_ui.exit_app_event,), daemon=True)
     systray_thread.start()
     logging.info("Systray UI thread started.")
 
-    # --- Start Tooltip Manager ---
-    tooltip_mgr = TooltipManager(tooltip_queue, transcription_active_event)
-    tooltip_mgr.start()
-    logging.info("Tooltip Manager started.")
+    # --- Start Tooltip Manager (Conditional) --- >
+    tooltip_mgr = None # Initialize as None
+    # Use a distinct variable name for the check
+    is_tooltip_enabled = module_settings.get("tooltip_enabled", True)
+    logging.debug(f"Re-checked tooltip_enabled value for IF condition: {is_tooltip_enabled}") # Add another check
+    if is_tooltip_enabled:
+        tooltip_mgr = TooltipManager(tooltip_queue, transcription_active_event)
+        tooltip_mgr.start()
+        logging.info("Tooltip Manager activé et démarré.")
 
     # --- Start Status Indicator Manager ---
     # Pass the config, full language maps, and available modes
@@ -1536,26 +1693,61 @@ async def main():
     status_mgr.start()
     logging.info("Status Indicator Manager started.")
 
-    # --- Start Action Confirmation UI Manager (NEW) --- >
-    action_confirm_mgr = ActionConfirmManager(action_confirm_queue, ui_action_queue)
-    action_confirm_mgr.start()
-    logging.info("Action Confirmation UI Manager started.")
+    # --- Start Action Confirmation UI Manager (Conditional) --- >
+    action_confirm_mgr = None # Initialize as None
+    if module_settings.get("action_confirm_enabled", True):
+        action_confirm_mgr = ActionConfirmManager(action_confirm_queue, ui_action_queue)
+        action_confirm_mgr.start()
+        logging.info("Action Confirmation UI Manager activé et démarré.")
+    else:
+        logging.info("Action Confirmation UI désactivé par la configuration.")
 
-    # --- Start Buffered Audio Input ---
-    buffered_audio_input = BufferedAudioInput(status_queue)
-    buffered_audio_input.start()
-    logging.info("Buffered Audio Input thread started.")
+    # --- Start Buffered Audio Input (Conditional) --- >
+    buffered_audio_input = None # Initialize as None
+    if module_settings.get("audio_buffer_enabled", True):
+        buffered_audio_input = BufferedAudioInput(status_queue)
+        buffered_audio_input.start()
+        logging.info("Buffered Audio Input activé et démarré.")
+    else:
+        logging.info("Buffered Audio Input désactivé par la configuration. La connexion Deepgram sera désactivée.")
 
-    # --- Initialize Deepgram Client ---
+    # --- Initialize Keyboard Simulator --- >
+    keyboard_sim = KeyboardSimulator()
+    if not keyboard_sim.kb_controller:
+        logging.critical("Keyboard simulator failed to initialize. Exiting.")
+        # Optionally signal systray to exit?
+        if systray_ui and systray_ui.exit_app_event:
+            systray_ui.exit_app_event.set()
+        return # Stop main function
+
+    # --- Initialize Deepgram Client --- >
+    deepgram_client = None
     try:
         config_dg = DeepgramClientOptions(verbose=logging.WARNING)
-        deepgram = DeepgramClient(DEEPGRAM_API_KEY, config_dg)
+        deepgram_client = DeepgramClient(DEEPGRAM_API_KEY, config_dg)
+        logging.info("Deepgram client initialized.")
     except Exception as e:
         logging.error(f"Failed to initialize Deepgram client: {e}")
         systray_ui.exit_app_event.set() # Signal exit if DG fails
         return
 
-    # --- Initialize pynput Controller ---
+    # --- NEW: Create Transcript Queue --- >
+    transcript_queue = queue.Queue()
+
+    # --- NEW: Initialize Deepgram Manager --- >
+    deepgram_mgr = None
+    # Only initialize if audio buffer is enabled (dependency)
+    if buffered_audio_input and deepgram_client:
+         deepgram_mgr = DeepgramManager(
+             deepgram_client=deepgram_client,
+             status_q=status_queue, # Send status updates here
+             transcript_q=transcript_queue, # Send transcripts here
+             buffered_audio=buffered_audio_input # Pass buffer instance
+         )
+    else:
+        logging.warning("Deepgram Manager cannot be initialized (Audio Buffer or DG Client missing/disabled).")
+
+    # --- Initialize pynput Controller --- >
     mouse_controller = mouse.Controller()
 
     # --- Start Listeners ---
@@ -1651,6 +1843,28 @@ async def main():
                     # Original code had ui_interaction_cancelled = True here always, let's keep it
                     ui_interaction_cancelled = True
                 
+                # --- NEW: Handle DG Connection Initiation --- >
+                elif action_command == "initiate_dg_connection":
+                    received_activation_id = action_data.get("activation_id")
+                    # Double check if still active and manager exists
+                    if transcription_active_event.is_set() and not is_stopping and deepgram_mgr:
+                        # --- Removed check against global ID --- >
+                        logging.info(f"Received initiate_dg_connection for ID {received_activation_id}. Starting DG manager listening.")
+                        # --- Set the global ID NOW, before starting the task --- >
+                        current_activation_id = received_activation_id
+                        # Prepare options (same as before)
+                        current_dg_options = LiveOptions(
+                            model="nova-2", language=SELECTED_LANGUAGE, interim_results=True, smart_format=True,
+                            encoding="linear16", channels=1, sample_rate=16000, punctuate=True, numerals=True,
+                            utterance_end_ms="1000", vad_events=True, endpointing=300
+                        )
+                        # Start the listening task using the received ID
+                        await deepgram_mgr.start_listening(current_dg_options, received_activation_id)
+                        # --- End changes --- >
+                    else:
+                         logging.warning(f"Ignoring initiate_dg_connection command because transcription is no longer active or stopping (ID: {received_activation_id}).")
+                # --- End Handle DG Initiation --- >
+
                 # --- THEN Check for Action Confirmation Message --- >
                 elif action_command == "action_confirmed":
                     confirmed_action = action_data
@@ -1658,13 +1872,16 @@ async def main():
                         logging.info(f"Executing confirmed action immediately: {g_pending_action}")
                         # --- Execute Immediately --- >
                         if g_pending_action == "Enter":
-                            simulate_key_press_release(Key.enter)
+                            # Use keyboard_simulator instance
+                            keyboard_sim.simulate_key_press_release(Key.enter)
                         elif g_pending_action == "Escape":
-                            simulate_key_press_release(Key.esc)
+                            # Use keyboard_simulator instance
+                            keyboard_sim.simulate_key_press_release(Key.esc)
                         # --- NEW: Handle single characters (punctuation, etc.) --- >
                         elif isinstance(g_pending_action, str) and len(g_pending_action) == 1:
                              logging.info(f"Simulating typing for confirmed character: '{g_pending_action}'")
-                             simulate_typing(g_pending_action)
+                             # Use keyboard_simulator instance
+                             keyboard_sim.simulate_typing(g_pending_action)
                         else:
                             logging.warning(f"Unhandled confirmed action type: {g_pending_action}")
                         # --- End Handle Character --- >
@@ -1685,216 +1902,46 @@ async def main():
             except queue.Empty: pass
             except Exception as e: logging.error(f"Error processing UI action queue: {e}", exc_info=True)
 
-            # --- Start Transcription Flow --- >
-            # Only start if the event is set AND we are not in the process of stopping
-            if transcription_active_event.is_set() and not is_stopping and dg_connection is None:
-                # --- NEW: Set status to CONNECTING *before* attempting connection --- >
-                try:
-                    if status_mgr and status_mgr.thread.is_alive():
-                        status_mgr.queue.put_nowait(("connection_update", {"status": "connecting"})) # Yellow state
-                except queue.Full: logging.warning("Status queue full setting status to CONNECTING before connect attempt.")
-                except Exception as e: logging.error(f"Error setting status to CONNECTING before connect attempt: {e}")
-                # --- End New --- >
-
-                logging.info(f"Activating transcription in {ACTIVE_MODE} mode...")
-                if ACTIVE_MODE == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
-                elif ACTIVE_MODE == MODE_COMMAND: final_command_text = "" # Renamed mode and variable
-
-                # --- Connection Retry Loop --- >
-                connection_successful = False
-                microphone = None # Reset microphone state here
-                connection_established_event.clear() # Clear event before attempts
-                start_connect_time = time.time() # Track start of overall connection process
-                # --- NEW: Use monotonic clock for duration measurement --- >
-                start_connect_monotonic = time.monotonic()
-                connection_established_monotonic = None # Initialize
-                # --- END NEW ---
-
-                for attempt in range(MAX_CONNECT_ATTEMPTS):
-                    if time.time() - start_connect_time > OVERALL_CONNECT_TIMEOUT_SEC:
-                        logging.warning(f"Overall connection timeout ({OVERALL_CONNECT_TIMEOUT_SEC}s) exceeded during attempt {attempt + 1}. Aborting.")
-                        break # Exit retry loop
-
-                    logging.info(f"Attempting Deepgram connection (Attempt {attempt + 1}/{MAX_CONNECT_ATTEMPTS})...")
-                    # Status should already be 'connecting'
-
-                    try:
-                        dg_connection = deepgram.listen.asyncwebsocket.v("1")
-                        # Register handlers
-                        dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
-                        # --- MODIFIED: Wrap on_open to set event --- >
-                        async def on_open_wrapper(self, open, **kwargs):
-                            await on_open(self, open, **kwargs)
-                            connection_established_event.set() # Signal success
-                        dg_connection.on(LiveTranscriptionEvents.Open, on_open_wrapper)
-                        # --- End Modified --- >
-                        dg_connection.on(LiveTranscriptionEvents.Close, on_close)
-                        dg_connection.on(LiveTranscriptionEvents.Error, on_error)
-                        dg_connection.on(LiveTranscriptionEvents.Unhandled, on_unhandled)
-                        dg_connection.on(LiveTranscriptionEvents.Metadata, on_metadata)
-                        dg_connection.on(LiveTranscriptionEvents.SpeechStarted, on_speech_started)
-                        dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, on_utterance_end)
-
-                        options = LiveOptions(model="nova-2", language=SELECTED_LANGUAGE, interim_results=True, smart_format=True,
-                                              encoding="linear16", channels=1, sample_rate=16000, punctuate=True, numerals=True,
-                                              utterance_end_ms="1000", vad_events=True, endpointing=300)
-
-                        # --- Start Connection (No wait_for) --- >
-                        await dg_connection.start(options)
-
-                        # --- Wait for connection success event OR timeout --- >
-                        remaining_timeout = max(0, OVERALL_CONNECT_TIMEOUT_SEC - (time.time() - start_connect_time))
-                        logging.debug(f"Waiting for connection event with remaining timeout: {remaining_timeout:.2f}s")
-                        try:
-                            await asyncio.wait_for(connection_established_event.wait(), timeout=remaining_timeout)
-                            # --- NEW: Record connection time --- >
-                            connection_established_monotonic = time.monotonic()
-                            # --- END NEW ---
-                            logging.info(f"Connection established (on_open received) on attempt {attempt + 1}.")
-                            connection_successful = True
-                            # Don't set status here, on_open handler does it.
-                            break # Exit retry loop on success
-                        except asyncio.TimeoutError:
-                             logging.warning(f"Did not receive on_open within timeout on attempt {attempt + 1}.")
-                             # Clean up connection before next attempt
-                             if dg_connection:
-                                 try: await dg_connection.finish() # Try to close gracefully
-                                 except Exception: pass
-                                 finally: dg_connection = None
-
-                    except Exception as e:
-                        logging.error(f"Error during DG connection attempt {attempt + 1}: {e}", exc_info=(attempt == MAX_CONNECT_ATTEMPTS - 1))
-                        # Clean up connection before next attempt
-                        if dg_connection:
-                            try: await dg_connection.finish() # Try to close gracefully
-                            except Exception: pass
-                            finally: dg_connection = None
-
-                    # --- Retry Logic --- >
-                    if not connection_successful and attempt < MAX_CONNECT_ATTEMPTS - 1:
-                        logging.info(f"Retrying connection in {CONNECT_RETRY_DELAY_SEC} seconds...")
-                        # Status remains 'connecting'
-                        await asyncio.sleep(CONNECT_RETRY_DELAY_SEC)
-                    elif not connection_successful and attempt == MAX_CONNECT_ATTEMPTS - 1:
-                         logging.error("All Deepgram connection attempts failed or timed out.")
-                         # --- Set status to ERROR after all retries fail --- >
-                         try:
-                             if status_mgr and status_mgr.thread.is_alive():
-                                 status_mgr.queue.put_nowait(("connection_update", {"status": "error"})) # Red state
-                                 logging.info("Set status indicator to ERROR due to connection failure.")
-                             else:
-                                  logging.warning("Status manager not available to set error state.")
-                         except queue.Full: logging.warning("Status queue full setting status to ERROR after failed attempts.")
-                         except Exception as status_err: logging.error(f"Error setting status to ERROR after failed attempts: {status_err}")
-                # --- End Connection Retry Loop --- >
-
-                # --- Start Mic and Send Buffer ONLY if connection was successful --- >
-                if connection_successful and dg_connection:
-                    try:
-                        # --- Send Buffer --- >
-                        # --- MODIFIED: Calculate duration and get specific buffer part --- >
-                        connection_duration_sec = 0
-                        if connection_established_monotonic and start_connect_monotonic:
-                            connection_duration_sec = connection_established_monotonic - start_connect_monotonic
-
-                        # Cap duration at 5 seconds max
-                        duration_to_send_sec = min(max(0, connection_duration_sec), 5.0)
-                        logging.info(f"Connection took {connection_duration_sec:.2f}s. Will send buffer for last {duration_to_send_sec:.2f}s.")
-
-                        pre_activation_buffer = buffered_audio_input.get_buffer_last_n_seconds(duration_to_send_sec, connection_established_monotonic)
-                        # --- END MODIFIED --- >
-
-                        if pre_activation_buffer:
-                            total_bytes = sum(len(chunk) for chunk in pre_activation_buffer)
-                            logging.info(f"Sending pre-activation buffer: {len(pre_activation_buffer)} chunks, {total_bytes} bytes.")
-                            for chunk in pre_activation_buffer:
-                                if dg_connection and await dg_connection.is_connected():
-                                    try: await dg_connection.send(chunk); await asyncio.sleep(0.001)
-                                    except Exception as send_err: logging.warning(f"Error sending buffer chunk: {send_err}"); break
-                                else: logging.warning("DG connection lost while sending buffer."); break
-                        # --- Microphone Setup --- >
-                        original_send = dg_connection.send
-                        async def logging_send_wrapper(data):
-                            is_conn_connected = False
-                            if dg_connection:
-                                try: is_conn_connected = await dg_connection.is_connected()
-                                except Exception: pass
-                            if is_conn_connected:
-                                try: await original_send(data)
-                                except Exception as mic_send_err: logging.warning(f"Error sending mic data: {mic_send_err}")
-                        microphone = Microphone(logging_send_wrapper)
-                        microphone.start()
-                        logging.info("Deepgram microphone started and streaming.")
-                        # Status should already be 'connected' from on_open
-                    except Exception as mic_buf_err:
-                         logging.error(f"Error sending buffer or starting microphone: {mic_buf_err}", exc_info=True)
-                         # Set error state if mic/buffer fails
-                         try: status_mgr.queue.put_nowait(("connection_update", {"status": "error"}))
-                         except Exception: pass
-                         if microphone: microphone.finish(); microphone = None
-                         if dg_connection: await dg_connection.finish(); dg_connection = None
-                         connection_successful = False # Mark as failed
-                # --- End Mic/Buffer Start ---
-
-                # --- IMMEDIATE CHECK AFTER START/RETRY Block --- >
-                # If connection was marked successful but stop event is now set
-                if connection_successful and not transcription_active_event.is_set():
-                    logging.warning("Stop event detected immediately after successful DG/Mic start. Initiating stop.")
-                    is_stopping = True
-                    stop_initiated_time = time.time()
-                    stopping_start_time = start_time
-                    active_mode_on_stop = ACTIVE_MODE
-                    # Ensure UI hidden (redundant if stop signal handler already did it, but safe)
-                    try: status_mgr.queue.put_nowait(("state", {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}))
-                    except Exception: pass
-                    if ACTIVE_MODE == MODE_DICTATION:
-                        try: tooltip_mgr.queue.put_nowait(("hide", None))
-                        except Exception: pass
-
-                # --- Handle case where ALL connection attempts failed --- >
-                elif not connection_successful:
-                     # Ensure mic/connection are None if we exit the loop due to failure
-                     microphone = None
-                     dg_connection = None
-                     # Status should be 'error' from loop exit logic
-                     logging.debug("Connection failed, skipping mic/buffer start.")
-
-            # --- Process Stop Flow --- >
-            # If stopping has been initiated
+            # --- Start Transcription Flow (REMOVED - Handled by ui_action_queue 'initiate_dg_connection') --- >
+            # The block below is now removed:
+            # if transcription_active_event.is_set() and not is_stopping and deepgram_mgr and not deepgram_mgr.is_listening:
+            #     ...
+            # await deepgram_mgr.start_listening(current_dg_options, received_activation_id) # <-- REMOVED STRAY LINE
+ 
+             # --- Process Stop Flow --- >
+             # If stopping has been initiated
             if is_stopping:
                 logging.debug(f"Processing stop flow steps for {active_mode_on_stop}...")
-                # Stop Mic/Conn (if they exist)
-                if microphone:
-                     microphone.finish()
-                     microphone = None
-                     logging.info("DG Mic finished during stop flow.")
-
-                # --- ADDED: Short delay to allow final messages --- >
-                await asyncio.sleep(0.15) # 150ms delay
-
-                # --- NEW: Hide Tooltip during stop flow ---
-                # Ensure the tooltip is hidden regardless of final message processing
-                if active_mode_on_stop == MODE_DICTATION:
+                # --- Stop Deepgram Listening via Manager --- >
+                if deepgram_mgr and deepgram_mgr.is_listening:
+                    logging.info("Signaling DeepgramManager to stop listening...")
+                    # Run stop_listening as a task to allow it to finish gracefully
+                    stop_task = asyncio.create_task(deepgram_mgr.stop_listening())
                     try:
-                        # Use the specific activation ID captured when stopping started
-                        # (though current_activation_id might be None if a new activation happened)
-                        hide_id = current_activation_id if stopping_start_time == start_time else None # Best effort ID
+                        await asyncio.wait_for(stop_task, timeout=2.0) # Wait max 2s for DG to close
+                    except asyncio.TimeoutError:
+                        logging.warning("Timeout waiting for DeepgramManager to stop.")
+                    except Exception as e:
+                        logging.error(f"Error during DeepgramManager stop: {e}")
+                # --- End Stop DG --- >
+
+                # --- REMOVE Manual Mic/Conn finish (Handled by DeepgramManager) --- >
+                # if microphone: ...
+                # await asyncio.sleep(0.15)
+                # if dg_connection: ...
+                # --- End Remove --- >
+
+                # --- Hide Tooltip (Keep, managed locally) --- >
+                if tooltip_mgr and active_mode_on_stop == MODE_DICTATION:
+                    try:
+                        hide_id = current_activation_id if stopping_start_time == start_time else None
                         tooltip_queue.put_nowait(("hide", hide_id))
                         logging.debug(f"Sent hide command to tooltip queue during stop flow (ID: {hide_id}).")
                     except queue.Full:
                         logging.error("Tooltip queue full sending hide message during stop flow.")
                     except Exception as e:
                         logging.error(f"Error sending tooltip hide message during stop flow: {e}")
-                # --- End NEW ---
-
-                if dg_connection:
-                    try:
-                        # await asyncio.sleep(0.05) # Removed sleep
-                        await dg_connection.finish()
-                        logging.info("DG Conn finished during stop flow.")
-                    except Exception as e: logging.warning(f"Error finishing DG conn during stop flow: {e}")
-                    finally:
-                         dg_connection = None # Ensure this is set to None
+                # --- End Hide Tooltip --- >
 
                 # Check cancellation flag (might have been set by UI action during stop detection)
                 perform_action = True
@@ -1917,9 +1964,11 @@ async def main():
                         if g_pending_action and g_action_confirmed:
                             logging.info(f"Executing confirmed action from main loop: {g_pending_action}")
                             if g_pending_action == "Enter":
-                                simulate_key_press_release(Key.enter)
+                                # Use keyboard_simulator instance
+                                keyboard_sim.simulate_key_press_release(Key.enter)
                             elif g_pending_action == "Escape":
-                                simulate_key_press_release(Key.esc)
+                                # Use keyboard_simulator instance
+                                keyboard_sim.simulate_key_press_release(Key.esc)
                             # Add other actions here if needed
                             action_executed_this_stop = True
                         # --- End Confirmed Action Execution Check --- >
@@ -2000,21 +2049,79 @@ async def main():
                 if SELECTED_LANGUAGE != old_source:
                     if is_stopping:
                         logging.warning("Config reload changed language during stop flow. Restart will happen naturally if needed.")
-                    elif transcription_active_event.is_set() and dg_connection is not None:
+                    elif transcription_active_event.is_set() and deepgram_mgr and deepgram_mgr.is_listening:
                         logging.info("Source language changed while active, initiating stop to restart DG...")
                         transcription_active_event.clear() # Let the stop flow handle restart on next cycle
                         # No need to set is_stopping here, the cleared event will trigger it
                     # else: language changed but not active or stopping, no action needed now
 
-            # --- Thread Health Checks --- >
-            if not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set(): logging.error("Tooltip thread died."); break
-            if not status_mgr.thread.is_alive() and not status_mgr._stop_event.is_set(): logging.error("Status Indicator thread died."); break
-            if not action_confirm_mgr.thread.is_alive() and not action_confirm_mgr._stop_event.is_set(): logging.error("Action Confirmation thread died."); break
+            # --- Thread Health Checks (Conditional) --- >
+            if tooltip_mgr and not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set(): logging.error("Tooltip thread died."); break
+            if status_mgr and not status_mgr.thread.is_alive() and not status_mgr._stop_event.is_set(): logging.error("Status Indicator thread died."); break
+            if action_confirm_mgr and not action_confirm_mgr.thread.is_alive() and not action_confirm_mgr._stop_event.is_set(): logging.error("Action Confirmation thread died."); break
+            # --- Check Deepgram Manager Task Health (if applicable) --- >
+            if deepgram_mgr and deepgram_mgr._connection_task and deepgram_mgr._connection_task.done():
+                try:
+                    exc = deepgram_mgr._connection_task.exception()
+                    if exc:
+                         logging.error(f"DeepgramManager task ended with exception: {exc}", exc_info=exc)
+                         # Decide how to handle this - attempt restart? Exit?
+                         break # Exit for now
+                    else:
+                         # Task finished without exception, but shouldn't if is_listening was true?
+                         if deepgram_mgr.is_listening:
+                              logging.warning("DeepgramManager task finished unexpectedly while listening was intended.")
+                              # Consider attempting restart here
+                              pass
+                         # else: task finished after stop_listening was called, which is normal.
+                except asyncio.CancelledError:
+                     logging.info("DeepgramManager task was cancelled (checked in main loop).")
+                except Exception as e:
+                     logging.error(f"Error checking DeepgramManager task state: {e}")
+            # --- End Check DG Task --- >
+            if buffered_audio_input and not buffered_audio_input.thread.is_alive() and not buffered_audio_input.running.is_set(): logging.error("Buffered Audio Input thread died."); break
+
+            # --- Process Transcript Queue --- >
+            try:
+                transcript_data = transcript_queue.get_nowait()
+                msg_type = transcript_data.get("type")
+                transcript = transcript_data.get("transcript")
+                activation_id = transcript_data.get("activation_id")
+
+                # Ensure we only process transcripts for the *current* activation
+                if activation_id == current_activation_id:
+                    if msg_type == "interim":
+                        if ACTIVE_MODE == MODE_DICTATION:
+                             handle_dictation_interim(transcript, activation_id)
+                        elif ACTIVE_MODE == MODE_COMMAND:
+                             handle_dictation_interim(transcript, activation_id) # Reuse tooltip for interim command
+                    elif msg_type == "final":
+                        if ACTIVE_MODE == MODE_DICTATION:
+                             updated_history, text_typed = handle_dictation_final(transcript, typed_word_history, activation_id)
+                             typed_word_history = updated_history
+                             final_source_text = " ".join([entry['text'] for entry in typed_word_history])
+                             last_interim_transcript = "" # Clear interim after final
+                        elif ACTIVE_MODE == MODE_COMMAND:
+                             final_command_text = transcript # Store final command text
+                             # Actual execution moved to stop flow
+                             logging.debug(f"Stored final transcript for Command Mode: '{final_command_text}'")
+                             # Maybe hide interim tooltip here if shown?
+                             if tooltip_mgr:
+                                 tooltip_queue.put_nowait(("hide", activation_id))
+                else:
+                    logging.debug(f"Ignoring transcript for activation {activation_id} (current is {current_activation_id})")
+
+            except queue.Empty:
+                pass # No transcripts in queue
+            except Exception as e:
+                logging.error(f"Error processing transcript queue: {e}", exc_info=True)
+            # --- End Process Transcript Queue --- >
 
             # --- At the end of main loop, flush modifier log buffer --- >
             flush_modifier_log(force=True)
 
-            await asyncio.sleep(0.02) # Keep the reduced sleep
+            # --- Explicitly yield control to allow background tasks --- >
+            await asyncio.sleep(0)
 
     except (asyncio.CancelledError, KeyboardInterrupt): logging.info("Main task cancelled/interrupted.")
     finally:
@@ -2023,10 +2130,10 @@ async def main():
         if not systray_ui.exit_app_event.is_set():
             systray_ui.exit_app_event.set()
 
-        # --- Stop Audio Input ---
+        # --- Stop Audio Input (Conditional) --- >
         if 'buffered_audio_input' in locals() and buffered_audio_input: buffered_audio_input.stop()
 
-        # --- Signal GUI Managers to Stop ---
+        # --- Signal GUI Managers to Stop (Conditional) --- >
         if 'tooltip_mgr' in locals() and tooltip_mgr: tooltip_mgr.stop()
         if 'status_mgr' in locals() and status_mgr: status_mgr.stop()
         if 'action_confirm_mgr' in locals() and action_confirm_mgr: action_confirm_mgr.stop()
@@ -2053,17 +2160,17 @@ async def main():
             microphone.finish()
             logging.info("Deepgram microphone finished on exit.")
 
-        if 'dg_connection' in locals() and dg_connection:
+        if 'deepgram_client' in locals() and deepgram_client:
             is_conn_connected_final = False
-            try: is_conn_connected_final = await dg_connection.is_connected()
+            try: is_conn_connected_final = await deepgram_client.is_connected()
             except Exception: pass # Ignore errors checking state during shutdown
             if is_conn_connected_final:
                 logging.debug("Finishing Deepgram connection on exit...")
                 try:
-                    await dg_connection.finish()
+                    await deepgram_client.finish()
                     logging.info("Deepgram connection finished on exit.")
                 except asyncio.CancelledError: logging.warning("Deepgram finish cancelled.")
-                except Exception as e: logging.error(f"Error during final dg_connection.finish: {e}")
+                except Exception as e: logging.error(f"Error during final deepgram_client.finish: {e}")
             else: logging.info("Deepgram connection already closed on exit.")
         else: logging.info("No active Deepgram connection to finish on exit.")
 

@@ -35,7 +35,17 @@ DEFAULT_CONFIG = {
     "fg_color": "black",
     "font_family": "Arial",
     "font_size": 10
+  },
+  # --- Added modules section ---
+  "modules": {
+    "tooltip_enabled": True,
+    "status_indicator_enabled": True,
+    "action_confirm_enabled": True,
+    "translation_enabled": True,
+    "command_interpretation_enabled": False, # Disabled by default
+    "audio_buffer_enabled": True # Added audio buffer toggle
   }
+  # --- End added section ---
 }
 
 def load_config():
@@ -60,17 +70,35 @@ def load_config():
                         loaded_config[section] = defaults
                         logging.debug(f"Systray added missing section: {section}")
                     elif isinstance(defaults, dict):
-                        for key, default_value in defaults.items():
-                            if key not in loaded_config[section]:
-                                loaded_config[section][key] = default_value
-                                logging.debug(f"Systray added missing key: {section}.{key}")
-                # Ensure recent lists exist even if loading an old config
-                if "recent_source_languages" not in loaded_config.get("general", {}):
-                    loaded_config.setdefault("general", {})["recent_source_languages"] = []
-                    logging.debug("Systray added missing recent_source_languages")
-                if "recent_target_languages" not in loaded_config.get("general", {}):
-                     loaded_config.setdefault("general", {})["recent_target_languages"] = []
-                     logging.debug("Systray added missing recent_target_languages")
+                        # --- NEW: Check if the loaded section is actually a dictionary before merging --- >
+                        if not isinstance(loaded_config.get(section), dict):
+                            logging.warning(f"Systray: Config section '{section}' is not a dictionary. Resetting to default.")
+                            loaded_config[section] = defaults
+                        else:
+                            # Merge keys within the section
+                            for key, default_value in defaults.items():
+                                if key not in loaded_config[section]:
+                                    loaded_config[section][key] = default_value
+                                    logging.debug(f"Systray added missing key: {section}.{key}")
+                        # Ensure recent lists exist even if loading an old config
+                        # Note: This logic should technically be *inside* the 'general' section check
+                        # But let's keep it structurally similar to vibe_app for now.
+                        if section == "general": # Apply only for general section
+                            if "recent_source_languages" not in loaded_config.get("general", {}):
+                                loaded_config.setdefault("general", {})["recent_source_languages"] = []
+                                logging.debug("Systray added missing recent_source_languages")
+                            if "recent_target_languages" not in loaded_config.get("general", {}):
+                                loaded_config.setdefault("general", {})["recent_target_languages"] = []
+                                logging.debug("Systray added missing recent_target_languages")
+                        # --- Ensure modules section exists and is merged ---
+                        # This was handled by the generic loop now, we can remove the specific check
+                        # if "modules" not in loaded_config:
+                        #    loaded_config["modules"] = DEFAULT_CONFIG["modules"]
+                        #    logging.debug("Systray added missing modules section")
+                        # else: # Merge modules section with defaults for missing keys
+                        #    # Handled above by the improved generic section merging
+                        #    pass
+                        # --- End ensure modules section ---
 
                 return loaded_config
         except (json.JSONDecodeError, IOError) as e:
@@ -263,7 +291,7 @@ def on_reload_config_clicked(icon, item):
     global config
     logging.info("Reload config requested from systray menu.")
     config = load_config()
-    # Signal main app to also reload its internal config state
+    # Signal main app to also reload its internal config
     # --- Reload translations in systray --- >
     load_translations(config.get("general", {}).get("selected_language"))
     logging.info(f"Systray reloaded translations for language: {i18n.get_current_language()}")
@@ -293,6 +321,20 @@ def update_mode_setting_callback(icon, item, value):
         config["general"] = {}
     config["general"]["active_mode"] = value
     save_config() # Save the updated config
+    # No need to rebuild menu here, checked state handles visual update
+
+# --- NEW: Callback for Module Enable/Disable ---
+def update_module_setting_callback(icon, item, module_key):
+    """Callback to toggle a module's activation state."""
+    current_value = config.get("modules", {}).get(module_key, True) # Default to true if missing
+    new_value = not current_value
+    logging.debug(f"Toggling module setting: {module_key} = {new_value}")
+    if "modules" not in config:
+        config["modules"] = {}
+    config["modules"][module_key] = new_value
+    save_config() # Save the updated config
+    # Log message about restart
+    logging.info(f"Module '{module_key}' set to {new_value}. Redémarrage de l'application requis pour appliquer.")
     # No need to rebuild menu here, checked state handles visual update
 
 # --- Functions to build the menu dynamically ---
@@ -385,7 +427,10 @@ def build_language_source_menu():
         # --- Translate "No other languages" --- >
         source_lang_items.append(item(_('systray.menu.no_other_languages', default="No other languages available"), None, enabled=False))
 
-    return menu(*source_lang_items)
+    # --- Fix: ensure the menu is created ---
+    source_lang_menu = menu(*source_lang_items)
+    return source_lang_menu
+    # --- End Fix ---
 
 def build_language_target_menu():
     """Builds the Langue Cible submenu (extracted logic)."""
@@ -455,6 +500,35 @@ def build_language_target_menu():
 
     return target_lang_menu # Return only the target language menu
 
+# --- NEW: Function to build the Modules menu ---
+def build_modules_menu():
+    """Builds the Modules enable/disable submenu."""
+    module_cfg = config.get("modules", {})
+    # Define module keys and their translated names
+    # Using translation keys directly here
+    module_items_map = {
+        "tooltip_enabled": _("systray.modules.tooltip", default="Afficher l'info-bulle"),
+        "status_indicator_enabled": _("systray.modules.status_indicator", default="Afficher l'indicateur"),
+        "action_confirm_enabled": _("systray.modules.action_confirm", default="Confirmer les actions"),
+        "translation_enabled": _("systray.modules.translation", default="Activer la traduction"),
+        "command_interpretation_enabled": _("systray.modules.command_interpretation", default="Interpréter les commandes"),
+        "audio_buffer_enabled": _("systray.modules.audio_buffer", default="Activer le tampon audio")
+    }
+
+    module_items = []
+    for module_key, display_text in module_items_map.items():
+        module_items.append(
+            item(
+                display_text,
+                partial(update_module_setting_callback, module_key=module_key),
+                checked=lambda item, k=module_key: module_cfg.get(k, True), # Default to true
+                # radio=False # Not radio buttons, they are independent toggles
+            )
+        )
+
+    return menu(*module_items)
+# --- END NEW Function ---
+
 # --- Build Menu Function (MOVED EARLIER) --- >
 def build_menu():
     global exit_app_event # Ensure we use the event from this module
@@ -468,6 +542,8 @@ def build_menu():
     mode_menu = build_mode_menu()
     source_lang_menu = build_language_source_menu()
     target_lang_menu = build_language_target_menu()
+    # --- Build Modules Menu --- >
+    modules_menu = build_modules_menu()
 
     # --- Build Available Commands Submenu (MOVED BACK HERE) --- >
     # Initialize command menu variables BEFORE the try block
@@ -535,6 +611,8 @@ def build_menu():
         item(_("systray.menu.source_language"), source_lang_menu),
         item(_("systray.menu.target_language"), target_lang_menu),
         item(command_menu_title, commands_menu), # <<< Use the command menu (either successful or default error)
+        # --- Add Modules Menu Item --- >
+        item(_("systray.menu.modules", default="Modules"), modules_menu),
         menu.SEPARATOR,
         item(_("systray.menu.reload_config"), on_reload_config_clicked), # Add reload config item
         item(_("systray.menu.exit"), on_exit_clicked) # <-- Ensure correct exit handler

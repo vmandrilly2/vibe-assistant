@@ -29,5 +29,13 @@
     "fg_color": "black",
     "font_family": "Arial",
     "font_size": 10
+  },
+  "modules": {
+    "tooltip_enabled": true,
+    "status_indicator_enabled": true,
+    "action_confirm_enabled": true,
+    "translation_enabled": true,
+    "command_interpretation_enabled": false,
+    "audio_buffer_enabled": true
   }
 }

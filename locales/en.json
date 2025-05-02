@@ -44,6 +44,14 @@
       "no_other_languages": "No other languages available",
       "reload_config": "Reload Config",
       "exit": "Exit"
+    },
+    "modules": {
+      "tooltip": "Show Tooltip",
+      "status_indicator": "Show Indicator",
+      "action_confirm": "Confirm Actions",
+      "translation": "Enable Translation",
+      "command_interpretation": "Interpret Commands",
+      "audio_buffer": "Enable Audio Buffer"
     }
   },
   "status_indicator": {

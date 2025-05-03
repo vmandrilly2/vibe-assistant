@@ -1045,15 +1045,7 @@ async def main():
             except Exception as e:
                 logging.error(f"Error signaling stop for listener {listener}: {e}")
 
-
-        # 4. Wait for Systray Thread
-        if 'systray_thread' in locals() and systray_thread.is_alive():
-            logging.info("Waiting for systray thread to exit...")
-            systray_thread.join(timeout=2.0) # Increased timeout slightly
-            if systray_thread.is_alive(): logging.warning("Systray thread did not exit cleanly.")
-            else: logging.info("Systray thread finished.")
-
-        # 5. Wait for Manager Threads
+        # 4. Wait for Manager Threads
         logging.info("Waiting for component manager threads to join...")
         for manager in managers_to_stop:
             try:
@@ -1065,7 +1057,7 @@ async def main():
                 logging.error(f"Error joining thread for {type(manager).__name__}: {e}")
         logging.info("Component manager threads joined.")
 
-        # 6. Wait for Input Listeners
+        # 5. Wait for Input Listeners
         logging.info("Waiting for input listeners to join...")
         for listener in listeners_to_stop:
              try:
@@ -1076,31 +1068,41 @@ async def main():
                   logging.error(f"Error joining listener {listener}: {e}")
         logging.info("Input listeners joined.")
 
-        # 7. Explicitly Stop and Close the Asyncio Loop
+        # 6. Wait for Systray Thread (Moved Later)
+        if 'systray_thread' in locals() and systray_thread.is_alive():
+            logging.info("Waiting for systray thread to exit...")
+            systray_thread.join(timeout=2.0) # Increased timeout slightly
+            if systray_thread.is_alive(): logging.warning("Systray thread did not exit cleanly.")
+            else: logging.info("Systray thread finished.")
+
+        # 7. Explicitly Cancel Remaining Asyncio Tasks (Replaces Stop/Close)
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
-                logging.debug("Stopping the running asyncio event loop...")
-                loop.stop()
-                # Allow loop to finish current iteration
-                await asyncio.sleep(0.1)
-                if not loop.is_closed():
-                    logging.debug("Closing the asyncio event loop...")
-                    loop.close()
-                    logging.info("Asyncio event loop closed.")
+                logging.debug("Cancelling any remaining asyncio tasks...")
+                tasks = asyncio.all_tasks(loop)
+                current_task = asyncio.current_task(loop)
+                tasks_to_cancel = [task for task in tasks if task is not current_task and not task.done()]
+
+                if tasks_to_cancel:
+                    logging.debug(f"Found {len(tasks_to_cancel)} tasks to cancel.")
+                    for task in tasks_to_cancel:
+                        task.cancel()
+
+                    # Give cancelled tasks a chance to run
+                    await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                    logging.debug("Gathered cancelled tasks.")
                 else:
-                    logging.debug("Asyncio event loop was already closed.")
+                    logging.debug("No remaining tasks needed cancellation.")
             else:
                 logging.debug("Asyncio event loop was not running.")
         except RuntimeError as e:
-            if "Cannot run the event loop while another loop is running" in str(e):
-                 logging.warning(f"Tried to manage loop but another seems active: {e}")
-            elif "There is no current event loop in thread" in str(e):
-                 logging.debug("No running asyncio event loop found to stop/close.")
+            if "no current event loop" in str(e).lower():
+                 logging.debug("No running asyncio event loop found to cancel tasks.")
             else:
-                logging.error(f"Error managing asyncio event loop shutdown: {e}", exc_info=True)
+                 logging.error(f"RuntimeError during task cancellation: {e}", exc_info=True)
         except Exception as e:
-            logging.error(f"Unexpected error during loop shutdown: {e}", exc_info=True)
+            logging.error(f"Unexpected error during task cancellation: {e}", exc_info=True)
 
         logging.info("Vibe App finished.")
 

@@ -357,8 +357,14 @@ def run_systray(exit_event_arg, config_manager_arg: ConfigManager):
         # Watch the config_reload_event
         def watch_reload():
             nonlocal local_translate_func # Ensure we use the correct func in the watcher too
+            logging.debug("Systray reload watcher thread started.") # Added start log
             while not exit_app_event.is_set():
-                if config_reload_event.wait(timeout=1.0): # Wait for event with timeout
+                # Check reload event with a very short timeout
+                reload_triggered = config_reload_event.wait(timeout=1)
+                if exit_app_event.is_set(): # Check exit event again after wait
+                    break
+
+                if reload_triggered:
                     logging.info("Systray detected config reload event. Rebuilding menu.")
                     try:
                         # Reload translations in case language changed

@@ -47,14 +47,14 @@
     },
     "modules": {
       "tooltip": "Afficher l'info-bulle",
-      "status_indicator": "Afficher l'indicateur",
+      "mic_ui_manager": "Afficher l'indicateur",
       "action_confirm": "Confirmer les actions",
       "translation": "Activer la traduction",
       "command_interpretation": "Interpréter les commandes",
       "audio_buffer": "Activer le tampon audio"
     }
   },
-  "status_indicator": {
+  "mic_ui_manager": {
       "none_target": "Aucune"
   },
   "dictation": {

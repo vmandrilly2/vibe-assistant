@@ -46,7 +46,7 @@
       "exit": "Выход"
     }
   },
-  "status_indicator": {
+  "mic_ui_manager": {
       "none_target": "Нет"
   }
 } 

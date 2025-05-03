@@ -46,7 +46,7 @@
       "exit": "終了"
     }
   },
-  "status_indicator": {
+  "mic_ui_manager": {
       "none_target": "なし"
   }
 } 

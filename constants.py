@@ -87,7 +87,7 @@ PYNPUT_KEY_MAP = {
 }
 
 # --- Language Definitions ---
-# Used by systray_ui, status_indicator, vibe_app
+# Used by systray_ui, mic_ui_manager, vibe_app
 
 # Full list for selection menus
 ALL_LANGUAGES = {
@@ -147,7 +147,7 @@ ALL_LANGUAGES_TARGET = {None: "Aucune"} # Start with None (translated via i18n i
 ALL_LANGUAGES_TARGET.update(ALL_LANGUAGES)
 
 # --- Mode Definitions ---
-# Used by systray_ui, status_indicator, vibe_app
+# Used by systray_ui, mic_ui_manager, vibe_app
 AVAILABLE_MODES = {
     MODE_DICTATION: "Dictation Mode", # Use MODE_DICTATION constant defined above
     MODE_COMMAND: "Command Mode",

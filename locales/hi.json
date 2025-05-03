@@ -46,7 +46,7 @@
       "exit": "बाहर निकलें"
     }
   },
-  "status_indicator": {
+  "mic_ui_manager": {
       "none_target": "कोई नहीं"
   }
 } 

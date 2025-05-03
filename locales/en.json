@@ -47,14 +47,14 @@
     },
     "modules": {
       "tooltip": "Show Tooltip",
-      "status_indicator": "Show Indicator",
+      "mic_ui_manager": "Show Indicator",
       "action_confirm": "Confirm Actions",
       "translation": "Enable Translation",
       "command_interpretation": "Interpret Commands",
       "audio_buffer": "Enable Audio Buffer"
     }
   },
-  "status_indicator": {
+  "mic_ui_manager": {
       "none_target": "None"
   }
 } 

@@ -7,7 +7,7 @@ import time # Keep time for logging/debugging if needed
 
 
 class ActionConfirmManager:
-    """Manages a Tkinter confirmation icon window for pending actions."""
+    """Shows a small UI element available for a short period of time for confirmation by hovering it. (e.g., "[Entrée]"), to perform an action such as typing or a executing acommand."""
     def __init__(self, command_q, action_q):
         """
         Args:

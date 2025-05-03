@@ -2,6 +2,11 @@ import json
 import os
 import logging
 
+"""Handles internationalization of the application.
+Localization Languages list: see locales/ folder.
+Below, dictation replacements are defined for French, and should be moved to french locale files. And equivalent replacements should be added for other languages.
+"""
+
 LOCALE_DIR = "locales"
 DEFAULT_LOCALE = "en" # Default language if selected one is not found
 

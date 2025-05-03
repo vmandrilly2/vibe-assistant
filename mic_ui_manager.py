@@ -32,7 +32,7 @@ MAX_RECENT_LANG_DISPLAY = 3 # How many recent languages to show in popups
 MAX_RECENT_TARGET_LANG_DISPLAY = 7
 MAX_MODE_DISPLAY = 3 # Max modes to pre-create labels for (adjust if more modes)
 
-class StatusIndicatorManager:
+class MicUIManager:
     """Manages a Tkinter status icon window (mode + mic icon + volume + languages)."""
     def __init__(self, q, action_q, config_manager, all_languages, all_languages_target, available_modes=None):
         self.queue = q
@@ -121,7 +121,7 @@ class StatusIndicatorManager:
             logging.warning("StatusIndicator Tkinter thread did not become ready.")
 
     def stop(self):
-        logging.debug("Stop requested for StatusIndicatorManager.")
+        logging.debug("Stop requested for MicUIManager.")
         self._stop_event.set()
         try:
             self.queue.put_nowait(("stop", None))

@@ -13,22 +13,8 @@ from pynput.keyboard import Key, KeyCode
 from constants import PYNPUT_KEY_MAP # Import from constants
 # --- MODIFICATION END ---
 
-# --- REMOVAL START ---
-# Placeholder for PYNPUT_KEY_MAP if not imported
-# PYNPUT_KEY_MAP = {
-#     "enter": Key.enter, "esc": Key.esc, "tab": Key.tab, "space": Key.space,
-#     "backspace": Key.backspace, "delete": Key.delete, "insert": Key.insert,
-#     "home": Key.home, "end": Key.end, "pageup": Key.page_up, "pagedown": Key.page_down,
-#     "up": Key.up, "down": Key.down, "left": Key.left, "right": Key.right,
-#     "shift": Key.shift, "ctrl": Key.ctrl, "alt": Key.alt, "cmd": Key.cmd,
-#     # Add other necessary keys from vibe_app.py's map here...
-#     "f1": Key.f1, # etc.
-#     "dot": ".", "comma": ",", # etc.
-# }
-# --- REMOVAL END ---
-
 class CommandProcessor:
-    """Handles interpretation and execution of spoken commands."""
+    """Handles interpretation and execution of spoken commands. NOT TESTED, NOT FULLY IMPLEMENTED YET"""
 
     def __init__(self, openai_manager, keyboard_sim, config_manager):
         """

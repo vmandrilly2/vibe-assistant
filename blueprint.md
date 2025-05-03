@@ -81,7 +81,7 @@ This file acts as both the project blueprint and a task manager. It outlines the
     *   [x] **Microphone Status/Volume/Language Indicator:**
         *   [x] Display mic icon near cursor when active (`tkinter`).
         *   [x] Dynamically show input volume level via icon fill (`numpy`, `pyaudio`).
-        *   [x] Manage indicator lifecycle/updates via a queue (`StatusIndicatorManager`).
+        *   [x] Manage indicator lifecycle/updates via a queue (`MicUIManager`).
         *   [x] Use background audio monitoring (`background_audio_recorder.py`) for continuous volume level.
         *   [x] Display current Source and Target languages next to the icon.
         *   [x] **Language Selection Popups:**

@@ -20,7 +20,7 @@ from config_manager import ConfigManager
 from action_confirm_ui import ActionConfirmManager
 import systray_ui # Import the run function and the reload event
 from background_audio_recorder import BackgroundAudioRecorder
-from status_indicator import StatusIndicatorManager, DEFAULT_MODES # Import DEFAULT_MODES
+from mic_ui_manager import MicUIManager, DEFAULT_MODES # Import DEFAULT_MODES
 from tooltip_manager import TooltipManager
 
 # --- Internationalization (i18n) Import >
@@ -573,7 +573,7 @@ async def main():
     status_mgr = None
     if status_indicator_enabled:
         # Pass config_manager instead of config dict
-        status_mgr = StatusIndicatorManager(status_queue, ui_action_queue,
+        status_mgr = MicUIManager(status_queue, ui_action_queue,
                                             config_manager=config_manager, # Pass manager
                                             all_languages=ALL_LANGUAGES,
                                             all_languages_target=ALL_LANGUAGES_TARGET,

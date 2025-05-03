@@ -6,22 +6,26 @@ import asyncio
 # from openai_manager import OpenAIManager
 # from keyboard_simulator import KeyboardSimulator
 from pynput.keyboard import Key, KeyCode
-
+# --- MODIFICATION START ---
 # Assuming PYNPUT_KEY_MAP is accessible, maybe move it to a shared constants file later?
 # Or pass it in during init. For now, we'll assume it's defined elsewhere or copied.
 # from vibe_app import PYNPUT_KEY_MAP # Example if it remains in vibe_app
+from constants import PYNPUT_KEY_MAP # Import from constants
+# --- MODIFICATION END ---
 
+# --- REMOVAL START ---
 # Placeholder for PYNPUT_KEY_MAP if not imported
-PYNPUT_KEY_MAP = {
-    "enter": Key.enter, "esc": Key.esc, "tab": Key.tab, "space": Key.space,
-    "backspace": Key.backspace, "delete": Key.delete, "insert": Key.insert,
-    "home": Key.home, "end": Key.end, "pageup": Key.page_up, "pagedown": Key.page_down,
-    "up": Key.up, "down": Key.down, "left": Key.left, "right": Key.right,
-    "shift": Key.shift, "ctrl": Key.ctrl, "alt": Key.alt, "cmd": Key.cmd,
-    # Add other necessary keys from vibe_app.py's map here...
-    "f1": Key.f1, # etc.
-    "dot": ".", "comma": ",", # etc.
-}
+# PYNPUT_KEY_MAP = {
+#     "enter": Key.enter, "esc": Key.esc, "tab": Key.tab, "space": Key.space,
+#     "backspace": Key.backspace, "delete": Key.delete, "insert": Key.insert,
+#     "home": Key.home, "end": Key.end, "pageup": Key.page_up, "pagedown": Key.page_down,
+#     "up": Key.up, "down": Key.down, "left": Key.left, "right": Key.right,
+#     "shift": Key.shift, "ctrl": Key.ctrl, "alt": Key.alt, "cmd": Key.cmd,
+#     # Add other necessary keys from vibe_app.py's map here...
+#     "f1": Key.f1, # etc.
+#     "dot": ".", "comma": ",", # etc.
+# }
+# --- REMOVAL END ---
 
 class CommandProcessor:
     """Handles interpretation and execution of spoken commands."""
@@ -43,7 +47,7 @@ class CommandProcessor:
         self.modules_config = self.config.get("modules", {})
         self.command_interpretation_enabled = self.modules_config.get("command_interpretation_enabled", False)
 
-        # TODO: Load/access PYNPUT_KEY_MAP more robustly
+        # Use the imported map
         self.key_map = PYNPUT_KEY_MAP
 
         logging.info("CommandProcessor initialized.")

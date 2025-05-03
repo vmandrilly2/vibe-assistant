@@ -51,29 +51,12 @@ except ImportError:
 from pynput import mouse, keyboard
 from pynput.keyboard import Key, KeyCode # Import KeyCode
 
-# --- NEW: Import Keyboard Simulator --- >
 from keyboard_simulator import KeyboardSimulator
-# --- End Import --- >
-
-# --- NEW: Import OpenAI Manager --- >
 from openai_manager import OpenAIManager
-# --- End Import --- >
-
-# --- NEW: Import Deepgram Manager --- >
 from deepgram_manager import DeepgramManager
-# --- End Import --- >
-
-# --- NEW: Import Dictation Processor --- >
 from dictation_processor import DictationProcessor
-# --- End Import --- >
-
-# --- NEW: Import Command Processor --- >
 from command_processor import CommandProcessor
-# --- End Import --- >
-
-# --- NEW: Import Tooltip Manager --- >
 from tooltip_manager import TooltipManager
-# --- End Import --- >
 
 # --- NEW: Import Constants ---
 from constants import (
@@ -315,12 +298,6 @@ if module_settings.get("translation_enabled", True) or module_settings.get("comm
         logging.warning("OpenAI API Key missing, but required by enabled modules (Translation/Command Interpretation). These features will fail.")
 else:
     logging.info("OpenAI client not initialized as Translation and Command Interpretation modules are disabled in config.")
-
-# --- NEW: Check if openai_manager is available --- >
-# if not openai_manager:
-#     logging.error("OpenAI Manager not available. Cannot process command input.")
-#     return
-# --- End Check --- >
 
 logging.info(f"Using Source Language: {SELECTED_LANGUAGE}")
 logging.info(f"Initial Active Mode: {ACTIVE_MODE}") # Log initial mode
@@ -827,19 +804,6 @@ def on_press(key):
             modifier_keys_pressed.add(key)
 
     try:
-        # --- Handle Esc during Command mode ---
-        # if is_command_active.is_set() and key == keyboard.Key.esc: # If Command mode is added
-        #     logging.info("ESC pressed during command - cancelling.")
-        #     is_command_active.clear()
-        #     transcription_active_event.clear() # Signal stop
-        #     # current_mode = "cancel" # Maybe set a different cancel flag?
-        #     ui_interaction_cancelled = True # Use cancel flag for now
-        #     # Hide Status Indicator
-        #     try:
-        #         # Send current mode when hiding for consistency
-        #         status_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}
-        #         status_queue.put_nowait(("state", status_data))
-        #     except queue.Full: logging.warning("Status queue full hiding indicator on ESC cancel.")
 
         # --- Handle Esc during ANY active mode (Optional: Cancel current action?) ---
         if transcription_active_event.is_set() and key == keyboard.Key.esc:

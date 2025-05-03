@@ -998,33 +998,109 @@ async def main():
         logging.info("Stopping Vibe App...")
         if not systray_ui.exit_app_event.is_set(): systray_ui.exit_app_event.set()
 
-        # Stop Modules Conditionally (Based on initial enabled state - stopping dynamically is harder)
-        if config_manager.get("modules.audio_buffer_enabled") and buffered_audio_input: buffered_audio_input.stop()
-        if config_manager.get("modules.tooltip_enabled") and tooltip_mgr: tooltip_mgr.stop()
-        if config_manager.get("modules.status_indicator_enabled") and status_mgr: status_mgr.stop()
-        if config_manager.get("modules.action_confirm_enabled") and action_confirm_mgr: action_confirm_mgr.stop()
-        logging.info("Component managers stop requested.")
+        # --- MODIFIED: More Robust Stop Sequence ---
 
-        # --- MODIFIED: Stop STT Manager --- >
-        if stt_mgr:
+        # 1. Stop Async Tasks First (like STT)
+        if 'stt_mgr' in locals() and stt_mgr:
              logging.info("Stopping STT Manager...")
              # Ensure listening is stopped cleanly
-             if stt_mgr.is_listening or (stt_mgr._connection_task and not stt_mgr._connection_task.done()):
-                 await stt_mgr.stop_listening()
-             logging.info("STT Manager stopped.")
+             try:
+                 # Check if a connection task is running and needs stopping
+                 if stt_mgr.is_listening or (stt_mgr._connection_task and not stt_mgr._connection_task.done()):
+                     # --- ADD TIMEOUT --- >
+                     stop_task = stt_mgr.stop_listening()
+                     await asyncio.wait_for(stop_task, timeout=3.0)
+                     logging.info("STT Manager stop_listening completed within timeout.")
+                     # --- END ADD TIMEOUT --- >
+                     # await stt_mgr.stop_listening() # stop_listening now handles cancellation and disconnect
+                 logging.info("STT Manager stopped.")
+             except asyncio.TimeoutError:
+                 logging.warning("Timeout (3s) waiting for STTManager to stop listening.")
+             except Exception as e:
+                 logging.error(f"Error stopping STT Manager: {e}")
+
+        # 2. Stop Thread-Based Managers (Signal them first)
+        managers_to_stop = []
+        if config_manager.get("modules.audio_buffer_enabled") and 'buffered_audio_input' in locals() and buffered_audio_input: managers_to_stop.append(buffered_audio_input)
+        if config_manager.get("modules.tooltip_enabled") and 'tooltip_mgr' in locals() and tooltip_mgr: managers_to_stop.append(tooltip_mgr)
+        if config_manager.get("modules.status_indicator_enabled") and 'status_mgr' in locals() and status_mgr: managers_to_stop.append(status_mgr)
+        if config_manager.get("modules.action_confirm_enabled") and 'action_confirm_mgr' in locals() and action_confirm_mgr: managers_to_stop.append(action_confirm_mgr)
+
+        logging.info("Signaling component managers to stop...")
+        for manager in managers_to_stop:
+            try:
+                manager.stop()
+            except Exception as e:
+                logging.error(f"Error signaling stop for {type(manager).__name__}: {e}")
+
+        # 3. Stop Input Listeners
+        listeners_to_stop = []
+        if 'mouse_listener' in locals() and mouse_listener.is_alive(): listeners_to_stop.append(mouse_listener)
+        if 'keyboard_listener' in locals() and keyboard_listener.is_alive(): listeners_to_stop.append(keyboard_listener)
+
+        logging.info("Signaling input listeners to stop...")
+        for listener in listeners_to_stop:
+            try:
+                listener.stop()
+            except Exception as e:
+                logging.error(f"Error signaling stop for listener {listener}: {e}")
 
 
-        # Wait for Systray
+        # 4. Wait for Systray Thread
         if 'systray_thread' in locals() and systray_thread.is_alive():
             logging.info("Waiting for systray thread to exit...")
-            systray_thread.join(timeout=1.0)
+            systray_thread.join(timeout=2.0) # Increased timeout slightly
             if systray_thread.is_alive(): logging.warning("Systray thread did not exit cleanly.")
             else: logging.info("Systray thread finished.")
 
-        # Stop Listeners
-        if 'mouse_listener' in locals() and mouse_listener.is_alive(): mouse_listener.stop()
-        if 'keyboard_listener' in locals() and keyboard_listener.is_alive(): keyboard_listener.stop()
-        logging.info("Input listeners stop requested.")
+        # 5. Wait for Manager Threads
+        logging.info("Waiting for component manager threads to join...")
+        for manager in managers_to_stop:
+            try:
+                if hasattr(manager, 'thread') and manager.thread and manager.thread.is_alive():
+                    manager.thread.join(timeout=1.0)
+                    if manager.thread.is_alive():
+                        logging.warning(f"{type(manager).__name__} thread did not join cleanly.")
+            except Exception as e:
+                logging.error(f"Error joining thread for {type(manager).__name__}: {e}")
+        logging.info("Component manager threads joined.")
+
+        # 6. Wait for Input Listeners
+        logging.info("Waiting for input listeners to join...")
+        for listener in listeners_to_stop:
+             try:
+                 listener.join(timeout=1.0)
+                 if listener.is_alive():
+                      logging.warning(f"Listener {listener} did not join cleanly.")
+             except Exception as e:
+                  logging.error(f"Error joining listener {listener}: {e}")
+        logging.info("Input listeners joined.")
+
+        # 7. Explicitly Stop and Close the Asyncio Loop
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                logging.debug("Stopping the running asyncio event loop...")
+                loop.stop()
+                # Allow loop to finish current iteration
+                await asyncio.sleep(0.1)
+                if not loop.is_closed():
+                    logging.debug("Closing the asyncio event loop...")
+                    loop.close()
+                    logging.info("Asyncio event loop closed.")
+                else:
+                    logging.debug("Asyncio event loop was already closed.")
+            else:
+                logging.debug("Asyncio event loop was not running.")
+        except RuntimeError as e:
+            if "Cannot run the event loop while another loop is running" in str(e):
+                 logging.warning(f"Tried to manage loop but another seems active: {e}")
+            elif "There is no current event loop in thread" in str(e):
+                 logging.debug("No running asyncio event loop found to stop/close.")
+            else:
+                logging.error(f"Error managing asyncio event loop shutdown: {e}", exc_info=True)
+        except Exception as e:
+            logging.error(f"Unexpected error during loop shutdown: {e}", exc_info=True)
 
         logging.info("Vibe App finished.")
 

@@ -8,15 +8,14 @@ import time # Need time for precise timestamps
 import i18n # Import the module
 from i18n import _ # Import the get_translation alias
 
-# --- Import Language Maps from Systray (Temporary Solution) --- >
-# Ideally, move these to a shared constants/config file later
+# --- Constants Import --- (Assuming constants.py exists)
 try:
-    from systray_ui import ALL_LANGUAGES, NATIVE_LANGUAGE_NAMES
+    from constants import ALL_LANGUAGES, NATIVE_LANGUAGE_NAMES # Import language maps
 except ImportError as e:
-    logging.error(f"Could not import language lists from systray_ui: {e}. Using fallbacks.")
-    # Fallback definitions in case systray_ui is not available or has issues
-    ALL_LANGUAGES = {"en-US": "English (US)", "fr-FR": "French"} # Minimal fallback
-    NATIVE_LANGUAGE_NAMES = {"en-US": "English (US)", "fr-FR": "Français"} # Minimal fallback
+    logging.error(f"StatusIndicator failed to import constants: {e}. Using fallbacks.")
+    # Fallback definitions
+    ALL_LANGUAGES = {"en-US": "English (US)", "fr-FR": "French"}
+    NATIVE_LANGUAGE_NAMES = {"en-US": "English (US)", "fr-FR": "Français"}
 
 # --- Define Mode Constants (can be shared with vibe_app.py) ---
 # It's slightly redundant defining them here and in vibe_app.py,
@@ -35,12 +34,12 @@ MAX_MODE_DISPLAY = 3 # Max modes to pre-create labels for (adjust if more modes)
 
 class StatusIndicatorManager:
     """Manages a Tkinter status icon window (mode + mic icon + volume + languages)."""
-    def __init__(self, q, action_q, config, all_languages, all_languages_target, available_modes=None):
+    def __init__(self, q, action_q, config_manager, all_languages, all_languages_target, available_modes=None):
         self.queue = q
         self.action_queue = action_q
         # --- No need to pass translation function explicitly, just use imported _ --- >
         # --- Store config and language maps --- >
-        self.config = config # Store the full config dict
+        self.config_manager = config_manager # Store the ConfigManager instance
         self.all_languages = all_languages
         self.all_languages_target = all_languages_target # Includes None
         # Use provided modes or default
@@ -109,7 +108,7 @@ class StatusIndicatorManager:
         self.popup_highlight_bg = "#ADD8E6" # Light Blue for better visibility
 
         # Font object with increased size
-        self.text_font_size = 12 # Increased font size
+        self.text_font_size = 10 # Keep size 10 for consistency?
         # --- Menus only enabled after hovering mic ---
         self.menus_enabled = False
         # --- Track if mic has been hovered since activation ---
@@ -230,7 +229,7 @@ class StatusIndicatorManager:
         # Clear old data for labels associated with *this* popup type
         keys_to_remove = [k for k, v in self.label_data.items() if v.get("popup") == self.mode_popup]
         for key in keys_to_remove:
-             del self.label_data[key]
+            if key in self.label_data: del self.label_data[key]
 
         for i, label in enumerate(self.mode_labels):
             if i < len(modes_to_display):
@@ -262,8 +261,12 @@ class StatusIndicatorManager:
         if lang_type == "source":
             # Get current source language to exclude it from the popup list
             current_source_lang = self.source_lang # Access the instance variable
-            recent_codes = self.config.get("general", {}).get("recent_source_languages", [])[:MAX_RECENT_LANG_DISPLAY]
-            for code in recent_codes:
+            # Ensure recent list exists and is a list
+            recent_source_languages_raw = self.config_manager.get("general.recent_source_languages", [])
+            if not isinstance(recent_source_languages_raw, list):
+                 logging.warning("StatusIndicator: recent_source_languages is not a list, using empty.")
+                 recent_source_languages_raw = []
+            for code in recent_source_languages_raw:
                 # Add only if it exists in the full list AND is not the currently selected one
                 if code in self.all_languages and code != current_source_lang:
                     # --- Use NATIVE name for source --- >
@@ -275,7 +278,10 @@ class StatusIndicatorManager:
             # --- Translate "None" --- >
             default_none_name = self.all_languages_target.get(None, "None")
             langs_to_display.append((None, _(f"language_names.none", default=default_none_name)))
-            recent_codes = self.config.get("general", {}).get("recent_target_languages", [])[:MAX_RECENT_TARGET_LANG_DISPLAY]
+            # Ensure recent list exists and is a list
+            recent_codes = self.config_manager.get("general.recent_target_languages", [])[:MAX_RECENT_TARGET_LANG_DISPLAY]
+            if not isinstance(recent_codes, list):
+                 logging.warning("StatusIndicator: recent_target_languages is not a list, using empty.")
             for code in recent_codes:
                  if code is not None and code in self.all_languages_target:
                      # --- Translate name --- >
@@ -285,7 +291,7 @@ class StatusIndicatorManager:
         # Clear old data for labels associated with *this* popup type
         keys_to_remove = [k for k, v in self.label_data.items() if v.get("popup") == popup]
         for key in keys_to_remove:
-             del self.label_data[key]
+            if key in self.label_data: del self.label_data[key]
 
         # --- Update existing labels --- >
         for i, label in enumerate(labels):

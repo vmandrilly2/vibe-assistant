@@ -120,6 +120,28 @@ ALL_LANGUAGES = {
 #     "fr-FR": "French",
 # }
 
+# --- NEW: Native Language Names ---
+# Store the name of the language *in that language*.
+# Fallback will be the English name from ALL_LANGUAGES if native is missing.
+NATIVE_LANGUAGE_NAMES = {
+    "en-US": "English (US)",
+    "en-GB": "English (UK)",
+    "fr-FR": "Français",
+    "es-ES": "Español",
+    "de-DE": "Deutsch",
+    "it-IT": "Italiano",
+    "pt-PT": "Português",
+    "pt-BR": "Português (Brasil)",
+    "ru-RU": "Русский",
+    "zh": "中文 (普通话)", # Simplified Chinese (Mandarin)
+    "ko-KR": "한국어",
+    "ja-JP": "Japanese", # No simple native name, using English
+    "hi-IN": "हिन्दी",
+    "ar": "العربية",
+    "nl-NL": "Nederlands",
+    # Add more as needed
+}
+
 # Target language list including the None option
 ALL_LANGUAGES_TARGET = {None: "Aucune"} # Start with None (translated via i18n if needed)
 ALL_LANGUAGES_TARGET.update(ALL_LANGUAGES)

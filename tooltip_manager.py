@@ -32,23 +32,27 @@ class TooltipManager:
         self._stop_event = threading.Event()
         self._tk_ready = threading.Event() # Signal when Tkinter root is ready
         self.active_tooltip_id = None # <<< NEW: Store the ID of the currently active tooltip
-        # --- Add config references ---
-        self._apply_tooltip_config(initial_config) # Apply initial config
+        # --- Store ConfigManager reference ---
+        self.config_manager = initial_config # Rename initial_config to config_manager for clarity
+        self._apply_tooltip_config() # Apply initial config using the manager
 
-    def _apply_tooltip_config(self, config_dict):
-        """Applies tooltip config from a dictionary to internal variables."""
-        tooltip_cfg = config_dict.get("tooltip", {})
-        # Use the global variables as FALLBACKS if keys missing, but prefer config_dict
-        self.alpha = float(tooltip_cfg.get("alpha", TOOLTIP_ALPHA))
-        self.bg_color = str(tooltip_cfg.get("bg_color", TOOLTIP_BG))
-        self.fg_color = str(tooltip_cfg.get("fg_color", TOOLTIP_FG))
-        self.font_family = str(tooltip_cfg.get("font_family", TOOLTIP_FONT_FAMILY))
-        self.font_size = int(tooltip_cfg.get("font_size", TOOLTIP_FONT_SIZE))
+    def _apply_tooltip_config(self):
+        """Applies tooltip config from the ConfigManager to internal variables."""
+        if not self.config_manager:
+            logging.error("TooltipManager: ConfigManager not available for applying config.")
+            return
+        # Read settings using the manager's get method
+        self.alpha = float(self.config_manager.get("tooltip.alpha", 0.85))
+        self.bg_color = str(self.config_manager.get("tooltip.bg_color", "lightyellow"))
+        self.fg_color = str(self.config_manager.get("tooltip.fg_color", "black"))
+        self.font_family = str(self.config_manager.get("tooltip.font_family", "Arial"))
+        self.font_size = int(self.config_manager.get("tooltip.font_size", 10))
         logging.debug(f"Tooltip config applied: Alpha={self.alpha}, BG={self.bg_color}, FG={self.fg_color}")
 
-    def reload_config(self, new_config_dict):
+    def reload_config(self, config_mgr): # Accepts the manager instance
         """Called when main config reloads to update tooltip appearance."""
-        self._apply_tooltip_config(new_config_dict)
+        self.config_manager = config_mgr # Update manager reference if needed
+        self._apply_tooltip_config() # Re-apply settings using the manager
         # If the window exists, update its attributes
         if self.root and self.label:
             try:

@@ -1,5 +1,3 @@
-# vibe_app.py
-
 import asyncio
 import os
 import threading
@@ -14,18 +12,16 @@ import sys # Import sys for exiting on critical config error
 import numpy as np # Import numpy
 import pyaudio     # Import PyAudio
 from openai import OpenAI, AsyncOpenAI # Use AsyncOpenAI for non-blocking calls
+
+# --- NEW: Import ConfigManager ---
+from config_manager import ConfigManager
+
+# --- UI Managers ---
 from action_confirm_ui import ActionConfirmManager
-
-# --- Systray UI Import ---
-# We need threading anyway, so let's use it for the systray
-# Import the run function and the reload event
-import systray_ui
-
-# --- Audio Buffer Import ---
+import systray_ui # Import the run function and the reload event
 from audio_buffer import BufferedAudioInput
-
-# --- Status Indicator Import (NEW) ---
 from status_indicator import StatusIndicatorManager, DEFAULT_MODES # Import DEFAULT_MODES
+from tooltip_manager import TooltipManager
 
 # --- Internationalization (i18n) Import >
 import i18n
@@ -51,20 +47,19 @@ except ImportError:
 from pynput import mouse, keyboard
 from pynput.keyboard import Key, KeyCode # Import KeyCode
 
+# --- Core Logic Managers/Processors ---
 from keyboard_simulator import KeyboardSimulator
 from openai_manager import OpenAIManager
 from deepgram_manager import DeepgramManager
 from dictation_processor import DictationProcessor
 from command_processor import CommandProcessor
-from tooltip_manager import TooltipManager
 
-# --- NEW: Import Constants ---
+# --- Constants ---
 from constants import (
     MODE_DICTATION, MODE_COMMAND, AVAILABLE_MODES,
     PYNPUT_BUTTON_MAP, PYNPUT_MODIFIER_MAP, PYNPUT_KEY_MAP,
     ALL_LANGUAGES, ALL_LANGUAGES_TARGET
 )
-# --- End Import ---
 
 from deepgram import (
     DeepgramClient,
@@ -74,246 +69,92 @@ from deepgram import (
     Microphone, # Import Microphone class
 )
 
-# --- Configuration Loading ---
-CONFIG_FILE = "config.json"
-LOG_DIR = "logs" # Define log directory
-DEFAULT_CONFIG = {
-  "general": {
-    "min_duration_sec": 0.5,
-    "selected_language": "en-US",
-    "target_language": None,
-    "openai_model": "gpt-4.1-nano",
-    "active_mode": "Dictation", # Added default active mode
-    "recent_source_languages": [], # Added for tracking
-    "recent_target_languages": []  # Added for tracking
-  },
-  "triggers": {
-    "dictation_button": "middle",
-    "command_button": None,
-    "command_modifier": None
-  },
-  "tooltip": {
-    "alpha": 0.85,
-    "bg_color": "lightyellow",
-    "fg_color": "black",
-    "font_family": "Arial",
-    "font_size": 10
-  },
-  # --- Added modules section ---
-  "modules": {
-    "tooltip_enabled": True,
-    "status_indicator_enabled": True,
-    "action_confirm_enabled": True,
-    "translation_enabled": True,
-    "command_interpretation_enabled": False, # Disabled by default
-    "audio_buffer_enabled": True # Added audio buffer toggle
-  }
-  # --- End added section ---
-}
+# --- Configuration Loading (REMOVED - Handled by ConfigManager) ---
+# CONFIG_FILE = "config.json" <-- REMOVED
+# DEFAULT_CONFIG = {...} <-- REMOVED
+# def load_config(): ... <-- REMOVED
+# def apply_config(cfg): ... <-- REMOVED
+# config = load_config() <-- REMOVED
 
-# --- Global Configurable Variables ---
-# These will be updated by apply_config()
-DICTATION_TRIGGER_BUTTON = None
-COMMAND_TRIGGER_BUTTON = None
-COMMAND_MODIFIER_KEY_STR = None
-COMMAND_MODIFIER_KEY = None
-MIN_DURATION_SEC = 0.5
-SELECTED_LANGUAGE = "en-US"
-TARGET_LANGUAGE = None
-OPENAI_MODEL = "gpt-4.1-nano"
-TOOLTIP_ALPHA = 0.85
-TOOLTIP_BG = "lightyellow"
-TOOLTIP_FG = "black"
-TOOLTIP_FONT_FAMILY = "Arial"
-TOOLTIP_FONT_SIZE = 10
-ACTIVE_MODE = MODE_DICTATION # Initialize with default
+# --- Global Configurable Variables (REMOVED - Use ConfigManager) ---
+# DICTATION_TRIGGER_BUTTON = None <-- REMOVED
+# COMMAND_TRIGGER_BUTTON = None <-- REMOVED
+# COMMAND_MODIFIER_KEY_STR = None <-- REMOVED
+# COMMAND_MODIFIER_KEY = None <-- REMOVED
+# MIN_DURATION_SEC = 0.5 <-- REMOVED
+# SELECTED_LANGUAGE = "en-US" <-- REMOVED
+# TARGET_LANGUAGE = None <-- REMOVED
+# OPENAI_MODEL = "gpt-4.1-nano" <-- REMOVED
+# TOOLTIP_ALPHA = 0.85 <-- REMOVED
+# TOOLTIP_BG = "lightyellow" <-- REMOVED
+# TOOLTIP_FG = "black" <-- REMOVED
+# TOOLTIP_FONT_FAMILY = "Arial" <-- REMOVED
+# TOOLTIP_FONT_SIZE = 10 <-- REMOVED
+# ACTIVE_MODE = MODE_DICTATION <-- REMOVED
 
 # --- NEW: State Variables for Dictation Flow ---
 last_interim_transcript = "" # Store the most recent interim result
-# --- REMOVED final_processed_this_session ---
 
+# --- Config Saving Function (REMOVED - Handled by ConfigManager) ---
+# def save_config_local(cfg_dict): ... <-- REMOVED
 
-def load_config():
-    """Loads configuration from JSON file, creates default if not found."""
-    if not os.path.exists(CONFIG_FILE):
-        logging.warning(f"{CONFIG_FILE} not found. Creating default config.")
-        try:
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(DEFAULT_CONFIG, f, indent=2)
-            return DEFAULT_CONFIG
-        except IOError as e:
-            logging.error(f"Unable to create default config file {CONFIG_FILE}: {e}")
-            # Return default anyway, but log the error
-            return DEFAULT_CONFIG
-    else:
-        try:
-            with open(CONFIG_FILE, 'r') as f:
-                loaded_config = json.load(f)
-                # --- Merge with defaults for missing keys/sections --- >
-                for section, defaults in DEFAULT_CONFIG.items():
-                    if section not in loaded_config:
-                        loaded_config[section] = defaults
-                    elif isinstance(defaults, dict):
-                        # --- Handle potential None value for loaded_config[section] --- >
-                        if loaded_config[section] is None:
-                           loaded_config[section] = {}
-                           logging.warning(f"Config section '{section}' was null, reset to empty dict.")
-                        # --- End Handle potential None --- >
-                        # --- NEW: Check if the loaded section is actually a dictionary before merging --- >
-                        if not isinstance(loaded_config.get(section), dict):
-                            logging.warning(f"Config section '{section}' is not a dictionary in the file. Resetting to default.")
-                            loaded_config[section] = defaults # Reset the whole section to the default dict
-                        else:
-                             # Now we know loaded_config[section] IS a dictionary, proceed with merging keys
-                             for key, default_value in defaults.items():
-                              # --- Use .get() for safer access within section --- >
-                              if key not in loaded_config[section]:
-                                  loaded_config[section][key] = default_value
-                # Ensure recent lists exist even if loading an old config
-                if "recent_source_languages" not in loaded_config.get("general", {}):
-                    loaded_config.setdefault("general", {})["recent_source_languages"] = []
-                if "recent_target_languages" not in loaded_config.get("general", {}):
-                    loaded_config.setdefault("general", {})["recent_target_languages"] = []
-                # --- Ensure modules section exists and is merged ---
-                if "modules" not in loaded_config:
-                     loaded_config["modules"] = DEFAULT_CONFIG["modules"]
-                else:
-                     if loaded_config["modules"] is None:
-                          loaded_config["modules"] = {}
-                          logging.warning("Config section 'modules' was null, reset to empty dict.")
-                     for key, default_value in DEFAULT_CONFIG["modules"].items():
-                         if key not in loaded_config.get("modules",{}): # Safely get modules dict
-                               loaded_config["modules"][key] = default_value
-                # --- End Ensure modules section ---
+# --- Initial Configuration Application (REPLACED) ---
+# Instantiate ConfigManager early
+config_manager = ConfigManager()
 
-                logging.info(f"Loaded and merged configuration from {CONFIG_FILE}")
-                return loaded_config
-        except json.JSONDecodeError as e:
-            logging.error(f"Error decoding {CONFIG_FILE}: {e}. Using default config.")
-            return DEFAULT_CONFIG
-        except IOError as e:
-            logging.error(f"Unable to read config file {CONFIG_FILE}: {e}. Using default config.")
-            return DEFAULT_CONFIG
-        except Exception as e:
-             logging.error(f"Unexpected error loading config: {e}. Using default config.")
-             return DEFAULT_CONFIG
-
-config = load_config()
-
-def apply_config(cfg):
-    """Applies the loaded configuration to the global variables."""
-    global DICTATION_TRIGGER_BUTTON, COMMAND_TRIGGER_BUTTON, COMMAND_MODIFIER_KEY_STR
-    global COMMAND_MODIFIER_KEY, MIN_DURATION_SEC, SELECTED_LANGUAGE
-    global TOOLTIP_ALPHA, TOOLTIP_BG, TOOLTIP_FG, TOOLTIP_FONT_FAMILY, TOOLTIP_FONT_SIZE
-    global TARGET_LANGUAGE, OPENAI_MODEL, ACTIVE_MODE # Add ACTIVE_MODE
-        # --- Action Confirmation Globals (NEEDED HERE!) --- >
-    global g_pending_action, g_action_confirmed
-
-    logging.info("Applying configuration...")
-    old_source_lang = SELECTED_LANGUAGE # Store old language
-    try:
-        # Triggers
-        triggers_cfg = cfg.get("triggers", {})
-        DICTATION_TRIGGER_BUTTON = PYNPUT_BUTTON_MAP.get(triggers_cfg.get("dictation_button", "middle"))
-        COMMAND_TRIGGER_BUTTON = PYNPUT_BUTTON_MAP.get(triggers_cfg.get("command_button"))
-        COMMAND_MODIFIER_KEY_STR = triggers_cfg.get("command_modifier")
-        COMMAND_MODIFIER_KEY = PYNPUT_MODIFIER_MAP.get(COMMAND_MODIFIER_KEY_STR)
-
-        # General
-        general_cfg = cfg.get("general", {})
-        MIN_DURATION_SEC = float(general_cfg.get("min_duration_sec", 0.5))
-        SELECTED_LANGUAGE = str(general_cfg.get("selected_language", "en-US"))
-        TARGET_LANGUAGE = general_cfg.get("target_language")
-        OPENAI_MODEL = str(general_cfg.get("openai_model", "gpt-4.1-nano"))
-        # Apply active mode, defaulting to Dictation if not found or invalid
-        loaded_mode = general_cfg.get("active_mode", MODE_DICTATION)
-        ACTIVE_MODE = loaded_mode if loaded_mode in AVAILABLE_MODES else MODE_DICTATION
-
-        # Tooltip
-        TOOLTIP_ALPHA = float(cfg.get("tooltip", {}).get("alpha", 0.85))
-        TOOLTIP_BG = str(cfg.get("tooltip", {}).get("bg_color", "lightyellow"))
-        TOOLTIP_FG = str(cfg.get("tooltip", {}).get("fg_color", "black"))
-        TOOLTIP_FONT_FAMILY = str(cfg.get("tooltip", {}).get("font_family", "Arial"))
-        TOOLTIP_FONT_SIZE = int(cfg.get("tooltip", {}).get("font_size", 10))
-
-        # --- Reload Translations if Source Language Changed --- >
-        if SELECTED_LANGUAGE != old_source_lang:
-            logging.info(f"Source language changed from {old_source_lang} to {SELECTED_LANGUAGE}. Reloading translations.")
-            # --- Add debug logging --- >
-            old_i18n_lang = i18n.get_current_language()
-            load_translations(SELECTED_LANGUAGE)
-            new_i18n_lang = i18n.get_current_language()
-            logging.debug(f"apply_config: i18n language after load_translations: {new_i18n_lang} (was {old_i18n_lang})")
-            sample_key = 'systray.menu.exit' # Use a known key
-            sample_translation = _(sample_key)
-            logging.debug(f"apply_config: Sample translation for '{sample_key}' in {new_i18n_lang}: '{sample_translation}'")
-            # --- End debug logging --- >
-            # TODO: Potentially signal StatusIndicator/Systray to update display names if needed?
-            # The systray rebuilds its menu anyway. StatusIndicator redraws on state change.
-
-        target_lang_str = TARGET_LANGUAGE if TARGET_LANGUAGE else "None"
-        logging.info(f"Config applied: Mode={ACTIVE_MODE}, SourceLang={SELECTED_LANGUAGE}, TargetLang={target_lang_str}, Model={OPENAI_MODEL}, Dictation={triggers_cfg.get('dictation_button', 'middle')}, ...")
-
-    except (ValueError, TypeError, KeyError) as e:
-        logging.error(f"Error applying configuration: {e}. Some settings may not be updated correctly.")
-        # Keep existing values or fall back to defaults? For now, just log.
-
-# --- Initial Configuration Application --- (After defining apply_config)
-load_dotenv() # Load environment variables from .env file (still used for API key)
+# Load environment variables (still needed for API keys)
+load_dotenv()
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # --- Load OpenAI Key ---
+
 if not DEEPGRAM_API_KEY:
     logging.critical("DEEPGRAM_API_KEY not found in environment variables or .env file. Exiting.")
     sys.exit(1)
-# --- Check for OpenAI Key (warn if missing, needed for translation) ---
+# --- Check for OpenAI Key (warn if missing, needed for translation/commands) ---
 if not OPENAI_API_KEY:
-    logging.warning("OPENAI_API_KEY not found in environment variables or .env file. Translation feature will be disabled.")
-    # Don't exit, allow other modes to work
+    # Check config if modules requiring OpenAI are enabled
+    translation_enabled = config_manager.get("modules.translation_enabled", True)
+    command_interp_enabled = config_manager.get("modules.command_interpretation_enabled", False)
+    if translation_enabled or command_interp_enabled:
+        logging.warning("OPENAI_API_KEY not found in environment variables or .env, but required by enabled modules (Translation/Command Interpretation). These features may fail.")
+    else:
+         logging.info("OPENAI_API_KEY not found, but not required by currently enabled modules.")
 
-# Apply the initially loaded config
-apply_config(config)
 # --- Load Initial Translations (Conditional) --- >
+initial_language = config_manager.get("general.selected_language", "en-US")
 if i18n_enabled:
-    load_translations(SELECTED_LANGUAGE)
+    load_translations(initial_language)
     logging.info(f"Initial translations loaded for language: {i18n.get_current_language()}")
 else:
     logging.info("Skipping initial translation loading as i18n is disabled.")
 
 # --- Initialize OpenAI Client (Conditional based on config) --- >
 openai_client = None
-# --- NEW: Initialize OpenAI Manager --- >
 openai_manager = None
-module_settings = config.get("modules", {})
 # Check both API key existence AND config setting
-if module_settings.get("translation_enabled", True) or module_settings.get("command_interpretation_enabled", False):
+translation_enabled = config_manager.get("modules.translation_enabled", True)
+command_interp_enabled = config_manager.get("modules.command_interpretation_enabled", False)
+if translation_enabled or command_interp_enabled:
     if OPENAI_API_KEY:
         try:
             openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-            # --- Instantiate the manager --- >
-            openai_manager = OpenAIManager(openai_client)
+            openai_manager = OpenAIManager(openai_client) # Instantiate the manager
             logging.info("OpenAI client and manager initialized (needed for Translation and/or Command Interpretation).")
         except Exception as e:
             logging.error(f"Failed to initialize OpenAI client or manager: {e}")
-    else:
-        logging.warning("OpenAI API Key missing, but required by enabled modules (Translation/Command Interpretation). These features will fail.")
+    # Warning about missing key logged earlier
 else:
     logging.info("OpenAI client not initialized as Translation and Command Interpretation modules are disabled in config.")
 
-logging.info(f"Using Source Language: {SELECTED_LANGUAGE}")
-logging.info(f"Initial Active Mode: {ACTIVE_MODE}") # Log initial mode
-# --- Log Target Language ---
-if TARGET_LANGUAGE:
-    logging.info(f"Translation Enabled: Target Language = {TARGET_LANGUAGE}, Model = {OPENAI_MODEL}")
-else:
-    logging.info("Translation Disabled (Target Language is None)")
-logging.info(f"Dictation Trigger: {config.get('triggers', {}).get('dictation_button', 'middle')}")
-if COMMAND_TRIGGER_BUTTON:
-    mod_str = f" + {COMMAND_MODIFIER_KEY_STR}" if COMMAND_MODIFIER_KEY else ""
-    logging.info(f"Command Trigger: {config.get('triggers', {}).get('command_button')}{mod_str}")
-else:
-    logging.info("Command Trigger: Disabled")
-
 # --- Logging Setup ---
+LOG_DIR = "logs" # Define log directory
+# Ensure logs directory exists
+if not os.path.exists(LOG_DIR):
+    try:
+        os.makedirs(LOG_DIR)
+    except OSError as e:
+        print(f"Error creating log directory {LOG_DIR}: {e}")
+
 # Include milliseconds in timestamp
 log_formatter = logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s: %(message)s', datefmt='%H:%M:%S')
 log_level = logging.DEBUG
@@ -346,6 +187,28 @@ if file_handler:
     root_logger.addHandler(file_handler)
     logging.info("File logging configured to vibe_app.log")
 
+
+# --- Initial Logging of Settings (Using ConfigManager) --- >
+logging.info(f"Using Source Language: {config_manager.get('general.selected_language', 'N/A')}")
+logging.info(f"Initial Active Mode: {config_manager.get('general.active_mode', 'N/A')}")
+target_lang_code = config_manager.get('general.target_language', None)
+openai_model_name = config_manager.get('general.openai_model', 'N/A')
+if target_lang_code:
+    logging.info(f"Translation Enabled: Target Language = {target_lang_code}, Model = {openai_model_name}")
+else:
+    logging.info("Translation Disabled (Target Language is None)")
+dictation_button_name = config_manager.get('triggers.dictation_button', 'middle')
+logging.info(f"Dictation Trigger: {dictation_button_name}")
+command_button_name = config_manager.get('triggers.command_button', None)
+command_mod_name = config_manager.get('triggers.command_modifier', None)
+if command_button_name:
+    mod_str = f" + {command_mod_name}" if command_mod_name else ""
+    logging.info(f"Command Trigger: {command_button_name}{mod_str}")
+else:
+    logging.info("Command Trigger: Disabled")
+# --- End Initial Logging ---
+
+
 # --- Modifier Key Logging Buffer ---
 modifier_log_buffer = []
 modifier_log_last_time = 0
@@ -359,42 +222,36 @@ def flush_modifier_log(force=False):
         modifier_log_last_time = time.time()
 
 # --- Global State ---
-is_command_active = threading.Event() # Keep for potential command mode later
+is_command_active = threading.Event() # Keep for potential command mode later (DEPRECATED? ACTIVE_MODE replaces?)
 transcription_active_event = threading.Event() # True if any trigger is active
-current_activation_id = None # <<< NEW: ID for the current transcription activation
+current_activation_id = None # <<< ID for the current transcription activation
 tooltip_queue = queue.Queue()
 status_queue = queue.Queue()
 modifier_keys_pressed = set()
 ui_action_queue = queue.Queue()
-# --- NEW: Queue for Action Confirmation UI --- >
+# --- Queue for Action Confirmation UI --- >
 action_confirm_queue = queue.Queue()
 ui_interaction_cancelled = False # Flag specifically for UI hover interactions
-initial_activation_pos = None
+initial_activation_pos = None # Position where activation started
+start_time = None # Timestamp when activation started
 
-# --- NEW: State for Pending Action Confirmation --- >
+# --- State for Pending Action Confirmation --- >
 g_pending_action = None      # Stores the name of the action detected (e.g., "Enter")
 g_action_confirmed = False # Set by the confirmation UI via action_queue
 
-# --- Keyboard Controller (REMOVED - Handled by KeyboardSimulator) ---
-# kb_controller = keyboard.Controller()
-
 # --- State for Dictation Typing Simulation ---
-last_simulated_text = "" # Store the transcript corresponding to the last simulation action
+# last_simulated_text = "" # REMOVED - No longer directly used this way
 typed_word_history = [] # Store history of typed words
 final_source_text = "" # Store final source text from dictation *before* potential translation
 
 # --- State for Command Mode ---
-current_command_transcript = "" # Store the transcript for command mode
+# current_command_transcript = "" # REMOVED - Use final_command_text
 last_command_executed = None # For potential undo feature
-
-# --- State for Keyboard Input Mode ---
-final_command_text = "" # Renamed from final_keyboard_input_text
+final_command_text = "" # Store the transcript for command mode
 
 # --- REFACTORED: Now calls DictationProcessor --- >
 def handle_dictation_interim(dictation_processor: DictationProcessor, transcript, activation_id):
-    """Handles interim dictation results by displaying them in a temporary tooltip
-       for a specific activation ID.
-    """
+    """Handles interim dictation results by calling the processor."""
     if dictation_processor:
         dictation_processor.handle_interim(transcript, activation_id)
     else:
@@ -402,318 +259,198 @@ def handle_dictation_interim(dictation_processor: DictationProcessor, transcript
 
 # --- REFACTORED: Now calls DictationProcessor and handles returned values --- >
 def handle_dictation_final(dictation_processor: DictationProcessor, final_transcript, history, activation_id):
-    """Handles the final dictation transcript segment based on history.
-    Calls DictationProcessor to perform calculations, typing, and action detection.
-    Updates local state (history, pending action) based on processor results.
-
-    Returns:
-        tuple: (updated_history_list, final_text_string_typed)
-               The updated history and the text string typed by the processor.
+    """Handles the final dictation transcript segment via DictationProcessor.
+       Updates local state (history, pending action) based on processor results.
     """
-    # --- Action Confirmation Globals (Needed for updating pending action) --- >
-    global g_pending_action, g_action_confirmed
-
+    global g_pending_action, g_action_confirmed, final_source_text, typed_word_history # Need to update these globals
     logging.debug(f"Handling final dictation segment '{final_transcript}' via processor (Activation ID: {activation_id})")
-
     if dictation_processor:
         try:
-            # Call the processor to handle the final transcript
             new_history, text_typed, detected_action = dictation_processor.handle_final(
                 final_transcript, history, activation_id
             )
-
-            # --- Update global state if an action was detected --- >
+            # --- Update global state based on processor results --- >
+            typed_word_history = new_history # Update history tracked in vibe_app
+            final_source_text = " ".join([entry['text'] for entry in typed_word_history]) # Recalculate final source text
             if detected_action:
                 logging.info(f"DictationProcessor detected action: '{detected_action}'")
-                # The processor should have already triggered the UI via action_confirm_queue
-                # We just need to store it locally for potential later use (though UI handles confirmation)
-                g_pending_action = detected_action
+                g_pending_action = detected_action # Store pending action
                 g_action_confirmed = False # Reset confirmation status
             else:
-                # If no action was detected by the processor, ensure pending action is cleared
-                # (in case a previous segment had one that wasn't confirmed/cancelled)
+                # Clear pending action if current segment has none
                 if g_pending_action:
                     logging.debug("Clearing previously pending action as new final transcript has no action.")
                     g_pending_action = None
                     g_action_confirmed = False
-
-            # Return the results from the processor
+            # Return values are not explicitly used by caller in current flow, but useful for logging/debug
             return new_history, text_typed
-
         except Exception as e:
             logging.error(f"Error calling DictationProcessor.handle_final: {e}", exc_info=True)
-            # Return original history and empty typed string on error
-            return history, ""
+            return history, "" # Return original history on error
     else:
         logging.error("DictationProcessor instance not available in handle_dictation_final")
-        # Return original history and empty typed string if processor is missing
-        return history, ""
+        return history, "" # Return original history if processor is missing
 
-# --- Translation Function ---
-async def translate_and_type(text_to_translate, source_lang_code, target_lang_code):
+# --- Translation Function (Modified to accept config_manager) ---
+async def translate_and_type(text_to_translate, source_lang_code, target_lang_code, config_mgr: ConfigManager, kb_sim: KeyboardSimulator, openai_mgr: OpenAIManager):
     """Translates text using OpenAI and types the result."""
-    # Access the global manager instance
-    global openai_manager, keyboard_sim, OPENAI_MODEL, module_settings
-
-    # --- Check if openai_manager is available --- >
-    if not openai_manager:
+    if not openai_mgr:
         logging.error("OpenAI Manager not available. Cannot translate.")
-        if keyboard_sim: # Check if keyboard sim is available too
-             keyboard_sim.simulate_typing(" [Translation Error: OpenAI Manager not initialized]")
-        return # This return is inside the async function
-    # --- End Check --- >
+        if kb_sim:
+            kb_sim.simulate_typing(" [Translation Error: OpenAI Manager not initialized]")
+        return
+    if not kb_sim:
+        logging.error("KeyboardSimulator not available. Cannot type translation.")
+        return
+    if not config_mgr:
+        logging.error("ConfigManager not available. Cannot get translation settings.")
+        return
 
     if not text_to_translate:
         logging.warning("No text provided for translation.")
         return
     if not source_lang_code or not target_lang_code:
         logging.error(f"Missing source ({source_lang_code}) or target ({target_lang_code}) language for translation.")
-        # Use keyboard_simulator instance
-        keyboard_sim.simulate_typing(" [Translation Error: Language missing]")
+        kb_sim.simulate_typing(" [Translation Error: Language missing]")
         return
     if source_lang_code == target_lang_code:
          logging.info("Source and target languages are the same, skipping translation call.")
-         return # No need to translate if languages match
+         return
 
-    # Get full language names for the prompt (optional, but potentially helpful for the model)
-    # Using TARGET_LANGUAGE_OPTIONS from systray might be fragile if systray isn't imported/run
-    # Let's stick to codes for now, or define a local map if needed.
-    source_lang_name = source_lang_code # Or lookup full name
-    target_lang_name = target_lang_code # Or lookup full name
+    openai_model_name = config_mgr.get("general.openai_model", "gpt-4o-mini") # Get model from config
 
-    logging.info(f"Requesting translation from '{source_lang_name}' to '{target_lang_name}' for: '{text_to_translate}' using model '{OPENAI_MODEL}'")
-    # Indicate translation is starting *after* the source text's trailing space
-    # Use keyboard_simulator instance
-    keyboard_sim.simulate_typing("-> ") # Add space after arrow
+    source_lang_name = source_lang_code # Use code for prompt simplicity
+    target_lang_name = target_lang_code
+
+    logging.info(f"Requesting translation from '{source_lang_name}' to '{target_lang_name}' for: '{text_to_translate}' using model '{openai_model_name}'")
+    kb_sim.simulate_typing("-> ") # Add space after arrow
 
     try:
         prompt = f"Translate the following text accurately from {source_lang_name} to {target_lang_name}. Output only the translated text:\n\n{text_to_translate}"
-
-        # --- Call the generic method in OpenAIManager --- >
-        translated_text = await openai_manager.get_openai_completion(
-            model=OPENAI_MODEL,
+        translated_text = await openai_mgr.get_openai_completion(
+            model=openai_model_name,
             messages=[
                 {"role": "system", "content": "You are an expert translation engine."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
             max_tokens=int(len(text_to_translate) * 2.5 + 50)
-            # No response_format needed for translation
         )
-        # --- End Call --- >
 
-        # --- Check if response is None (indicating an API error) --- >
         if translated_text is None:
             logging.error("Failed to get translation from OpenAI.")
-            keyboard_sim.simulate_typing(f"[Translation Error: API Call Failed]")
+            kb_sim.simulate_typing(f"[Translation Error: API Call Failed]")
             return
-        # --- End Check --- >
 
         logging.info(f"Translation received: '{translated_text}'")
-
         if translated_text:
-            # Type the translation, followed by a space for subsequent typing
-            # Use keyboard_simulator instance
-            keyboard_sim.simulate_typing(translated_text + " ")
+            kb_sim.simulate_typing(translated_text + " ")
         else:
             logging.warning("OpenAI returned an empty translation.")
-            # Use keyboard_simulator instance
-            keyboard_sim.simulate_typing("[Translation Empty] ")
-
+            kb_sim.simulate_typing("[Translation Empty] ")
     except Exception as e:
         logging.error(f"Error during OpenAI translation request: {e}", exc_info=True)
-        # Use keyboard_simulator instance
-        keyboard_sim.simulate_typing(f"[Translation Error: {type(e).__name__}] ")
+        kb_sim.simulate_typing(f"[Translation Error: {type(e).__name__}] ")
 
-
-# --- Deepgram Event Handlers ---
-async def on_open(self, open, **kwargs):
-    logging.info("Deepgram connection opened.")
-    # --- MODIFIED: Update status indicator to CONNECTED --- >
-    try:
-        if status_mgr and status_mgr.thread.is_alive():
-            # Send "connected" to signify successful connection
-            status_mgr.queue.put_nowait(("connection_update", {"status": "connected"}))
-    except queue.Full:
-        logging.warning("Status queue full sending connection_update=connected on open.")
-    except Exception as e:
-        logging.error(f"Error sending status update on DG open: {e}")
-
-async def on_message(self, result, **kwargs):
-    global typed_word_history, final_source_text, final_command_text # Renamed final_keyboard_input_text
-    # --- ADDED GLOBALS ---
-    global last_interim_transcript # REMOVED final_processed_this_session
-    try:
-        transcript = result.channel.alternatives[0].transcript
-        # --- NEW: Log the raw transcript with representation ---
-        logging.debug(f"Raw transcript received: {transcript!r}") # Use !r to see representation
-        if not transcript:
-            return
-
-        # Determine action based on the globally set ACTIVE_MODE
-        if ACTIVE_MODE == MODE_DICTATION:
-            if result.is_final:
-                logging.debug(f"Processing final dictation result: '{transcript}'")
-                # --- Apply replacements BEFORE handling final --- >
-                # Comment out the premature replacement call
-                # processed_transcript = apply_dictation_replacements(transcript, SELECTED_LANGUAGE)
-                # Pass the ORIGINAL transcript and activation ID instead of the processed one
-                updated_history, text_typed_this_segment = handle_dictation_final(transcript, typed_word_history, current_activation_id)
-                typed_word_history = updated_history
-                # Update final_source_text based on the potentially modified history
-                final_source_text = " ".join([entry['text'] for entry in typed_word_history])
-                logging.debug(f"Dictation final source text updated (from history): '{final_source_text}'")
-                # --- End Apply replacements --- >
-
-                last_interim_transcript = "" # Clear interim after processing a final part
-            else:
-                # --- Update last interim transcript ---
-                last_interim_transcript = transcript
-                # --- Call interim handler (as before) ---
-                # Pass the current activation ID
-                handle_dictation_interim(transcript, current_activation_id)
-
-        elif ACTIVE_MODE == MODE_COMMAND: # Renamed from MODE_KEYBOARD
-            # Command mode might only care about the final result
-            if result.is_final:
-                 # --- Call renamed handler ---
-                 # The task creation will happen in the stop flow, just store it here
-                 final_command_text = transcript # Store for later processing
-                 logging.debug(f"Stored final transcript for Command Mode: '{final_command_text}'")
-            else:
-                 # Optional: Show interim results in tooltip for command mode too?
-                 handle_dictation_interim(transcript, current_activation_id) # Reuse tooltip for now
-                 # pass # Or do nothing for interim in command mode
-
-        # elif ACTIVE_MODE == MODE_COMMAND: # This logic block is now MODE_COMMAND
-        #    if result.is_final: handle_command_final(transcript) # handle_command_final is now the main one
-        #    else: handle_command_interim(transcript)
-
-    except (AttributeError, IndexError) as e:
-        logging.error(f"Error processing Deepgram message: {e} - Result: {result}")
-    except Exception as e: # Catch potential errors from handlers
-        logging.error(f"Unhandled error in on_message handler: {e}", exc_info=True)
-
-async def on_metadata(self, metadata, **kwargs):
-    logging.debug(f"Deepgram Metadata: {metadata}")
-
-async def on_speech_started(self, speech_started, **kwargs):
-    logging.debug("Deepgram Speech Started")
-
-async def on_utterance_end(self, utterance_end, **kwargs):
-    logging.debug("Deepgram Utterance Ended")
-
-async def on_error(self, error, **kwargs):
-    logging.error(f"Deepgram Handled Error: {error}")
-    # --- NEW: Update status indicator to ERROR --- >
-    # --- MODIFIED: Update status indicator to ERROR --- >
-    try:
-        if status_mgr and status_mgr.thread.is_alive():
-            status_mgr.queue.put_nowait(("connection_update", {"status": "error"}))
-    except queue.Full:
-        logging.warning("Status queue full sending connection_update=error on DG error.")
-    except Exception as e:
-        logging.error(f"Error sending status update on DG error: {e}")
-
-async def on_close(self, close, **kwargs):
-    logging.info("Deepgram connection closed.")
-    # --- NEW: Optionally set status to idle on close if not error --- >
-    # Check current status *before* setting to idle
-    # Avoid reverting an 'error' state back to 'idle' on close.
-    try:
-        # --- Add check: Only send if status_mgr exists --- >
-        if status_mgr and status_mgr.thread.is_alive():
-            # Only reset to idle if the status wasn't already error
-            # This requires accessing the status indicator's state, which is tricky.
-            # Let's simplify: Assume a close means idle unless an error already occurred.
-            # The main loop will handle setting error state more reliably.
-            # Let's *not* set to idle here, let the main loop manage idle state.
-            pass # status_mgr.queue.put_nowait(("connection_update", {"status": "idle"}))
-    except Exception as e:
-        logging.error(f"Error sending status update on DG close: {e}")
-
-async def on_unhandled(self, unhandled, **kwargs):
-    logging.warning(f"Deepgram Unhandled Websocket Message: {unhandled}")
 
 # --- Pynput Listener Callbacks ---
+# Keep global config_manager accessible to callbacks
 def on_click(x, y, button, pressed):
-    # Use transcription_active_event as the main gatekeeper
-    global start_time, status_queue, ui_interaction_cancelled, ui_action_queue # ADDED ui_action_queue
-    global transcription_active_event # Use this event
-    global typed_word_history, final_source_text, final_command_text # Renamed
-    global SELECTED_LANGUAGE, TARGET_LANGUAGE, ACTIVE_MODE
-    global initial_activation_pos
-    global status_mgr
-    # --- Action Confirmation Globals --- >
+    global start_time, status_queue, ui_interaction_cancelled, ui_action_queue
+    global transcription_active_event, typed_word_history, final_source_text, final_command_text
+    global initial_activation_pos, status_mgr # Need status_mgr for hover checks
     global g_pending_action, g_action_confirmed, action_confirm_queue
+    global last_interim_transcript, current_activation_id # Need current_activation_id
 
-    # --- ADDED GLOBALS ---
-    global last_interim_transcript # REMOVED final_processed_this_session
+    # --- Get current mode and trigger buttons from ConfigManager --- >
+    active_mode = config_manager.get("general.active_mode", MODE_DICTATION)
+    dictation_button_name = config_manager.get("triggers.dictation_button", "middle")
+    command_button_name = config_manager.get("triggers.command_button", None)
+    command_mod_name = config_manager.get("triggers.command_modifier", None)
+    dictation_trigger_button = PYNPUT_BUTTON_MAP.get(dictation_button_name)
+    command_trigger_button = PYNPUT_BUTTON_MAP.get(command_button_name)
+    command_mod_key = PYNPUT_MODIFIER_MAP.get(command_mod_name)
 
-    # Determine trigger based only on DICTATION_TRIGGER_BUTTON for now
-    is_primary_trigger = (button == DICTATION_TRIGGER_BUTTON)
-    # TODO: Re-add command trigger logic if needed (e.g., check button == COMMAND_TRIGGER_BUTTON and modifiers)
+    # --- Determine if this click is a valid trigger --- >
+    is_trigger = False
+    trigger_mode = None
+    # Check dictation trigger
+    if button == dictation_trigger_button:
+        is_trigger = True
+        trigger_mode = MODE_DICTATION
+    # Check command trigger (only if different from dictation trigger)
+    elif button == command_trigger_button and command_trigger_button is not None and command_trigger_button != dictation_trigger_button:
+        # Check modifier if required
+        if command_mod_key:
+            if all(m in modifier_keys_pressed for m in ([command_mod_key] if not isinstance(command_mod_key, list) else command_mod_key)):
+                 is_trigger = True
+                 trigger_mode = MODE_COMMAND
+        else: # No modifier required for command button
+            is_trigger = True
+            trigger_mode = MODE_COMMAND
 
-    if not is_primary_trigger:
-        return
+    if not is_trigger:
+        return # Not a relevant click event
 
     # --- Handle Press ---
     if pressed:
+        # --- Set the *actual* active mode based on which trigger was pressed --- >
+        # This overrides the config setting if both triggers are configured and command is pressed
+        # TODO: Revisit this logic - should pressing command trigger *change* the mode in config?
+        # For now, let's respect the trigger used for the *current* activation, but keep config mode separate.
+        current_session_mode = trigger_mode # Use the mode determined by the trigger for this session
+
         ui_interaction_cancelled = False # Reset flag on new press
         if not transcription_active_event.is_set():
-            logging.info(f"Trigger button pressed - starting mode: {ACTIVE_MODE}.")
-            # Clear specific state based on ACTIVE_MODE
-            if ACTIVE_MODE == MODE_DICTATION:
+            logging.info(f"Trigger button pressed - starting mode: {current_session_mode}.")
+            # Clear specific state based on the mode being activated
+            if current_session_mode == MODE_DICTATION:
                 typed_word_history.clear()
                 final_source_text = ""
-                last_interim_transcript = "" # Reset interim transcript
-                # final_processed_this_session = False # REMOVED - No longer used
-            elif ACTIVE_MODE == MODE_COMMAND: final_command_text = "" # Renamed mode and variable
-            # elif ACTIVE_MODE == MODE_COMMAND: current_command_transcript = "" # Already handled above
+                last_interim_transcript = ""
+            elif current_session_mode == MODE_COMMAND:
+                final_command_text = ""
 
             # Set general active flag and time/pos
             transcription_active_event.set()
             start_time = time.time()
-            current_activation_id = time.monotonic() # <<< NEW: Generate unique ID
+            current_activation_id = time.monotonic() # Generate unique ID for this activation
             initial_activation_pos = (x, y)
             logging.debug(f"Stored initial activation position: {initial_activation_pos} with ID: {current_activation_id}")
 
-            # --- Send START command to main loop's queue --- >
-            # --- MODIFIED: Send specific command to initiate connection --- >
+            # --- Send command to main loop's queue to initiate connection --- >
             try:
-                # ui_action_queue.put_nowait(("start_transcription", None))
-                ui_action_queue.put_nowait(("initiate_dg_connection", {"activation_id": current_activation_id}))
-                # logging.debug("Sent start_transcription command to main loop queue.")
-                logging.debug(f"Sent initiate_dg_connection command for ID {current_activation_id} to main loop queue.")
+                ui_action_queue.put_nowait(("initiate_dg_connection", {"activation_id": current_activation_id, "mode": current_session_mode}))
+                logging.debug(f"Sent initiate_dg_connection command for ID {current_activation_id} (Mode: {current_session_mode}) to main loop queue.")
             except queue.Full:
                 logging.error("UI Action Queue full! Cannot send initiate_dg_connection command.")
-                # If queue is full, something is wrong, maybe clear the event?
-                transcription_active_event.clear()
+                transcription_active_event.clear() # Cancel if queue is full
 
-            # --- Send status update to indicator AFTER sending start command ---
+            # --- Send status update to indicator --- >
             try:
-                # Send current ACTIVE_MODE to status indicator
+                # Send current ACTIVE_MODE (from config) and language config to status indicator
+                current_source_lang = config_manager.get("general.selected_language", "en-US")
+                current_target_lang = config_manager.get("general.target_language", None)
                 status_data = {"state": "active", "pos": initial_activation_pos,
-                               "mode": ACTIVE_MODE,
-                               "source_lang": SELECTED_LANGUAGE, "target_lang": TARGET_LANGUAGE,
-                               "connection_status": "connecting"} # <-- ADD initial connecting status
+                               "mode": active_mode, # Display mode from config
+                               "source_lang": current_source_lang,
+                               "target_lang": current_target_lang,
+                               "connection_status": "connecting"} # Initial connecting status
                 status_queue.put_nowait(("state", status_data))
             except queue.Full: logging.warning("Status queue full showing indicator.")
             except Exception as e: logging.error(f"Error sending initial state to status indicator: {e}")
-        else: logging.warning(f"Attempted start {ACTIVE_MODE} while already active.")
+        else:
+            logging.warning(f"Attempted start {current_session_mode} while already active.")
 
     # --- Handle Release ---
     else:
-        # Only process release if a transcription was active
         if not transcription_active_event.is_set():
-             return
+             return # Ignore release if not active
 
-        # --- Check for UI Interaction (Hover Selection) FIRST --- >
-        # Check hover state from status manager for potential actions
+        # Check for UI Interaction (Hover Selection) FIRST
         hover_mode = None
         hover_lang_type = None
         hover_lang_code = None
-        # --- MODIFIED: Use the more precise hovered_data if available --- >
         if status_mgr and hasattr(status_mgr, 'hovered_data') and status_mgr.hovered_data:
             hover_data = status_mgr.hovered_data
             if hover_data.get("type") == "mode":
@@ -722,173 +459,122 @@ def on_click(x, y, button, pressed):
                 hover_lang_type = hover_data.get("type")
                 hover_lang_code = hover_data.get("value")
 
-        # --- Process Hover Selection if Found --- >
+        # Process Hover Selection if Found
         if hover_mode:
             logging.info(f"Trigger release over mode option: {hover_mode}. Selecting mode.")
             try: ui_action_queue.put_nowait(("select_mode", hover_mode))
             except queue.Full: logging.warning(f"Action queue full sending hover mode selection ({hover_mode}).")
-            ui_interaction_cancelled = True # Signal cancellation of normal stop flow
+            ui_interaction_cancelled = True
             logging.debug("Set ui_interaction_cancelled flag due to mode hover selection.")
-            # --- Send selection confirmation to StatusIndicator for blink/hide ---
             try:
                  selection_data = {"type": "mode", "value": hover_mode}
                  status_queue.put_nowait(("selection_made", selection_data))
             except queue.Full: logging.warning(f"Status queue full sending selection confirmation.")
-            # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
-            # --- ALSO Do NOT hide UI here - let StatusIndicator handle it via 'selection_made'
-            # --- ADD: Clear the event here as well to signal stop flow --- >
-            transcription_active_event.clear()
-            return # Exit callback early
+            transcription_active_event.clear() # Clear event to signal stop
+            return
 
         elif hover_lang_type and (hover_lang_code is not None or (hover_lang_type == 'target' and hover_lang_code is None)):
             logging.info(f"Trigger release over language option: Type={hover_lang_type}, Code={hover_lang_code}. Selecting language.")
             try: ui_action_queue.put_nowait(("select_language", {"type": hover_lang_type, "lang": hover_lang_code}))
-            except queue.Full: logging.warning(f"Action queue full sending hover language selection ({hover_lang_type}={hover_lang_code}).")
-            ui_interaction_cancelled = True # Signal cancellation of normal stop flow
+            except queue.Full: logging.warning(f"Action queue full sending hover language selection.")
+            ui_interaction_cancelled = True
             logging.debug("Set ui_interaction_cancelled flag due to language hover selection.")
-            # --- Send selection confirmation to StatusIndicator for blink/hide ---
             try:
                  selection_data = {"type": "language", "lang_type": hover_lang_type, "value": hover_lang_code}
                  status_queue.put_nowait(("selection_made", selection_data))
             except queue.Full: logging.warning(f"Status queue full sending selection confirmation.")
-            # --- CRITICAL: Do NOT clear events here, let main loop handle based on flag ---
-            # --- ALSO Do NOT hide UI here - let StatusIndicator handle it via 'selection_made'
-            # --- ADD: Clear the event here as well to signal stop flow --- >
-            transcription_active_event.clear()
-            return # Exit callback early
+            transcription_active_event.clear() # Clear event to signal stop
+            return
 
-        # --- NO Hover Selection Detected: Proceed with Normal Stop Flow ---
+        # NO Hover Selection: Proceed with Normal Stop Flow
         else:
-            # --- IMMEDIATELY HIDE UI --- >
-            # Send hide command regardless of hover or other logic.
-            # The main loop stop flow should NOT handle hiding anymore.
+            # Immediately hide UI elements
+            active_mode = config_manager.get("general.active_mode", MODE_DICTATION) # Get current mode for hide logic
             try:
-                logging.debug("Button released (no hover selection): Sending immediate hide command to status indicator.")
-                # --- Add check: Only send if status_mgr exists --- >
+                logging.debug("Button released (no hover selection): Sending immediate hide command.")
                 if status_mgr:
-                    hide_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": "",
-                                 "connection_status": "idle"} # <-- Reset connection status
+                    hide_data = {"state": "hidden", "mode": active_mode, "source_lang": "", "target_lang": "", "connection_status": "idle"}
                     status_queue.put_nowait(("state", hide_data))
-                # --- End Add check --- >
-                # --- Add check: Only send if tooltip_mgr exists --- >
-                if tooltip_mgr and ACTIVE_MODE == MODE_DICTATION:
-                    tooltip_queue.put_nowait(("hide", None)) # Use None for general hide
-                # --- End Add check --- >
+                if tooltip_mgr and active_mode == MODE_DICTATION: # Only hide tooltip in dictation mode
+                    tooltip_queue.put_nowait(("hide", current_activation_id)) # Hide specific tooltip
             except queue.Full: logging.warning("Queue full sending immediate hide on release.")
             except Exception as e: logging.error(f"Error sending immediate hide on release: {e}")
-            # --- End Immediate Hide ---
 
-            # --- Normal Stop Flow Signal --- >
-            # We still clear the event, but the main loop handles backend stop
-            # only if duration is sufficient AND no action was just confirmed/executed.
-            # The action execution check is now in the main loop.
-            duration = time.time() - start_time if 'start_time' in globals() and start_time else 0
-            logging.info(f"Trigger button released (no hover selection, duration: {duration:.2f}s). Signaling backend stop for {ACTIVE_MODE}. Pending Action: {g_pending_action}")
-
-            # Always clear the event to signal the main loop stop flow might be needed
-            transcription_active_event.clear()
-            initial_activation_pos = None
-            # --- REMOVED explicit hide message sending - UI is hidden above, main loop handles backend --- 
+            # Signal backend stop flow
+            duration = time.time() - start_time if start_time else 0
+            logging.info(f"Trigger button released (no hover selection, duration: {duration:.2f}s). Signaling backend stop. Pending Action: {g_pending_action}")
+            transcription_active_event.clear() # Signal main loop stop flow is needed
+            # initial_activation_pos = None # Keep pos until main loop processes stop? Or clear here? Let's clear in main loop.
 
 def on_press(key):
-    global modifier_keys_pressed, status_queue
-    global is_command_active, transcription_active_event
+    global modifier_keys_pressed, status_queue, ui_interaction_cancelled
+    global transcription_active_event
     global modifier_log_buffer, modifier_log_last_time
-    # --- Action Confirmation Globals --- >
     global g_pending_action, g_action_confirmed, action_confirm_queue
 
-    # Only log the first press (not repeats)
+    # Log modifiers
     if key in PYNPUT_MODIFIER_MAP.values() and key is not None:
         if key not in modifier_keys_pressed:
             modifier_log_buffer.append(f"[{key} pressed]")
             modifier_keys_pressed.add(key)
+            logging.debug(f"Modifier pressed: {key}. Currently pressed: {modifier_keys_pressed}")
+
 
     try:
-
-        # --- Handle Esc during ANY active mode (Optional: Cancel current action?) ---
+        # Handle Esc during ANY active mode
         if transcription_active_event.is_set() and key == keyboard.Key.esc:
-            logging.info(f"ESC pressed during {ACTIVE_MODE} - cancelling action.")
+            active_mode = config_manager.get("general.active_mode", MODE_DICTATION) # Get current mode for logging/hiding
+            logging.info(f"ESC pressed during {active_mode} - cancelling action.")
             ui_interaction_cancelled = True
-            transcription_active_event.clear() 
-            # --- Hide Confirmation UI if pending --- >
+            transcription_active_event.clear()
+            # Hide Confirmation UI if pending
             if g_pending_action:
                 try: action_confirm_queue.put_nowait(("hide", None))
                 except queue.Full: pass
                 g_pending_action = None
                 g_action_confirmed = False
-            # --- Hide Tooltip --- >
-            try: tooltip_queue.put_nowait(("hide", None))
-            except queue.Full: pass
-            # --- Hide Status Indicator --- >
-            try:
-                status_data = {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": "",
-                               "connection_status": "idle"} # <-- Reset connection status
-                status_queue.put_nowait(("state", status_data))
-            except queue.Full: pass
-
-
+            # Hide Tooltip
+            if tooltip_mgr:
+                try: tooltip_queue.put_nowait(("hide", None))
+                except queue.Full: pass
+            # Hide Status Indicator
+            if status_mgr:
+                try:
+                    status_data = {"state": "hidden", "mode": active_mode, "source_lang": "", "target_lang": "", "connection_status": "idle"}
+                    status_queue.put_nowait(("state", status_data))
+                except queue.Full: pass
     except AttributeError:
         pass
     except Exception as e:
         logging.error(f"Error in on_press handler: {e}", exc_info=True)
 
 def on_release(key):
-    """Callback for key release events."""
-    global modifier_keys_pressed, status_queue
-    global is_command_active, transcription_active_event
-    global modifier_log_buffer, modifier_log_last_time
-    # Only log the release if the key was pressed
+    global modifier_keys_pressed, modifier_log_buffer
     if key in modifier_keys_pressed:
         modifier_log_buffer.append(f"[{key} released]")
         modifier_keys_pressed.discard(key)
+        logging.debug(f"Modifier released: {key}. Currently pressed: {modifier_keys_pressed}")
 
-# --- Config Saving Function ---
-def save_config_local(cfg_dict):
-    """Saves the provided config dictionary back to the JSON file."""
-    try:
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(cfg_dict, f, indent=2)
-        logging.info(f"Configuration saved to {CONFIG_FILE} by vibe_app.")
-        # Signal systray to update its display (it reloads file anyway on its interaction)
-        # but good practice to signal. Let systray clear the event.
-        systray_ui.config_reload_event.set()
-    except IOError as e:
-        logging.error(f"Error saving config file {CONFIG_FILE}: {e}")
-    except Exception as e:
-        logging.error(f"Unexpected error saving config: {e}")
 
 # --- Main Application Logic ---
 async def main():
-    # --- Action Confirmation Globals (NEEDED HERE!) --- >
     global g_pending_action, g_action_confirmed
-    # Remove current_mode from globals
-    global tooltip_mgr, status_mgr, buffered_audio_input, deepgram, start_time
-    global mouse_controller
-    # --- Add Action Confirm Manager --- >
-    global action_confirm_mgr
-    global current_command_transcript, final_source_text, typed_word_history
-    global final_command_text # Renamed
-    global ui_interaction_cancelled, config, SELECTED_LANGUAGE, TARGET_LANGUAGE, ACTIVE_MODE
-    global initial_activation_pos
-    global status_mgr
-    # --- ADDED GLOBALS --- >
-    global module_settings # Ensure module_settings is accessible if needed elsewhere, though likely read locally
-    # --- Add Keyboard Simulator instance --- >
-    global keyboard_sim
-    # --- Add OpenAI Manager instance --- >
-    global openai_manager
-    # --- Add Deepgram Manager instance --- >
-    global deepgram_mgr
-    # --- Add Manager/Processor Instances --- >
-    global keyboard_sim, dictation_processor, command_processor # <<< CORRECTED
+    global tooltip_mgr, status_mgr, buffered_audio_input, action_confirm_mgr
+    global mouse_controller, keyboard_sim, openai_manager, deepgram_mgr
+    global dictation_processor, command_processor # <<< CORRECTED
+    global typed_word_history, final_source_text, final_command_text
+    global ui_interaction_cancelled, initial_activation_pos, start_time # Keep start_time global
 
+    # --- Instantiate ConfigManager ---
+    # Already done globally: config_manager = ConfigManager()
     logging.info("Starting Vibe App...")
-    # --- Read module settings early in main --- >
-    module_settings = config.get("modules", {})
-    logging.debug(f"Module settings read at start of main: {module_settings}")
-    tooltip_setting_value = module_settings.get("tooltip_enabled", "KEY_MISSING") # Default to indicate missing key
-    logging.debug(f"Value of 'tooltip_enabled' read in main: {tooltip_setting_value}")
-    # --- End Read --- >
+
+    # --- Module Settings from ConfigManager ---
+    tooltip_enabled = config_manager.get("modules.tooltip_enabled", True)
+    status_indicator_enabled = config_manager.get("modules.status_indicator_enabled", True)
+    action_confirm_enabled = config_manager.get("modules.action_confirm_enabled", True)
+    audio_buffer_enabled = config_manager.get("modules.audio_buffer_enabled", True)
+    command_interpretation_enabled = config_manager.get("modules.command_interpretation_enabled", False)
 
     # --- Initialize Systray --- >
     systray_thread = threading.Thread(target=systray_ui.run_systray, args=(systray_ui.exit_app_event,), daemon=True)
@@ -896,32 +582,33 @@ async def main():
     logging.info("Systray UI thread started.")
 
     # --- Start Tooltip Manager (Conditional) --- >
-    tooltip_mgr = None  # Initialize as None
-    # Use a distinct variable name for the check
-    is_tooltip_enabled = module_settings.get("tooltip_enabled", True)
-    logging.debug(f"Re-checked tooltip_enabled value for IF condition: {is_tooltip_enabled}") # Add another check
-    if is_tooltip_enabled:
-        # --- MODIFIED: Pass initial config --- >
-        tooltip_mgr = TooltipManager(tooltip_queue, transcription_active_event, config)
+    tooltip_mgr = None
+    if tooltip_enabled:
+        # Pass config_manager instead of initial_config dict
+        tooltip_mgr = TooltipManager(tooltip_queue, transcription_active_event, config_manager) # Pass manager
         tooltip_mgr.start()
         logging.info("Tooltip Manager activé et démarré.")
+    else:
+        logging.info("Tooltip Manager désactivé par la configuration.")
 
-    # --- Start Status Indicator Manager ---
-    # Pass the config, full language maps, and available modes
-    status_mgr = StatusIndicatorManager(status_queue, ui_action_queue,
-                                        config=config,
-                                        # --- Pass i18n function --- >
-                                        # get_translation_func=_,
-                                        # --- Keep language maps for now, UI will use _() later --- >
-                                        all_languages=ALL_LANGUAGES,
-                                        all_languages_target=ALL_LANGUAGES_TARGET,
-                                        available_modes=AVAILABLE_MODES)
-    status_mgr.start()
-    logging.info("Status Indicator Manager started.")
+
+    # --- Start Status Indicator Manager (Conditional) ---
+    status_mgr = None
+    if status_indicator_enabled:
+        # Pass config_manager instead of config dict
+        status_mgr = StatusIndicatorManager(status_queue, ui_action_queue,
+                                            config_manager=config_manager, # Pass manager
+                                            all_languages=ALL_LANGUAGES,
+                                            all_languages_target=ALL_LANGUAGES_TARGET,
+                                            available_modes=AVAILABLE_MODES)
+        status_mgr.start()
+        logging.info("Status Indicator Manager started.")
+    else:
+        logging.info("Status Indicator Manager désactivé par la configuration.")
 
     # --- Start Action Confirmation UI Manager (Conditional) --- >
-    action_confirm_mgr = None # Initialize as None
-    if module_settings.get("action_confirm_enabled", True):
+    action_confirm_mgr = None
+    if action_confirm_enabled:
         action_confirm_mgr = ActionConfirmManager(action_confirm_queue, ui_action_queue)
         action_confirm_mgr.start()
         logging.info("Action Confirmation UI Manager activé et démarré.")
@@ -929,74 +616,71 @@ async def main():
         logging.info("Action Confirmation UI désactivé par la configuration.")
 
     # --- Start Buffered Audio Input (Conditional) --- >
-    buffered_audio_input = None # Initialize as None
-    if module_settings.get("audio_buffer_enabled", True):
+    buffered_audio_input = None
+    if audio_buffer_enabled:
         buffered_audio_input = BufferedAudioInput(status_queue)
         buffered_audio_input.start()
         logging.info("Buffered Audio Input activé et démarré.")
     else:
-        logging.info("Buffered Audio Input désactivé par la configuration. La connexion Deepgram sera désactivée.")
+        logging.info("Buffered Audio Input désactivé par la configuration.")
 
     # --- Initialize Keyboard Simulator --- >
     keyboard_sim = KeyboardSimulator()
     if not keyboard_sim.kb_controller:
         logging.critical("Keyboard simulator failed to initialize. Exiting.")
-        # Optionally signal systray to exit?
         if systray_ui and systray_ui.exit_app_event:
             systray_ui.exit_app_event.set()
-        return # Stop main function
+        return
 
-    # --- NEW: Initialize Dictation Processor (depends on kb_sim) --- >
+    # --- Initialize Dictation Processor (depends on kb_sim, queues, event) --- >
     dictation_processor = DictationProcessor(
         tooltip_q=tooltip_queue,
         keyboard_sim=keyboard_sim,
         action_confirm_q=action_confirm_queue,
         transcription_active_event=transcription_active_event
     )
-    # --- End Init --- >
 
-    # --- NEW: Initialize Command Processor (depends on openai_mgr, kb_sim, config) --- >
-    command_processor = None # Initialize as None
-    # Only initialize if the module is potentially needed and dependencies exist
-    if module_settings.get("command_interpretation_enabled", False):
+    # --- Initialize Command Processor (Conditional) --- >
+    command_processor = None
+    if command_interpretation_enabled:
         if openai_manager and keyboard_sim:
+             # Pass config_manager instead of config dict
             command_processor = CommandProcessor(
                 openai_manager=openai_manager,
                 keyboard_sim=keyboard_sim,
-                config=config # Pass the whole config dict
+                config_manager=config_manager # Pass manager
             )
         else:
             logging.warning("Command Interpretation enabled, but dependencies (OpenAI Manager or Keyboard Sim) missing. CommandProcessor not initialized.")
     else:
         logging.info("Command Interpretation disabled. CommandProcessor not initialized.")
-    # --- End Init --- >
 
     # --- Initialize Deepgram Client --- >
     deepgram_client = None
     try:
+        # Configure Deepgram logging level if needed (e.g., logging.WARNING)
         config_dg = DeepgramClientOptions(verbose=logging.WARNING)
         deepgram_client = DeepgramClient(DEEPGRAM_API_KEY, config_dg)
         logging.info("Deepgram client initialized.")
     except Exception as e:
         logging.error(f"Failed to initialize Deepgram client: {e}")
-        systray_ui.exit_app_event.set() # Signal exit if DG fails
+        if systray_ui.exit_app_event: systray_ui.exit_app_event.set()
         return
 
-    # --- NEW: Create Transcript Queue --- >
-    transcript_queue = queue.Queue()
-
-    # --- NEW: Initialize Deepgram Manager --- >
+    # --- Initialize Deepgram Manager (Conditional) --- >
     deepgram_mgr = None
-    # Only initialize if audio buffer is enabled (dependency)
-    if buffered_audio_input and deepgram_client:
+    if buffered_audio_input and deepgram_client: # Depends on audio buffer
+         transcript_queue = queue.Queue() # Create transcript queue here
          deepgram_mgr = DeepgramManager(
              deepgram_client=deepgram_client,
-             status_q=status_queue, # Send status updates here
-             transcript_q=transcript_queue, # Send transcripts here
-             buffered_audio=buffered_audio_input # Pass buffer instance
+             status_q=status_queue,
+             transcript_q=transcript_queue,
+             buffered_audio=buffered_audio_input
          )
     else:
         logging.warning("Deepgram Manager cannot be initialized (Audio Buffer or DG Client missing/disabled).")
+        transcript_queue = None # Ensure queue is None if manager isn't created
+
 
     # --- Initialize pynput Controller --- >
     mouse_controller = mouse.Controller()
@@ -1009,494 +693,354 @@ async def main():
     logging.info("Input listeners started.")
 
     # --- Loop Variables --- >
-    dg_connection = None
-    microphone = None
-    # active_mode_on_stop = None # Capture this differently
-    last_hover_check_time = 0
-    hover_check_interval = 0.05 # Check hover every 50ms instead of 100ms
-    # --- NEW: Track if we are in the process of stopping --- >
-    is_stopping = False
+    is_stopping = False # Track if stop flow is active
     stop_initiated_time = 0 # Track when stop was first detected
-    active_mode_on_stop = None # Store mode when stop begins
-    start_time = None # Make sure it's initialized
-    stopping_start_time = None # NEW: Store the start_time for the specific stop cycle being processed
+    active_mode_on_stop = None # Store mode used when stop begins
+    stopping_start_time = None # Store the start_time for the specific stop cycle
 
-    # --- NEW: Connection Retry Constants --- (Simplified Timeout)
-    MAX_CONNECT_ATTEMPTS = 3
-    CONNECT_RETRY_DELAY_SEC = 0.5
-    OVERALL_CONNECT_TIMEOUT_SEC = 5.0 # Total time allowed for all attempts
-    # --- Removed individual attempt timeouts ---
-
-    # --- NEW: Event for connection success --- >
-    connection_established_event = asyncio.Event()
+    # --- NEW: Store active mode for the current session --- >
+    current_session_mode = None # Set when 'initiate_dg_connection' is received
 
     try:
         while not systray_ui.exit_app_event.is_set():
             current_time = time.time()
-            # perform_stop_flow = False # Remove this flag
+            stop_detected_this_cycle = False
 
             # --- Check if stop is signaled --- >
-            stop_detected_this_cycle = False
             if not transcription_active_event.is_set() and start_time is not None and not is_stopping:
-                # Event is clear, we were active (start_time is set), and not already stopping
                 logging.info("Stop signal detected (transcription_active_event is clear).")
                 is_stopping = True
                 stop_initiated_time = current_time
                 stopping_start_time = start_time # CAPTURE start_time for this stop cycle
                 stop_detected_this_cycle = True
-                active_mode_on_stop = ACTIVE_MODE # Capture the mode when stop is first detected
-                # --- REMOVED: Immediate UI hide logic moved to on_click release handler ---
-                # logging.debug(f"Immediately hiding UI for {active_mode_on_stop}.")
-                # try: status_mgr.queue.put_nowait(("state", {"state": "hidden", "mode": ACTIVE_MODE, "source_lang": "", "target_lang": ""}))
-                # except queue.Full: logging.error("Status queue full sending immediate hide message.")
-                # except Exception as e: logging.error(f"Error sending immediate hide message: {e}")
-                # if active_mode_on_stop == MODE_DICTATION:
-                #     try: tooltip_mgr.queue.put_nowait(("hide", None))
-                #     except queue.Full: logging.error("Tooltip queue full sending immediate hide message.")
-                #     except Exception as e: logging.error(f"Error sending immediate tooltip hide message: {e}")
+                active_mode_on_stop = current_session_mode # Use the mode from the current session for stop flow
+                if not active_mode_on_stop:
+                    logging.warning("Stop detected, but current_session_mode was not set! Falling back to config mode.")
+                    active_mode_on_stop = config_manager.get("general.active_mode", MODE_DICTATION)
+                # UI hiding moved to on_click release handler
 
-            # --- Handle UI Actions FIRST (Keep this high priority) --- >
+            # --- Handle UI Actions --- >
             try:
                 action_command, action_data = ui_action_queue.get_nowait()
-                
-                # --- Process Language/Mode Selection FIRST --- >
+
+                # --- Process Language/Mode Selection --- >
                 if action_command == "select_language":
                     lang_type = action_data.get("type"); new_lang = action_data.get("lang")
-                    config_key = "selected_language" if lang_type == "source" else "target_language"
-                    recent_list_key = "recent_source_languages" if lang_type == "source" else "recent_target_languages"
+                    config_key = "general.selected_language" if lang_type == "source" else "general.target_language"
+                    recent_list_key = "general.recent_source_languages" if lang_type == "source" else "general.recent_target_languages"
 
-                    if "general" not in config: config["general"] = {}
-                    config["general"][config_key] = new_lang
+                    config_manager.update(config_key, new_lang) # Update in memory
 
-                    # --- Update Recent Language List --- >
-                    recent_list = config["general"].get(recent_list_key, [])
+                    # --- Update Recent Language List using ConfigManager --- >
+                    recent_list = config_manager.get(recent_list_key, [])
                     if new_lang in recent_list: recent_list.remove(new_lang)
                     recent_list.insert(0, new_lang)
                     MAX_RECENT_LANGS = 10
-                    config["general"][recent_list_key] = recent_list[:MAX_RECENT_LANGS]
-                    # --- End Update Recent Language List ---
+                    config_manager.update(recent_list_key, recent_list[:MAX_RECENT_LANGS]) # Update in memory
+                    # --- End Update Recent List ---
 
                     logging.info(f"UI selected {lang_type} language: {new_lang}. Updating config.")
-                    save_config_local(config); apply_config(config)
-                    # --- Crucial: Set cancel flag if interaction happens while stopping --- >
+                    config_manager.save() # Save changes to file
+                    systray_ui.config_reload_event.set() # Signal systray to update its menu display
+                    # Reload i18n if source language changed
+                    if lang_type == "source":
+                         load_translations(new_lang)
+                    # --- Set cancel flag --- >
                     if is_stopping: ui_interaction_cancelled = True
-                    # Original code had ui_interaction_cancelled = True here always, let's keep it
-                    ui_interaction_cancelled = True
+                    ui_interaction_cancelled = True # Keep original logic
 
                 elif action_command == "select_mode":
                     new_mode = action_data
-                    if "general" not in config: config["general"] = {}
-                    config["general"]["active_mode"] = new_mode
+                    config_manager.update("general.active_mode", new_mode) # Update in memory
                     logging.info(f"UI selected mode: {new_mode}. Updating config.")
-                    save_config_local(config); apply_config(config)
-                    # --- Crucial: Set cancel flag if interaction happens while stopping --- >
+                    config_manager.save() # Save changes to file
+                    systray_ui.config_reload_event.set() # Signal systray
+                    # --- Set cancel flag --- >
                     if is_stopping: ui_interaction_cancelled = True
-                    # Original code had ui_interaction_cancelled = True here always, let's keep it
-                    ui_interaction_cancelled = True
-                
-                # --- NEW: Handle DG Connection Initiation --- >
+                    ui_interaction_cancelled = True # Keep original logic
+
+                # --- Handle DG Connection Initiation --- >
                 elif action_command == "initiate_dg_connection":
                     received_activation_id = action_data.get("activation_id")
+                    current_session_mode = action_data.get("mode", MODE_DICTATION) # <<< STORE session mode
                     # Double check if still active and manager exists
                     if transcription_active_event.is_set() and not is_stopping and deepgram_mgr:
-                        # --- Removed check against global ID --- >
                         logging.info(f"Received initiate_dg_connection for ID {received_activation_id}. Starting DG manager listening.")
-                        # --- Set the global ID NOW, before starting the task --- >
-                        current_activation_id = received_activation_id
-                        # Prepare options (same as before)
+                        current_activation_id = received_activation_id # Set the global ID
+                        # Get language from config
+                        current_source_lang = config_manager.get("general.selected_language", "en-US")
                         current_dg_options = LiveOptions(
-                            model="nova-2", language=SELECTED_LANGUAGE, interim_results=True, smart_format=True,
+                            model="nova-2", language=current_source_lang, interim_results=True, smart_format=True,
                             encoding="linear16", channels=1, sample_rate=16000, punctuate=True, numerals=True,
                             utterance_end_ms="1000", vad_events=True, endpointing=300
                         )
-                        # Start the listening task using the received ID
                         await deepgram_mgr.start_listening(current_dg_options, received_activation_id)
-                        # --- End changes --- >
                     else:
                          logging.warning(f"Ignoring initiate_dg_connection command because transcription is no longer active or stopping (ID: {received_activation_id}).")
-                # --- End Handle DG Initiation --- >
 
-                # --- THEN Check for Action Confirmation Message --- >
+                # --- Handle Action Confirmation Message --- >
                 elif action_command == "action_confirmed":
                     confirmed_action = action_data
-                    if confirmed_action == g_pending_action: # Check if it matches the currently pending action
+                    if confirmed_action == g_pending_action:
                         logging.info(f"Executing confirmed action immediately: {g_pending_action}")
-                        # --- Execute Immediately --- >
-                        if g_pending_action == "Enter":
-                            # Use keyboard_simulator instance
-                            keyboard_sim.simulate_key_press_release(Key.enter)
-                        elif g_pending_action == "Escape":
-                            # Use keyboard_simulator instance
-                            keyboard_sim.simulate_key_press_release(Key.esc)
-                        # --- NEW: Handle single characters (punctuation, etc.) --- >
-                        elif isinstance(g_pending_action, str) and len(g_pending_action) == 1:
-                             logging.info(f"Simulating typing for confirmed character: '{g_pending_action}'")
-                             # Use keyboard_simulator instance
-                             keyboard_sim.simulate_typing(g_pending_action)
+                        # Execute Directly (move execution logic here or call helper)
+                        if keyboard_sim:
+                            if g_pending_action == "Enter":
+                                keyboard_sim.simulate_key_press_release(Key.enter)
+                            elif g_pending_action == "Escape":
+                                keyboard_sim.simulate_key_press_release(Key.esc)
+                            elif isinstance(g_pending_action, str) and len(g_pending_action) == 1:
+                                keyboard_sim.simulate_typing(g_pending_action)
+                            else:
+                                logging.warning(f"Unhandled confirmed action type: {g_pending_action}")
                         else:
-                            logging.warning(f"Unhandled confirmed action type: {g_pending_action}")
-                        # --- End Handle Character --- >
-
-                        # --- Hide UI Immediately --- >
-                        try: action_confirm_queue.put_nowait(("hide", None))
-                        except queue.Full: logging.warning("Action confirm queue full sending hide after immediate execution.")
-                        # --- Reset State Immediately --- >
+                            logging.error("Cannot execute confirmed action: KeyboardSimulator missing.")
+                        # Hide UI Immediately
+                        if action_confirm_mgr:
+                            try: action_confirm_queue.put_nowait(("hide", None))
+                            except queue.Full: logging.warning("Action confirm queue full sending hide after immediate execution.")
+                        # Reset State Immediately
                         g_pending_action = None
-                        g_action_confirmed = False # Reset confirmation flag too
+                        g_action_confirmed = False
                     else:
-                         logging.warning(f"Received confirmation for '{confirmed_action}' but '{g_pending_action}' was pending (or already executed/reset).")
-                         # Maybe hide here too if state is inconsistent?
-                         # try: action_confirm_queue.put_nowait(("hide", None))
-                         # except queue.Full: pass
-                # --- End Action Confirmation Check --- >
+                         logging.warning(f"Received confirmation for '{confirmed_action}' but '{g_pending_action}' was pending/reset.")
 
             except queue.Empty: pass
             except Exception as e: logging.error(f"Error processing UI action queue: {e}", exc_info=True)
 
-            # --- Start Transcription Flow (REMOVED - Handled by ui_action_queue 'initiate_dg_connection') --- >
-            # The block below is now removed:
-            # if transcription_active_event.is_set() and not is_stopping and deepgram_mgr and not deepgram_mgr.is_listening:
-            #     ...
-            # await deepgram_mgr.start_listening(current_dg_options, received_activation_id) # <-- REMOVED STRAY LINE
- 
-             # --- Process Stop Flow --- >
-             # If stopping has been initiated
+
+            # --- Process Stop Flow --- >
             if is_stopping:
                 logging.debug(f"Processing stop flow steps for {active_mode_on_stop}...")
-                # --- Stop Deepgram Listening via Manager --- >
+                action_executed_this_stop = False # Initialize here to ensure it always exists
+                # --- Stop Deepgram Listening --- >
                 if deepgram_mgr and deepgram_mgr.is_listening:
                     logging.info("Signaling DeepgramManager to stop listening...")
-                    # Run stop_listening as a task to allow it to finish gracefully
                     stop_task = asyncio.create_task(deepgram_mgr.stop_listening())
                     try:
-                        await asyncio.wait_for(stop_task, timeout=2.0) # Wait max 2s for DG to close
-                    except asyncio.TimeoutError:
-                        logging.warning("Timeout waiting for DeepgramManager to stop.")
-                    except Exception as e:
-                        logging.error(f"Error during DeepgramManager stop: {e}")
-                # --- End Stop DG --- >
+                        await asyncio.wait_for(stop_task, timeout=2.0)
+                    except asyncio.TimeoutError: logging.warning("Timeout waiting for DeepgramManager to stop.")
+                    except Exception as e: logging.error(f"Error during DeepgramManager stop: {e}")
 
-                # --- REMOVE Manual Mic/Conn finish (Handled by DeepgramManager) --- >
-                # if microphone: ...
-                # await asyncio.sleep(0.15)
-                # if dg_connection: ...
-                # --- End Remove --- >
-
-                # --- Hide Tooltip (Keep, managed locally) --- >
+                # --- Hide Tooltip (if dictation mode) --- >
                 if tooltip_mgr and active_mode_on_stop == MODE_DICTATION:
                     try:
+                        # Use the activation ID from the start of *this* stop cycle
                         hide_id = current_activation_id if stopping_start_time == start_time else None
                         tooltip_queue.put_nowait(("hide", hide_id))
                         logging.debug(f"Sent hide command to tooltip queue during stop flow (ID: {hide_id}).")
-                    except queue.Full:
-                        logging.error("Tooltip queue full sending hide message during stop flow.")
-                    except Exception as e:
-                        logging.error(f"Error sending tooltip hide message during stop flow: {e}")
-                # --- End Hide Tooltip --- >
+                    except queue.Full: logging.error("Tooltip queue full sending hide message during stop flow.")
+                    except Exception as e: logging.error(f"Error sending tooltip hide message during stop flow: {e}")
 
-                # Check cancellation flag (might have been set by UI action during stop detection)
+                # --- Check Cancellation Flag --- >
                 perform_action = True
                 if ui_interaction_cancelled:
                      perform_action = False
-                     ui_interaction_cancelled = False # Reset flag AFTER checking it
+                     ui_interaction_cancelled = False # Reset flag
                      logging.info("UI interaction cancelled during stop flow.")
 
-                # Calculate duration using the start_time captured for THIS stop cycle
+                # --- Calculate Duration --- >
                 duration = stop_initiated_time - stopping_start_time if stopping_start_time else 0
+                min_duration = float(config_manager.get("general.min_duration_sec", 0.5))
 
-                # Post-process / Translate / Execute
+                # --- Post-process / Translate / Execute --- >
                 action_task = None
                 if perform_action:
-                    if duration >= MIN_DURATION_SEC:
+                    if duration >= min_duration:
                         logging.debug(f"Performing action post-stop for {active_mode_on_stop} (duration: {duration:.2f}s)")
-                        
-                        # --- NEW: Check for Confirmed Action Execution --- >
+                        # --- Check for Confirmed Action Execution --- >
                         action_executed_this_stop = False
                         if g_pending_action and g_action_confirmed:
                             logging.info(f"Executing confirmed action from main loop: {g_pending_action}")
-                            if g_pending_action == "Enter":
-                                # Use keyboard_simulator instance
-                                keyboard_sim.simulate_key_press_release(Key.enter)
-                            elif g_pending_action == "Escape":
-                                # Use keyboard_simulator instance
-                                keyboard_sim.simulate_key_press_release(Key.esc)
-                            # Add other actions here if needed
-                            action_executed_this_stop = True
-                        # --- End Confirmed Action Execution Check --- >
-                        
-                        # --- Normal Post-Processing (Only if no action was executed) --- >
+                            # Logic moved to action_confirmed queue handler above
+                            action_executed_this_stop = True # Mark as executed
+
+                        # --- Normal Post-Processing (Only if no action was confirmed/executed) --- >
                         if not action_executed_this_stop:
                             if active_mode_on_stop == MODE_DICTATION:
-                                 # Check if translation is needed
-                                # --- MODIFIED: Check final_source_text before proceeding ---
-                                if final_source_text and TARGET_LANGUAGE and TARGET_LANGUAGE != SELECTED_LANGUAGE:
+                                current_source_lang = config_manager.get("general.selected_language")
+                                current_target_lang = config_manager.get("general.target_language")
+                                translation_mod_enabled = config_manager.get("modules.translation_enabled")
+                                # Check if translation is needed and enabled
+                                if final_source_text and current_target_lang and current_target_lang != current_source_lang and translation_mod_enabled:
                                     logging.info(f"Requesting translation post-stop for: '{final_source_text.strip()}'")
-                                    action_task = asyncio.create_task(translate_and_type(final_source_text.strip(), SELECTED_LANGUAGE, TARGET_LANGUAGE))
-                                # --- MODIFIED: Check final_source_text here too ---
+                                    action_task = asyncio.create_task(translate_and_type(
+                                        final_source_text.strip(),
+                                        current_source_lang,
+                                        current_target_lang,
+                                        config_manager, # Pass manager
+                                        keyboard_sim,   # Pass simulator
+                                        openai_manager  # Pass manager
+                                    ))
                                 elif final_source_text:
-                                    logging.info("Dictation finished post-stop. No translation needed. Typing handled by on_message/handle_dictation_final.")
-                                    # action_task remains None
+                                    logging.info("Dictation finished post-stop. No translation needed/enabled.")
                                 else:
-                                     logging.debug("Stop flow action check: No final_source_text for Dictation, likely connection/stop issue.")
-                            elif active_mode_on_stop == MODE_COMMAND: # Renamed mode
-                                 # --- REFACTORED: Call CommandProcessor --- >
-                                if command_processor and final_command_text:
+                                     logging.debug("Stop flow action check: No final_source_text for Dictation.")
+                            elif active_mode_on_stop == MODE_COMMAND:
+                                command_interp_mod_enabled = config_manager.get("modules.command_interpretation_enabled")
+                                if command_processor and final_command_text and command_interp_mod_enabled:
                                      logging.info(f"Processing command input post-stop via CommandProcessor: '{final_command_text}'")
                                      action_task = asyncio.create_task(command_processor.process_command(final_command_text))
-                                elif not command_processor:
-                                     logging.error("CommandProcessor not initialized, cannot process command.")
-                                else:
-                                     logging.debug("Stop flow action check: No final_command_text for Command mode.")
-                            # --- REMOVED incorrect else block that duplicated dictation logic ---
+                                elif not command_processor: logging.error("CommandProcessor not initialized, cannot process command.")
+                                elif not command_interp_mod_enabled: logging.info("Command interpretation module disabled, skipping command processing.")
+                                else: logging.debug("Stop flow action check: No final_command_text for Command mode.")
+                    else:
+                         logging.info(f"Duration < min ({min_duration}s), discarding action post-stop for {active_mode_on_stop}.")
 
-                    else: # Discard short
-                         logging.info(f"Duration < min ({MIN_DURATION_SEC}s), discarding action post-stop for {active_mode_on_stop}.")
-                         # State cleared below
+                # --- Clear pending action state if not executed --- >
+                if g_pending_action and not action_executed_this_stop:
+                     logging.debug(f"Clearing unexecuted pending action state ({g_pending_action}, confirmed={g_action_confirmed}) after stop flow.")
+                     if action_confirm_mgr: # Hide UI if it was shown but action wasn't confirmed/executed
+                          try: action_confirm_queue.put_nowait(("hide", None))
+                          except queue.Full: pass
+                     g_pending_action = None
+                     g_action_confirmed = False
+                elif action_executed_this_stop:
+                      # Ensure state is clear even if executed via queue handler (belt and braces)
+                      g_pending_action = None
+                      g_action_confirmed = False
 
-                # # --- Clear state relevant to the *just completed* action regardless --- >
-                # # --- MODIFIED: Always clear pending action state here --- >
-                # if g_pending_action:
-                #      logging.debug(f"Clearing pending action state ({g_pending_action}, confirmed={g_action_confirmed}) after stop flow.")
-                #      g_pending_action = None
-                #      g_action_confirmed = False
-                # # --- End Clear pending action state --- >
-                
+
+                # --- Clear state relevant to the *just completed* action --- >
                 if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
-                elif active_mode_on_stop == MODE_COMMAND: final_command_text = "" 
+                elif active_mode_on_stop == MODE_COMMAND: final_command_text = ""
+                current_session_mode = None # Reset session mode after stop
 
-                # --- Reset state AFTER processing stop flow --- >
+                # --- Reset global state AFTER processing stop flow --- >
                 logging.debug("Stop flow processing complete. Resetting state.")
-
-                # Check if a new activation occurred during this stop flow
                 new_activation_occurred = (start_time != stopping_start_time)
                 if new_activation_occurred:
-                    logging.info(f"New activation detected during stop flow (current start_time {start_time} != stopping_start_time {stopping_start_time}). Keeping current start_time.")
+                    logging.info(f"New activation detected during stop flow. Keeping current start_time.")
+                    # Don't reset start_time, the new activation is already using it
                 else:
-                    # No new activation interfered, safe to reset start_time
-                    logging.debug(f"Resetting start_time ({start_time}).")
+                    logging.debug(f"Resetting start_time.")
                     start_time = None
-                    initial_activation_pos = None
+                    initial_activation_pos = None # Clear position if no new activation
+                    current_activation_id = None # Clear activation ID
 
-                # Always clear these state variables related to the completed stop flow
                 active_mode_on_stop = None
                 stopping_start_time = None
-
-                # Finally, mark stopping as complete
-                is_stopping = False
+                is_stopping = False # Mark stopping as complete
 
             # --- Check Config Reload --- >
             if systray_ui.config_reload_event.is_set():
                 logging.info("Detected config reload request.")
-                old_source = SELECTED_LANGUAGE
-                config = load_config()
-                apply_config(config)
-                # --- MODIFIED: Pass reloaded config to tooltip manager --- >
-                if tooltip_mgr:
-                    tooltip_mgr.reload_config(config)
-                if status_mgr:
-                    status_mgr.config = config # Update config reference
-                    # apply_config (called earlier) should handle translation reload if necessary
-                    logging.info("Updated StatusIndicatorManager's config reference after reload.")
-                systray_ui.config_reload_event.clear()
-                # Check if DG needs restart due to language change
-                should_restart_dg = False
-                if SELECTED_LANGUAGE != old_source:
-                    if is_stopping:
-                        logging.warning("Config reload changed language during stop flow. Restart will happen naturally if needed.")
-                    elif transcription_active_event.is_set() and deepgram_mgr and deepgram_mgr.is_listening:
-                        logging.info("Source language changed while active, initiating stop to restart DG...")
-                        transcription_active_event.clear() # Let the stop flow handle restart on next cycle
-                        # No need to set is_stopping here, the cleared event will trigger it
-                    # else: language changed but not active or stopping, no action needed now
+                old_source_lang = config_manager.get("general.selected_language")
+                config_manager.reload() # Reload config using the manager
+                new_source_lang = config_manager.get("general.selected_language")
+                # Reload translations if language changed
+                if new_source_lang != old_source_lang:
+                    load_translations(new_source_lang)
+                    logging.info(f"Translations reloaded for {new_source_lang} due to config change.")
+                # --- Signal managers to potentially update their internal state ---
+                # (Currently they query config_manager when needed, but explicit reload hooks could be added)
+                if tooltip_mgr: tooltip_mgr.reload_config(config_manager) # Pass manager
+                if status_mgr: status_mgr.config_manager = config_manager # Update manager reference
+                # CommandProcessor accesses config_manager directly
+                logging.info("ConfigManager reloaded. Managers notified/updated.")
+                systray_ui.config_reload_event.clear() # Clear the event
 
-            # --- Thread Health Checks (Conditional) --- >
-            if tooltip_mgr and not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set(): logging.error("Tooltip thread died."); break
-            if status_mgr and not status_mgr.thread.is_alive() and not status_mgr._stop_event.is_set(): logging.error("Status Indicator thread died."); break
-            if action_confirm_mgr and not action_confirm_mgr.thread.is_alive() and not action_confirm_mgr._stop_event.is_set(): logging.error("Action Confirmation thread died."); break
-            # --- Check Deepgram Manager Task Health (if applicable) --- >
+            # --- Thread Health Checks --- >
+            if tooltip_enabled and tooltip_mgr and not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set(): logging.error("Tooltip thread died."); break
+            if status_indicator_enabled and status_mgr and not status_mgr.thread.is_alive() and not status_mgr._stop_event.is_set(): logging.error("Status Indicator thread died."); break
+            if action_confirm_enabled and action_confirm_mgr and not action_confirm_mgr.thread.is_alive() and not action_confirm_mgr._stop_event.is_set(): logging.error("Action Confirmation thread died."); break
+            if audio_buffer_enabled and buffered_audio_input and not buffered_audio_input.thread.is_alive() and not buffered_audio_input.running.is_set(): logging.error("Buffered Audio Input thread died."); break
+            # Check Deepgram Manager Task Health
             if deepgram_mgr and deepgram_mgr._connection_task and deepgram_mgr._connection_task.done():
                 try:
                     exc = deepgram_mgr._connection_task.exception()
-                    if exc:
-                         logging.error(f"DeepgramManager task ended with exception: {exc}", exc_info=exc)
-                         # Decide how to handle this - attempt restart? Exit?
-                         break # Exit for now
-                    else:
-                         # Task finished without exception, but shouldn't if is_listening was true?
-                         if deepgram_mgr.is_listening:
-                              logging.warning("DeepgramManager task finished unexpectedly while listening was intended.")
-                              # Consider attempting restart here
-                              pass
-                         # else: task finished after stop_listening was called, which is normal.
-                except asyncio.CancelledError:
-                     logging.info("DeepgramManager task was cancelled (checked in main loop).")
-                except Exception as e:
-                     logging.error(f"Error checking DeepgramManager task state: {e}")
-            # --- End Check DG Task --- >
-            if buffered_audio_input and not buffered_audio_input.thread.is_alive() and not buffered_audio_input.running.is_set(): logging.error("Buffered Audio Input thread died."); break
+                    if exc: logging.error(f"DeepgramManager task ended with exception: {exc}", exc_info=exc); break # Exit on DG task error
+                    elif deepgram_mgr.is_listening: logging.warning("DeepgramManager task finished unexpectedly."); # Consider restart?
+                except asyncio.CancelledError: logging.info("DeepgramManager task was cancelled.")
+                except Exception as e: logging.error(f"Error checking DeepgramManager task state: {e}")
 
             # --- Process Transcript Queue --- >
-            try:
-                transcript_data = transcript_queue.get_nowait()
-                msg_type = transcript_data.get("type")
-                transcript = transcript_data.get("transcript")
-                activation_id = transcript_data.get("activation_id")
+            if transcript_queue: # Check if queue exists
+                try:
+                    transcript_data = transcript_queue.get_nowait()
+                    msg_type = transcript_data.get("type")
+                    transcript = transcript_data.get("transcript")
+                    activation_id = transcript_data.get("activation_id")
 
-                # Ensure we only process transcripts for the *current* activation
-                if activation_id == current_activation_id:
-                    if msg_type == "interim":
-                        # --- FIXED: Pass dictation_processor first --- >
-                        if ACTIVE_MODE == MODE_DICTATION or ACTIVE_MODE == MODE_COMMAND:
-                            handle_dictation_interim(dictation_processor, transcript, activation_id)
-                    elif msg_type == "final":
-                        if ACTIVE_MODE == MODE_DICTATION:
-                             updated_history, text_typed = handle_dictation_final(
-                                 dictation_processor, transcript, typed_word_history, activation_id
-                             )
-                             typed_word_history = updated_history
-                             final_source_text = " ".join([entry['text'] for entry in typed_word_history])
-                             last_interim_transcript = "" # Clear interim after final
-                        elif ACTIVE_MODE == MODE_COMMAND:
-                             final_command_text = transcript # Store final command text
-                             # Actual execution moved to stop flow
-                             logging.debug(f"Stored final transcript for Command Mode: '{final_command_text}'")
-                             # Maybe hide interim tooltip here if shown?
-                             if tooltip_mgr:
-                                 tooltip_queue.put_nowait(("hide", activation_id))
-                else:
-                    logging.debug(f"Ignoring transcript for activation {activation_id} (current is {current_activation_id})")
+                    # Ensure we only process transcripts for the *current* activation
+                    if activation_id == current_activation_id:
+                        active_mode = current_session_mode # Use mode from current session
+                        if msg_type == "interim":
+                            if active_mode == MODE_DICTATION or active_mode == MODE_COMMAND: # Show interim for both for now
+                                handle_dictation_interim(dictation_processor, transcript, activation_id)
+                        elif msg_type == "final":
+                            if active_mode == MODE_DICTATION:
+                                 handle_dictation_final(dictation_processor, transcript, typed_word_history, activation_id)
+                                 last_interim_transcript = "" # Clear interim after final
+                            elif active_mode == MODE_COMMAND:
+                                 final_command_text = transcript # Store final command text
+                                 logging.debug(f"Stored final transcript for Command Mode: '{final_command_text}'")
+                                 if tooltip_mgr: # Hide interim tooltip
+                                     tooltip_queue.put_nowait(("hide", activation_id))
+                    else:
+                        logging.debug(f"Ignoring transcript for activation {activation_id} (current is {current_activation_id})")
 
-            except queue.Empty:
-                pass # No transcripts in queue
-            except Exception as e:
-                logging.error(f"Error processing transcript queue: {e}", exc_info=True)
-            # --- End Process Transcript Queue --- >
+                except queue.Empty: pass
+                except Exception as e: logging.error(f"Error processing transcript queue: {e}", exc_info=True)
 
-            # --- At the end of main loop, flush modifier log buffer --- >
-            flush_modifier_log(force=True)
-
-            # --- Explicitly yield control to allow background tasks --- >
-            await asyncio.sleep(0)
+            flush_modifier_log(force=True) # Flush modifier log buffer
+            await asyncio.sleep(0) # Yield control
 
     except (asyncio.CancelledError, KeyboardInterrupt): logging.info("Main task cancelled/interrupted.")
     finally:
         logging.info("Stopping Vibe App...")
-        # Trigger exit event if not already set, to ensure systray stops cleanly
-        if not systray_ui.exit_app_event.is_set():
-            systray_ui.exit_app_event.set()
+        if not systray_ui.exit_app_event.is_set(): systray_ui.exit_app_event.set()
 
-        # --- Stop Audio Input (Conditional) --- >
-        if 'buffered_audio_input' in locals() and buffered_audio_input: buffered_audio_input.stop()
+        # Stop Modules Conditionally
+        if audio_buffer_enabled and buffered_audio_input: buffered_audio_input.stop()
+        if tooltip_enabled and tooltip_mgr: tooltip_mgr.stop()
+        if status_indicator_enabled and status_mgr: status_mgr.stop()
+        if action_confirm_enabled and action_confirm_mgr: action_confirm_mgr.stop()
+        logging.info("Component managers stop requested.")
 
-        # --- Signal GUI Managers to Stop (Conditional) --- >
-        if 'tooltip_mgr' in locals() and tooltip_mgr: tooltip_mgr.stop()
-        if 'status_mgr' in locals() and status_mgr: status_mgr.stop()
-        if 'action_confirm_mgr' in locals() and action_confirm_mgr: action_confirm_mgr.stop()
-        logging.info("GUI Managers stop requested.")
+        # Stop Deepgram Manager if it exists
+        if deepgram_mgr:
+             logging.info("Stopping Deepgram Manager...")
+             # Ensure listening is stopped cleanly
+             if deepgram_mgr.is_listening or (deepgram_mgr._connection_task and not deepgram_mgr._connection_task.done()):
+                 await deepgram_mgr.stop_listening()
+             logging.info("Deepgram Manager stopped.")
 
-        # --- Systray Stop Logic ---
-        # Wait for the systray thread to finish if it's running
+
+        # Wait for Systray
         if 'systray_thread' in locals() and systray_thread.is_alive():
             logging.info("Waiting for systray thread to exit...")
-            systray_thread.join(timeout=1.0) # Wait up to 1 second
-            if systray_thread.is_alive():
-                logging.warning("Systray thread did not exit cleanly.")
-            else:
-                logging.info("Systray thread finished.")
+            systray_thread.join(timeout=1.0)
+            if systray_thread.is_alive(): logging.warning("Systray thread did not exit cleanly.")
+            else: logging.info("Systray thread finished.")
 
-        # Cleanup listeners (pynput listeners are daemons, no need to join)
+        # Stop Listeners
         if 'mouse_listener' in locals() and mouse_listener.is_alive(): mouse_listener.stop()
         if 'keyboard_listener' in locals() and keyboard_listener.is_alive(): keyboard_listener.stop()
         logging.info("Input listeners stop requested.")
-
-        # --- Ensure Deepgram microphone and connection are stopped ---
-        if 'microphone' in locals() and microphone:
-            logging.debug("Finishing Deepgram microphone on exit...")
-            microphone.finish()
-            logging.info("Deepgram microphone finished on exit.")
-
-        if 'deepgram_client' in locals() and deepgram_client:
-            is_conn_connected_final = False
-            try: is_conn_connected_final = await deepgram_client.is_connected()
-            except Exception: pass # Ignore errors checking state during shutdown
-            if is_conn_connected_final:
-                logging.debug("Finishing Deepgram connection on exit...")
-                try:
-                    await deepgram_client.finish()
-                    logging.info("Deepgram connection finished on exit.")
-                except asyncio.CancelledError: logging.warning("Deepgram finish cancelled.")
-                except Exception as e: logging.error(f"Error during final deepgram_client.finish: {e}")
-            else: logging.info("Deepgram connection already closed on exit.")
-        else: logging.info("No active Deepgram connection to finish on exit.")
 
         logging.info("Vibe App finished.")
 
 # --- Add Exit Event for Systray Communication ---
 systray_ui.exit_app_event = threading.Event() # Create event in main module
 
-# --- Copy Preferred Languages (Temporary Solution) ---
-# Ideally, move these to a shared constants/config module later
-# --- ADD ALL_LANGUAGES definition --- >
-ALL_LANGUAGES = {
-    "en-US": "English (US)",
-    "en-GB": "English (UK)",
-    "fr-FR": "French",
-    "es-ES": "Spanish",
-    "de-DE": "German",
-    "it-IT": "Italian",
-    "pt-PT": "Portuguese",
-    "pt-BR": "Portuguese (Brazil)",
-    "ru-RU": "Russian",
-    "zh": "Chinese (Mandarin)",
-    "ko-KR": "Korean",
-    "ja-JP": "Japanese",
-    "hi-IN": "Hindi",
-    "ar": "Arabic",
-    "nl-NL": "Dutch",
-    # Add more as needed
-}
+# --- Ensure global ConfigManager is available if needed outside main ---
+# (Though ideally it should be passed around)
+if 'config_manager' not in globals():
+     config_manager = ConfigManager() # Ensure instance exists
 
-PREFERRED_SOURCE_LANGUAGES = {
-    "en-US": "English (US)",
-    "fr-FR": "French",
-}
-PREFERRED_TARGET_LANGUAGES = {
-    None: "Aucune", # Simpler name for display
-    "en-US": "English (US)",
-    "fr-FR": "French",
-}
-# Add more preferred languages here if needed
-
-# --- Derive ALL_LANGUAGES_TARGET --- >
-# Create a version of ALL_LANGUAGES suitable for target selection (includes None)
-ALL_LANGUAGES_TARGET = {None: "Aucune"} # Start with None
-ALL_LANGUAGES_TARGET.update(ALL_LANGUAGES) # Use the ALL_LANGUAGES defined above
-
-# --- Define Available Modes --- >
-AVAILABLE_MODES = {
-    "Dictation": "Dictation Mode",
-    "Command": "Command Mode", # Renamed from Keyboard
-    # Add "Command" later if needed # Comment updated
-}
+# --- Copy Preferred Languages (REMOVED - Defined in constants.py) ---
+# --- Define Available Modes (REMOVED - Defined in constants.py) ---
 
 if __name__ == "__main__":
-    # Ensure logs directory exists
-    if not os.path.exists(LOG_DIR):
-        os.makedirs(LOG_DIR)
-
-    # API Key check moved earlier, before main()
-    # Check if config loading failed catastrophically (though load_config tries to return defaults)
-    if config is None:
-         print("CRITICAL: Configuration could not be loaded. Exiting.")
-    else:
-        try:
-            # --- ADD pyautogui failsafe check ---
-            pyautogui.FAILSAFE = True # Enable failsafe (move mouse to corner to stop)
-            logging.info("PyAutoGUI FAILSAFE enabled.")
-            asyncio.run(main())
-        except KeyboardInterrupt:
-            logging.info("Application interrupted by user (Ctrl+C).")
-        except pyautogui.FailSafeException:
-             logging.critical("PyAutoGUI FAILSAFE triggered! Exiting.")
-        except Exception as e:
-            logging.error(f"An unexpected error occurred in main run: {e}", exc_info=True) 
+    # API Key check moved earlier
+    try:
+        pyautogui.FAILSAFE = True # Enable failsafe
+        logging.info("PyAutoGUI FAILSAFE enabled.")
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Application interrupted by user (Ctrl+C).")
+    except pyautogui.FailSafeException:
+         logging.critical("PyAutoGUI FAILSAFE triggered! Exiting.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in main run: {e}", exc_info=True)

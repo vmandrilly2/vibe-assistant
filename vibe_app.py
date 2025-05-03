@@ -999,7 +999,7 @@ async def main():
         if not systray_ui.exit_app_event.is_set(): systray_ui.exit_app_event.set()
 
         # --- MODIFIED: More Robust Stop Sequence ---
-
+        stt_stopped_cleanly = False # Flag to track STT shutdown
         # 1. Stop Async Tasks First (like STT)
         if 'stt_mgr' in locals() and stt_mgr:
              logging.info("Stopping STT Manager...")
@@ -1014,6 +1014,7 @@ async def main():
                      # --- END ADD TIMEOUT --- >
                      # await stt_mgr.stop_listening() # stop_listening now handles cancellation and disconnect
                  logging.info("STT Manager stopped.")
+                 stt_stopped_cleanly = True # Mark as stopped if no exception/timeout
              except asyncio.TimeoutError:
                  logging.warning("Timeout (3s) waiting for STTManager to stop listening.")
              except Exception as e:
@@ -1039,13 +1040,54 @@ async def main():
         if 'keyboard_listener' in locals() and keyboard_listener.is_alive(): listeners_to_stop.append(keyboard_listener)
 
         logging.info("Signaling input listeners to stop...")
+        listener_stop_start_time = time.monotonic() # Track listener stop time
         for listener in listeners_to_stop:
             try:
                 listener.stop()
             except Exception as e:
                 logging.error(f"Error signaling stop for listener {listener}: {e}")
 
-        # 4. Wait for Manager Threads
+        # 4. Explicitly Cancel Remaining Asyncio Tasks (Replaces Stop/Close)
+        # Moved BEFORE waiting for threads/listeners to potentially free up loop
+        logging.info("Cancelling any remaining asyncio tasks...")
+        tasks_cancelled_cleanly = False
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                tasks = asyncio.all_tasks(loop)
+                current_task = asyncio.current_task(loop)
+                tasks_to_cancel = [task for task in tasks if task is not current_task and not task.done()]
+
+                if tasks_to_cancel:
+                    logging.debug(f"Found {len(tasks_to_cancel)} tasks to cancel: {[t.get_name() for t in tasks_to_cancel]}")
+                    for task in tasks_to_cancel:
+                        task.cancel()
+
+                    # Give cancelled tasks a chance to run, with a timeout
+                    # Gather results to see exceptions during cancellation
+                    results = await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                    logging.debug(f"Gathered cancelled tasks results (Exceptions indicate issues): {results}")
+                    # Check if all results are either None (clean cancel) or CancelledError
+                    tasks_cancelled_cleanly = all(res is None or isinstance(res, asyncio.CancelledError) for res in results)
+                    if not tasks_cancelled_cleanly:
+                        logging.warning("Some asyncio tasks did not cancel cleanly.")
+                else:
+                    logging.debug("No remaining tasks needed cancellation.")
+                    tasks_cancelled_cleanly = True
+            else:
+                logging.debug("Asyncio event loop was not running during task cancellation check.")
+                tasks_cancelled_cleanly = True # Consider it clean if loop wasn't running
+
+        except RuntimeError as e:
+            if "no current event loop" in str(e).lower():
+                 logging.debug("No running asyncio event loop found to cancel tasks.")
+            else:
+                 logging.error(f"RuntimeError during task cancellation: {e}", exc_info=True)
+        except Exception as e:
+            logging.error(f"Unexpected error during task cancellation: {e}", exc_info=True)
+        logging.info(f"Asyncio task cancellation finished (Cleanly: {tasks_cancelled_cleanly}).")
+
+        # 5. Wait for Manager Threads
         logging.info("Waiting for component manager threads to join...")
         for manager in managers_to_stop:
             try:
@@ -1057,7 +1099,7 @@ async def main():
                 logging.error(f"Error joining thread for {type(manager).__name__}: {e}")
         logging.info("Component manager threads joined.")
 
-        # 5. Wait for Input Listeners
+        # 6. Wait for Input Listeners
         logging.info("Waiting for input listeners to join...")
         for listener in listeners_to_stop:
              try:
@@ -1068,41 +1110,15 @@ async def main():
                   logging.error(f"Error joining listener {listener}: {e}")
         logging.info("Input listeners joined.")
 
-        # 6. Wait for Systray Thread (Moved Later)
+        listener_stop_duration = time.monotonic() - listener_stop_start_time
+        logging.info(f"Listener stop & join took: {listener_stop_duration:.3f}s")
+
+        # 7. Wait for Systray Thread
         if 'systray_thread' in locals() and systray_thread.is_alive():
             logging.info("Waiting for systray thread to exit...")
             systray_thread.join(timeout=2.0) # Increased timeout slightly
             if systray_thread.is_alive(): logging.warning("Systray thread did not exit cleanly.")
             else: logging.info("Systray thread finished.")
-
-        # 7. Explicitly Cancel Remaining Asyncio Tasks (Replaces Stop/Close)
-        try:
-            loop = asyncio.get_running_loop()
-            if loop.is_running():
-                logging.debug("Cancelling any remaining asyncio tasks...")
-                tasks = asyncio.all_tasks(loop)
-                current_task = asyncio.current_task(loop)
-                tasks_to_cancel = [task for task in tasks if task is not current_task and not task.done()]
-
-                if tasks_to_cancel:
-                    logging.debug(f"Found {len(tasks_to_cancel)} tasks to cancel.")
-                    for task in tasks_to_cancel:
-                        task.cancel()
-
-                    # Give cancelled tasks a chance to run
-                    await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-                    logging.debug("Gathered cancelled tasks.")
-                else:
-                    logging.debug("No remaining tasks needed cancellation.")
-            else:
-                logging.debug("Asyncio event loop was not running.")
-        except RuntimeError as e:
-            if "no current event loop" in str(e).lower():
-                 logging.debug("No running asyncio event loop found to cancel tasks.")
-            else:
-                 logging.error(f"RuntimeError during task cancellation: {e}", exc_info=True)
-        except Exception as e:
-            logging.error(f"Unexpected error during task cancellation: {e}", exc_info=True)
 
         logging.info("Vibe App finished.")
 

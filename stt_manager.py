@@ -14,8 +14,10 @@ from background_audio_recorder import BackgroundAudioRecorder
 
 # --- Constants (Consider moving to a shared config or passing via options) --- >
 MAX_CONNECT_ATTEMPTS = 3
-CONNECT_RETRY_DELAY_SEC = 0.5
-OVERALL_CONNECT_TIMEOUT_SEC = 5.0
+# --- NEW: Escalating Timeouts and Specific Delays ---
+ATTEMPT_TIMEOUTS_SEC = [1.0, 2.0, 3.0] # Timeout for each attempt
+RETRY_DELAYS_SEC = [0.5, 0.2]         # Delay *before* attempt 2 and attempt 3
+# --- END NEW ---
 BUFFER_SEND_DURATION_CAP_SEC = 5.0 # Max seconds of buffer to send
 
 
@@ -224,48 +226,67 @@ class stt_manager:
                 break
 
             attempts += 1
-            # --- MODIFIED: Use class name in log --- >
-            logging.info(f"stt_manager: Attempting connection (Attempt {attempts}/{MAX_CONNECT_ATTEMPTS})...")
+            # --- MODIFIED: Get timeout and delay for this specific attempt ---
+            current_attempt_timeout = ATTEMPT_TIMEOUTS_SEC[attempts - 1]
+            # Delay happens *before* the next attempt, calculate it now if needed for logging/logic
+            # But apply it later in the loop if the attempt fails.
+            # --- END MODIFIED ---
+
+            # --- MODIFIED: Use class name in log and mention attempt timeout --- >
+            logging.info(f"stt_manager: Attempting connection (Attempt {attempts}/{MAX_CONNECT_ATTEMPTS}, Timeout: {current_attempt_timeout}s)...")
             self._send_status("connecting")
             self._connection_established_event.clear()
 
             try:
+                # --- MODIFIED: Use per-attempt timeout ---
                 connection_successful = await asyncio.wait_for(
                     self._connect_and_stream(),
-                    timeout=OVERALL_CONNECT_TIMEOUT_SEC
+                    timeout=current_attempt_timeout
                 )
+                # --- END MODIFIED ---
 
                 if connection_successful:
                     # --- MODIFIED: Use class name in log --- >
                     logging.info("stt_manager: Connection successful. Monitoring connection.")
-                    attempts = 0
+                    attempts = 0 # Reset attempts on success
+                    # --- MODIFIED: Check connection status slightly less frequently ---
                     while self.is_listening and self.dg_connection and await self.dg_connection.is_connected():
-                         await asyncio.sleep(0.5)
+                         await asyncio.sleep(0.2) # Reduced sleep from 0.5 to 0.2 for faster detection of disconnect? Or keep 0.5? Let's try 0.2
 
+                    # --- MODIFIED: Connection Lost Handling ---
                     if self.is_listening:
                          # --- MODIFIED: Use class name in log --- >
                          logging.warning("stt_manager: Connection lost. Will attempt reconnect.")
                          await self._disconnect()
-                         await asyncio.sleep(CONNECT_RETRY_DELAY_SEC)
+                         # No delay needed here, the loop will continue and apply the correct retry delay *before* the next attempt if attempts > 0
+                    # --- END MODIFIED ---
                     else:
                          # --- MODIFIED: Use class name in log --- >
                          logging.info("stt_manager: Stop requested while connected.")
                          await self._disconnect()
-                         break
+                         break # Exit loop cleanly on stop request
 
                 else:
                     # --- MODIFIED: Use class name in log --- >
                     logging.warning(f"stt_manager: Connection attempt {attempts} failed internally.")
                     await self._disconnect()
-                    if self.is_listening:
-                         await asyncio.sleep(CONNECT_RETRY_DELAY_SEC)
+                    if self.is_listening and attempts < MAX_CONNECT_ATTEMPTS:
+                         # --- MODIFIED: Apply specific delay before next attempt ---
+                         current_retry_delay = RETRY_DELAYS_SEC[attempts - 1]
+                         logging.info(f"Waiting {current_retry_delay}s before retry.")
+                         await asyncio.sleep(current_retry_delay)
+                         # --- END MODIFIED ---
 
             except asyncio.TimeoutError:
-                # --- MODIFIED: Use class name in log --- >
-                logging.warning(f"stt_manager: Connection attempt {attempts} timed out after {OVERALL_CONNECT_TIMEOUT_SEC}s.")
+                # --- MODIFIED: Use class name in log, mention specific timeout --- >
+                logging.warning(f"stt_manager: Connection attempt {attempts} timed out after {current_attempt_timeout}s.")
                 await self._disconnect()
-                if self.is_listening:
-                    await asyncio.sleep(CONNECT_RETRY_DELAY_SEC)
+                if self.is_listening and attempts < MAX_CONNECT_ATTEMPTS:
+                     # --- MODIFIED: Apply specific delay before next attempt ---
+                     current_retry_delay = RETRY_DELAYS_SEC[attempts - 1]
+                     logging.info(f"Waiting {current_retry_delay}s before retry.")
+                     await asyncio.sleep(current_retry_delay)
+                     # --- END MODIFIED ---
 
             except asyncio.CancelledError:
                  # --- MODIFIED: Use class name in log --- >
@@ -275,18 +296,25 @@ class stt_manager:
 
             except Exception as e:
                 # --- MODIFIED: Use class name in log --- >
-                logging.error(f"stt_manager: Unexpected error in connection loop: {e}", exc_info=True)
+                logging.error(f"stt_manager: Unexpected error in connection loop (Attempt {attempts}): {e}", exc_info=True)
                 await self._disconnect()
                 self._send_status("error")
-                if self.is_listening:
-                     await asyncio.sleep(CONNECT_RETRY_DELAY_SEC)
+                if self.is_listening and attempts < MAX_CONNECT_ATTEMPTS:
+                     # --- MODIFIED: Apply specific delay before next attempt ---
+                     current_retry_delay = RETRY_DELAYS_SEC[attempts - 1]
+                     logging.info(f"Waiting {current_retry_delay}s before retry after error.")
+                     await asyncio.sleep(current_retry_delay)
+                     # --- END MODIFIED ---
                 else:
-                     break
+                     # Ensure we break if error happens on last attempt or if not listening
+                     self.is_listening = False # Mark as not listening on unhandled error exit
+                     break # Exit loop
 
+        # --- Cleanup check ---
         if not self.is_listening:
              # --- MODIFIED: Use class name in log --- >
-             logging.debug("stt_manager: Connection loop finished naturally or due to error/max attempts.")
-             await self._disconnect()
+             logging.info("stt_manager: Connection loop finished (stop requested, max attempts, or error).")
+             await self._disconnect() # Ensure disconnect on any exit path
 
 
     async def _connect_and_stream(self) -> bool:

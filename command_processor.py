@@ -30,22 +30,22 @@ from constants import PYNPUT_KEY_MAP # Import from constants
 class CommandProcessor:
     """Handles interpretation and execution of spoken commands."""
 
-    def __init__(self, openai_manager, keyboard_sim, config):
+    def __init__(self, openai_manager, keyboard_sim, config_manager):
         """
         Initializes the CommandProcessor.
 
         Args:
             openai_manager: Instance of OpenAIManager.
             keyboard_sim: Instance of KeyboardSimulator.
-            config: The application's configuration dictionary.
+            config_manager: Instance of ConfigManager.
         """
         self.openai_manager = openai_manager
         self.keyboard_sim = keyboard_sim
-        self.config = config
+        self.config_manager = config_manager # Store the manager instance
         # Extract relevant config settings during init or access directly via self.config
-        self.openai_model = self.config.get("general", {}).get("openai_model", "gpt-4.1-nano")
-        self.modules_config = self.config.get("modules", {})
-        self.command_interpretation_enabled = self.modules_config.get("command_interpretation_enabled", False)
+        self.openai_model = self.config_manager.get("general.openai_model", "gpt-4.1-nano")
+        # No need to store modules_config separately, access directly via manager
+        # self.command_interpretation_enabled = self.config_manager.get("modules.command_interpretation_enabled", False)
 
         # Use the imported map
         self.key_map = PYNPUT_KEY_MAP
@@ -68,7 +68,9 @@ class CommandProcessor:
             return
 
         # --- Check if command interpretation module is enabled --- >
-        if not self.command_interpretation_enabled:
+        # Access config directly when needed
+        command_interp_enabled = self.config_manager.get("modules.command_interpretation_enabled", False)
+        if not command_interp_enabled:
             logging.info("Command Interpretation module disabled in config. Skipping OpenAI call.")
             return
         # --- End Check --- >
@@ -106,7 +108,7 @@ Be precise. If unsure, return an empty list: {{"keys": []}}.
         try:
             # Call the generic method in OpenAIManager
             response_content = await self.openai_manager.get_openai_completion(
-                model=self.openai_model,
+                model=self.config_manager.get("general.openai_model", "gpt-4.1-nano"), # Get latest model from config
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}

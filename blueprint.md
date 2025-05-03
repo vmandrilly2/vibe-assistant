@@ -46,7 +46,7 @@ This file acts as both the project blueprint and a task manager. It outlines the
 
 ## Known Issues / Enhancements
 
-*   [x] **Initial Transcription Delay:** Mitigated with a rolling audio buffer (`audio_buffer.py`).
+*   [x] **Initial Transcription Delay:** Mitigated with a rolling audio buffer (`background_audio_recorder.py`).
 *   [x] **Trigger Button Conflicts:** Default changed from side buttons to Middle Mouse Button due to conflicts. Further refinement may be needed.
 
 ## Key Features & Task Breakdown
@@ -82,7 +82,7 @@ This file acts as both the project blueprint and a task manager. It outlines the
         *   [x] Display mic icon near cursor when active (`tkinter`).
         *   [x] Dynamically show input volume level via icon fill (`numpy`, `pyaudio`).
         *   [x] Manage indicator lifecycle/updates via a queue (`StatusIndicatorManager`).
-        *   [x] Use background audio monitoring (`audio_buffer.py`) for continuous volume level.
+        *   [x] Use background audio monitoring (`background_audio_recorder.py`) for continuous volume level.
         *   [x] Display current Source and Target languages next to the icon.
         *   [x] **Language Selection Popups:**
             *   [x] Show popup on hover over Source/Target language text.
@@ -94,16 +94,22 @@ This file acts as both the project blueprint and a task manager. It outlines the
             *   [x] Select language by releasing the main trigger button while hovering over a popup option.
             *   [x] Update `config.json` and running state immediately on selection.
         *   [ ] Make icon appearance configurable (currently hardcoded).
-*   [x] **Audio Buffering:** Use `BufferedAudioInput` class to continuously capture audio in the background.
+*   [x] **Audio Buffering:** Use `BackgroundAudioRecorder` class in `background_audio_recorder.py` to continuously capture audio in the background.
     *   [x] Maintain a rolling buffer of recent audio.
-    *   [x] Send buffered audio to Deepgram upon activation.
+    *   [x] Send buffered audio to the STT service upon activation (handled by `stt_manager.py`).
     *   [x] Continuously calculate RMS volume and send to status indicator queue.
+*   [x] **STT Service Management:** Use `stt_manager.py` to handle the connection lifecycle to the STT service (currently Deepgram).
+    *   [x] Connects to the service on activation.
+    *   [x] Sends initial audio buffer from `BackgroundAudioRecorder`.
+    *   [x] Streams live audio during activation.
+    *   [x] Manages connection status and retries.
+    *   [x] Receives transcripts and sends them to `vibe_app.py`.
 
 ### Mode 1: Dictation (with Optional Translation)
 
 *   [x] **Activation:** Hold Dictation trigger (`triggers.dictation_button` from config).
 *   [x] **Visual Feedback:** Show text tooltip (source language) and status icon (with languages) on activation.
-*   [x] **Recording & Streaming:** Stream audio to Deepgram using the selected source language (`general.selected_language`).
+*   [x] **Recording & Streaming:** Stream audio via `stt_manager.py` using the selected source language (`general.selected_language`).
 *   [x] **Real-time Interim Feedback:** Display interim results (source language) in the tooltip.
 *   [x] **Real-time Typing Simulation (Final Source):** Type final results (source language) at the cursor (`pynput`), handling corrections.
 *   [x] **Correction Handling:** Handle Deepgram's real-time corrections via backspace simulation based on word history.
@@ -122,7 +128,7 @@ This file acts as both the project blueprint and a task manager. It outlines the
 
 *   [x] **Activation:** Hold Command trigger (`triggers.command_button` + optional `triggers.command_modifier` from config).
 *   [x] **Visual Feedback:** Show status icon (with languages) on activation.
-*   [x] **Recording & Streaming:** Stream audio to Deepgram.
+*   [x] **Recording & Streaming:** Stream audio via `stt_manager.py`.
 *   [ ] **Command Feedback UI:** Display recognized command text in a temporary UI element. (Currently only logs).
 *   [x] **Completion:** Release Command trigger (unless released over language popup).
 *   [x] **Cleanup:** Hide status icon on completion.

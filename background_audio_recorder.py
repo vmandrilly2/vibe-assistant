@@ -14,7 +14,7 @@ MONITOR_RATE = 16000
 MAX_RMS = 5000 # Adjust based on microphone sensitivity
 # --- End Constants ---
 
-class BufferedAudioInput:
+class BackgroundAudioRecorder:
     """Manages continuous background audio recording, buffering, and RMS calculation."""
 
     def __init__(self, status_q, buffer_seconds=7.0, device_index=None):
@@ -26,7 +26,7 @@ class BufferedAudioInput:
         """
         self.status_queue = status_q
         self.device_index = device_index
-        self.buffer_seconds = 7.0 # Store up to 7 seconds
+        self.buffer_seconds = buffer_seconds # Store up to buffer_seconds seconds
 
         self.p = None
         self.stream = None
@@ -38,7 +38,7 @@ class BufferedAudioInput:
         self._audio_buffer = collections.deque(maxlen=self.buffer_max_chunks)
         self._buffer_lock = threading.Lock()
 
-        logging.info(f"BufferedAudioInput: Buffer initialized for ~{self.buffer_seconds}s ({self.buffer_max_chunks} chunks).")
+        logging.info(f"BackgroundAudioRecorder: Buffer initialized for ~{self.buffer_seconds}s ({self.buffer_max_chunks} chunks).")
 
     def _calculate_rms(self, data):
         """Calculate Root Mean Square (RMS) volume of audio data."""
@@ -50,12 +50,12 @@ class BufferedAudioInput:
             normalized_rms = min(rms / MAX_RMS, 1.0)
             return normalized_rms
         except Exception as e:
-            logging.error(f"[BufferedAudioInput] Error calculating RMS: {e}")
+            logging.error(f"[BackgroundAudioRecorder] Error calculating RMS: {e}")
             return 0
 
     def _capture_loop(self):
         """Continuously reads audio, stores in buffer, and sends RMS to queue."""
-        logging.info("[BufferedAudioInput] Capture loop started.")
+        logging.info("[BackgroundAudioRecorder] Capture loop started.")
         stream_opened = False
         try:
             self.p = pyaudio.PyAudio()
@@ -66,72 +66,65 @@ class BufferedAudioInput:
                                       frames_per_buffer=MONITOR_CHUNK_SIZE,
                                       input_device_index=self.device_index)
             stream_opened = True
-            logging.info(f"[BufferedAudioInput] PyAudio stream opened (Device: {self.device_index or 'Default'}).")
+            logging.info(f"[BackgroundAudioRecorder] PyAudio stream opened (Device: {self.device_index or 'Default'}).")
         except Exception as e:
-            logging.error(f"[BufferedAudioInput] Failed to open PyAudio stream: {e}", exc_info=True)
+            logging.error(f"[BackgroundAudioRecorder] Failed to open PyAudio stream: {e}", exc_info=True)
             self.running.clear()
 
         while self.running.is_set() and stream_opened:
             try:
                 data = self.stream.read(MONITOR_CHUNK_SIZE, exception_on_overflow=False)
 
-                # --- MODIFIED: Store timestamp with data --- >
+                # Store timestamp with data
                 current_time = time.monotonic()
                 with self._buffer_lock:
                     self._audio_buffer.append((current_time, data))
-                # --- END MODIFIED --- >
 
-                # 2. Calculate volume and send to status queue
+                # Calculate volume and send to status queue
                 volume = self._calculate_rms(data)
                 try:
-                    # Use put_nowait to avoid blocking if the UI thread is slow
                     self.status_queue.put_nowait(("volume", volume))
                 except queue.Full:
-                    # Log less frequently if queue is full to avoid spam
-                    # logging.warning("[BufferedAudioInput] Status queue full. Discarding volume update.")
+                    # logging.warning("[BackgroundAudioRecorder] Status queue full. Discarding volume update.")
                     pass
 
             except IOError as e:
-                # Handle stream closure or errors gracefully
                 if self.running.is_set():
-                    logging.error(f"[BufferedAudioInput] PyAudio read error: {e}")
+                    logging.error(f"[BackgroundAudioRecorder] PyAudio read error: {e}")
                 break # Exit loop on IOError
             except Exception as e:
                  if self.running.is_set():
-                     logging.error(f"[BufferedAudioInput] Unexpected error in capture loop: {e}", exc_info=True)
-                 # Optionally break here too depending on desired robustness
-                 # break
+                     logging.error(f"[BackgroundAudioRecorder] Unexpected error in capture loop: {e}", exc_info=True)
+                 # break # Optional
 
-        # --- Cleanup --- #
-        logging.info("[BufferedAudioInput] Capture loop ending. Cleaning up...")
+        # Cleanup
+        logging.info("[BackgroundAudioRecorder] Capture loop ending. Cleaning up...")
         if self.stream:
             try:
                 if self.stream.is_active():
                     self.stream.stop_stream()
                 self.stream.close()
-                logging.info("[BufferedAudioInput] PyAudio stream stopped and closed.")
+                logging.info("[BackgroundAudioRecorder] PyAudio stream stopped and closed.")
             except Exception as e:
-                logging.error(f"[BufferedAudioInput] Error closing PyAudio stream: {e}")
+                logging.error(f"[BackgroundAudioRecorder] Error closing PyAudio stream: {e}")
         self.stream = None
 
         if self.p:
             try:
                 self.p.terminate()
-                logging.info("[BufferedAudioInput] PyAudio instance terminated.")
+                logging.info("[BackgroundAudioRecorder] PyAudio instance terminated.")
             except Exception as e:
-                logging.error(f"[BufferedAudioInput] Error terminating PyAudio instance: {e}")
+                logging.error(f"[BackgroundAudioRecorder] Error terminating PyAudio instance: {e}")
         self.p = None
-        logging.info("[BufferedAudioInput] Capture loop finished.")
+        logging.info("[BackgroundAudioRecorder] Capture loop finished.")
 
     def get_buffer(self) -> list:
         """Returns a copy of the current audio buffer contents as a list. Thread-safe."""
         with self._buffer_lock:
-            # Return a copy to avoid modification after retrieval
             buffer_list = list(self._audio_buffer)
-            logging.debug(f"[BufferedAudioInput] Returning buffer with {len(buffer_list)} chunks.")
+            logging.debug(f"[BackgroundAudioRecorder] Returning buffer with {len(buffer_list)} chunks.")
             return buffer_list
 
-    # --- NEW: Method to get audio from the last N seconds --- >
     def get_buffer_last_n_seconds(self, duration_sec: float, reference_time: float) -> list:
         """Returns audio data recorded within the last 'duration_sec' before 'reference_time'.
 
@@ -149,14 +142,12 @@ class BufferedAudioInput:
         relevant_chunks = []
 
         with self._buffer_lock:
-            # Iterate through the deque (ordered oldest to newest)
             for timestamp, data in self._audio_buffer:
                 if timestamp >= cutoff_time:
                     relevant_chunks.append(data)
 
-        logging.debug(f"[BufferedAudioInput] Retrieved {len(relevant_chunks)} chunks for the last {duration_sec:.2f}s (cutoff: {cutoff_time:.2f}, ref: {reference_time:.2f})")
+        logging.debug(f"[BackgroundAudioRecorder] Retrieved {len(relevant_chunks)} chunks for the last {duration_sec:.2f}s (cutoff: {cutoff_time:.2f}, ref: {reference_time:.2f})")
         return relevant_chunks
-    # --- END NEW ---
 
     def start(self):
         """Starts the audio capture thread if not already running."""
@@ -164,36 +155,33 @@ class BufferedAudioInput:
             self.running.set()
             self.thread = threading.Thread(target=self._capture_loop, daemon=True)
             self.thread.start()
-            logging.info("[BufferedAudioInput] Started capture thread.")
+            logging.info("[BackgroundAudioRecorder] Started capture thread.")
         else:
-            logging.warning("[BufferedAudioInput] Start called but already running.")
+            logging.warning("[BackgroundAudioRecorder] Start called but already running.")
 
     def stop(self):
         """Stops the audio capture thread."""
         if self.running.is_set():
-            logging.info("[BufferedAudioInput] Stopping capture thread...")
-            self.running.clear() # Signal the loop to stop
+            logging.info("[BackgroundAudioRecorder] Stopping capture thread...")
+            self.running.clear()
 
             if self.thread and self.thread.is_alive():
-                # Wait briefly for the thread to exit
                 self.thread.join(timeout=1.0)
                 if self.thread.is_alive():
-                    logging.warning("[BufferedAudioInput] Capture thread did not stop cleanly after 1s.")
-                    # Consider more forceful shutdown if necessary, but PyAudio cleanup
-                    # within the loop should handle stream closing.
+                    logging.warning("[BackgroundAudioRecorder] Capture thread did not stop cleanly after 1s.")
 
-            self.thread = None # Clear thread reference
-            logging.info("[BufferedAudioInput] Stopped.")
+            self.thread = None
+            logging.info("[BackgroundAudioRecorder] Stopped.")
         else:
-            logging.debug("[BufferedAudioInput] Stop called but not running.")
+            logging.debug("[BackgroundAudioRecorder] Stop called but not running.")
 
 # --- Example Usage (if run directly) ---
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
     test_status_queue = queue.Queue()
 
-    print("Initializing BufferedAudioInput...")
-    buffered_input = BufferedAudioInput(test_status_queue)
+    print("Initializing BackgroundAudioRecorder...") # Updated class name
+    buffered_input = BackgroundAudioRecorder(test_status_queue) # Updated class name
     buffered_input.start()
 
     print("Running for 10 seconds...")

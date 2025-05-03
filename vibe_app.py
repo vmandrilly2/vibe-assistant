@@ -19,7 +19,7 @@ from config_manager import ConfigManager
 # --- UI Managers ---
 from action_confirm_ui import ActionConfirmManager
 import systray_ui # Import the run function and the reload event
-from audio_buffer import BufferedAudioInput
+from background_audio_recorder import BackgroundAudioRecorder
 from status_indicator import StatusIndicatorManager, DEFAULT_MODES # Import DEFAULT_MODES
 from tooltip_manager import TooltipManager
 
@@ -50,7 +50,7 @@ from pynput.keyboard import Key, KeyCode # Import KeyCode
 # --- Core Logic Managers/Processors ---
 from keyboard_simulator import KeyboardSimulator
 from openai_manager import OpenAIManager
-from deepgram_manager import DeepgramManager
+from stt_manager import stt_manager
 from dictation_processor import DictationProcessor
 from command_processor import CommandProcessor
 
@@ -534,8 +534,10 @@ def on_release(key):
 async def main():
     global g_pending_action, g_action_confirmed
     global tooltip_mgr, status_mgr, buffered_audio_input, action_confirm_mgr
-    global mouse_controller, keyboard_sim, openai_manager, deepgram_mgr
-    global dictation_processor, command_processor # <<< CORRECTED
+    global mouse_controller, keyboard_sim, openai_manager
+    # --- MODIFIED: Use stt_mgr --- >
+    global stt_mgr
+    global dictation_processor, command_processor
     global typed_word_history, final_source_text, final_command_text
     global ui_interaction_cancelled, initial_activation_pos, start_time # Keep start_time global
 
@@ -593,11 +595,11 @@ async def main():
     # --- Start Buffered Audio Input (Conditional) --- >
     buffered_audio_input = None
     if audio_buffer_enabled:
-        buffered_audio_input = BufferedAudioInput(status_queue)
+        buffered_audio_input = BackgroundAudioRecorder(status_queue)
         buffered_audio_input.start()
-        logging.info("Buffered Audio Input activé et démarré.")
+        logging.info("Background Audio Recorder activé et démarré.")
     else:
-        logging.info("Buffered Audio Input désactivé par la configuration.")
+        logging.info("Background Audio Recorder désactivé par la configuration.")
 
     # --- Initialize Keyboard Simulator --- >
     keyboard_sim = KeyboardSimulator()
@@ -630,32 +632,33 @@ async def main():
     else:
         logging.info("Command Interpretation disabled. CommandProcessor not initialized.")
 
-    # --- Initialize Deepgram Client --- >
+    # --- Initialize Deepgram Client & STT Manager (Conditional) --- >
     deepgram_client = None
+    stt_mgr = None
+    transcript_queue = None # Initialize transcript queue
+
     try:
-        # Configure Deepgram logging level if needed (e.g., logging.WARNING)
         config_dg = DeepgramClientOptions(verbose=logging.WARNING)
         deepgram_client = DeepgramClient(DEEPGRAM_API_KEY, config_dg)
         logging.info("Deepgram client initialized.")
+
+        # --- Initialize STT Manager --- >
+        if buffered_audio_input and deepgram_client: # Depends on audio buffer and client
+             transcript_queue = queue.Queue() # Create transcript queue here
+             stt_mgr = stt_manager(
+                 stt_client=deepgram_client,
+                 status_q=status_queue,
+                 transcript_q=transcript_queue,
+                 background_recorder=buffered_audio_input
+             )
+        else:
+            logging.warning("STT Manager cannot be initialized (Background Audio Recorder or DG Client missing/disabled).")
+
     except Exception as e:
-        logging.error(f"Failed to initialize Deepgram client: {e}")
+        logging.error(f"Failed to initialize Deepgram client or STT Manager: {e}")
         if systray_ui.exit_app_event: systray_ui.exit_app_event.set()
-        return
-
-    # --- Initialize Deepgram Manager (Conditional) --- >
-    deepgram_mgr = None
-    if buffered_audio_input and deepgram_client: # Depends on audio buffer
-         transcript_queue = queue.Queue() # Create transcript queue here
-         deepgram_mgr = DeepgramManager(
-             deepgram_client=deepgram_client,
-             status_q=status_queue,
-             transcript_q=transcript_queue,
-             buffered_audio=buffered_audio_input
-         )
-    else:
-        logging.warning("Deepgram Manager cannot be initialized (Audio Buffer or DG Client missing/disabled).")
-        transcript_queue = None # Ensure queue is None if manager isn't created
-
+        # sys.exit(1) # Consider exiting if STT is critical
+    # --- End STT Manager Initialization --- >
 
     # --- Initialize pynput Controller --- >
     mouse_controller = mouse.Controller()
@@ -739,8 +742,8 @@ async def main():
                     received_activation_id = action_data.get("activation_id")
                     current_session_mode = action_data.get("mode", MODE_DICTATION) # <<< STORE session mode
                     # Double check if still active and manager exists
-                    if transcription_active_event.is_set() and not is_stopping and deepgram_mgr:
-                        logging.info(f"Received initiate_dg_connection for ID {received_activation_id}. Starting DG manager listening.")
+                    if transcription_active_event.is_set() and not is_stopping and stt_mgr:
+                        logging.info(f"Received initiate_dg_connection for ID {received_activation_id}. Starting STT manager listening.")
                         current_activation_id = received_activation_id # Set the global ID
                         # Get language from config
                         current_source_lang = config_manager.get("general.selected_language", "en-US")
@@ -749,9 +752,9 @@ async def main():
                             encoding="linear16", channels=1, sample_rate=16000, punctuate=True, numerals=True,
                             utterance_end_ms="1000", vad_events=True, endpointing=300
                         )
-                        await deepgram_mgr.start_listening(current_dg_options, received_activation_id)
+                        await stt_mgr.start_listening(current_dg_options, received_activation_id)
                     else:
-                         logging.warning(f"Ignoring initiate_dg_connection command because transcription is no longer active or stopping (ID: {received_activation_id}).")
+                         logging.warning(f"Ignoring initiate_dg_connection command because transcription is no longer active, stopping, or STT Manager is missing (ID: {received_activation_id}).")
 
                 # --- Handle Action Confirmation Message --- >
                 elif action_command == "action_confirmed":
@@ -788,14 +791,14 @@ async def main():
             if is_stopping:
                 logging.debug(f"Processing stop flow steps for {active_mode_on_stop}...")
                 action_executed_this_stop = False # Initialize here to ensure it always exists
-                # --- Stop Deepgram Listening --- >
-                if deepgram_mgr and deepgram_mgr.is_listening:
-                    logging.info("Signaling DeepgramManager to stop listening...")
-                    stop_task = asyncio.create_task(deepgram_mgr.stop_listening())
+                # --- Stop STT Listening --- >
+                if stt_mgr and stt_mgr.is_listening:
+                    logging.info("Signaling STTManager to stop listening...")
+                    stop_task = asyncio.create_task(stt_mgr.stop_listening())
                     try:
                         await asyncio.wait_for(stop_task, timeout=2.0)
-                    except asyncio.TimeoutError: logging.warning("Timeout waiting for DeepgramManager to stop.")
-                    except Exception as e: logging.error(f"Error during DeepgramManager stop: {e}")
+                    except asyncio.TimeoutError: logging.warning("Timeout waiting for STTManager to stop.")
+                    except Exception as e: logging.error(f"Error during STTManager stop: {e}")
 
                 # --- Hide Tooltip (if dictation mode) --- >
                 if tooltip_mgr and active_mode_on_stop == MODE_DICTATION:
@@ -919,15 +922,15 @@ async def main():
             if tooltip_enabled and tooltip_mgr and not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set(): logging.error("Tooltip thread died."); break
             if status_indicator_enabled and status_mgr and not status_mgr.thread.is_alive() and not status_mgr._stop_event.is_set(): logging.error("Status Indicator thread died."); break
             if action_confirm_enabled and action_confirm_mgr and not action_confirm_mgr.thread.is_alive() and not action_confirm_mgr._stop_event.is_set(): logging.error("Action Confirmation thread died."); break
-            if audio_buffer_enabled and buffered_audio_input and not buffered_audio_input.thread.is_alive() and not buffered_audio_input.running.is_set(): logging.error("Buffered Audio Input thread died."); break
-            # Check Deepgram Manager Task Health
-            if deepgram_mgr and deepgram_mgr._connection_task and deepgram_mgr._connection_task.done():
+            if audio_buffer_enabled and buffered_audio_input and not buffered_audio_input.thread.is_alive() and not buffered_audio_input.running.is_set(): logging.error("Background Audio Recorder thread died."); break
+            # --- MODIFIED: Check stt_mgr Task Health --- >
+            if stt_mgr and stt_mgr._connection_task and stt_mgr._connection_task.done():
                 try:
-                    exc = deepgram_mgr._connection_task.exception()
-                    if exc: logging.error(f"DeepgramManager task ended with exception: {exc}", exc_info=exc); break # Exit on DG task error
-                    elif deepgram_mgr.is_listening: logging.warning("DeepgramManager task finished unexpectedly."); # Consider restart?
-                except asyncio.CancelledError: logging.info("DeepgramManager task was cancelled.")
-                except Exception as e: logging.error(f"Error checking DeepgramManager task state: {e}")
+                    exc = stt_mgr._connection_task.exception()
+                    if exc: logging.error(f"STTManager task ended with exception: {exc}", exc_info=exc); break # Exit on STT task error
+                    elif stt_mgr.is_listening: logging.warning("STTManager task finished unexpectedly."); # Consider restart?
+                except asyncio.CancelledError: logging.info("STTManager task was cancelled.")
+                except Exception as e: logging.error(f"Error checking STTManager task state: {e}")
 
             # --- Process Transcript Queue --- >
             if transcript_queue: # Check if queue exists
@@ -974,13 +977,13 @@ async def main():
         if config_manager.get("modules.action_confirm_enabled") and action_confirm_mgr: action_confirm_mgr.stop()
         logging.info("Component managers stop requested.")
 
-        # Stop Deepgram Manager if it exists
-        if deepgram_mgr:
-             logging.info("Stopping Deepgram Manager...")
+        # --- MODIFIED: Stop STT Manager --- >
+        if stt_mgr:
+             logging.info("Stopping STT Manager...")
              # Ensure listening is stopped cleanly
-             if deepgram_mgr.is_listening or (deepgram_mgr._connection_task and not deepgram_mgr._connection_task.done()):
-                 await deepgram_mgr.stop_listening()
-             logging.info("Deepgram Manager stopped.")
+             if stt_mgr.is_listening or (stt_mgr._connection_task and not stt_mgr._connection_task.done()):
+                 await stt_mgr.stop_listening()
+             logging.info("STT Manager stopped.")
 
 
         # Wait for Systray

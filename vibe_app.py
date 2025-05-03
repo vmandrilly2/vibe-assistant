@@ -611,7 +611,6 @@ async def main():
 
     # --- Initialize Dictation Processor (depends on kb_sim, queues, event) --- >
     dictation_processor = DictationProcessor(
-        tooltip_q=tooltip_queue,
         keyboard_sim=keyboard_sim,
         action_confirm_q=action_confirm_queue,
         transcription_active_event=transcription_active_event
@@ -944,20 +943,49 @@ async def main():
                     if activation_id == current_activation_id:
                         active_mode = current_session_mode # Use mode from current session
                         if msg_type == "interim":
-                            if active_mode == MODE_DICTATION or active_mode == MODE_COMMAND: # Show interim for both for now
+                            if active_mode == MODE_DICTATION:
+                                # --- NEW: Send interim directly to tooltip --- >
+                                if tooltip_mgr and tooltip_enabled:
+                                    try:
+                                        x, y = pyautogui.position()
+                                        tooltip_queue.put_nowait(("update", (transcript, x, y, activation_id)))
+                                        tooltip_queue.put_nowait(("show", activation_id))
+                                    except pyautogui.FailSafeException:
+                                        logging.warning("PyAutoGUI fail-safe triggered (mouse moved to corner?).")
+                                    except queue.Full:
+                                        logging.warning(f"Tooltip queue full sending interim update for activation ID {activation_id}.")
+                                    except Exception as e:
+                                        logging.error(f"Error sending interim update to tooltip queue: {e}")
+                                # --- End interim tooltip handling --- >
+                            elif active_mode == MODE_COMMAND: # Optionally show interim for command?
                                 handle_dictation_interim(dictation_processor, transcript, activation_id)
                         elif msg_type == "final":
                             if active_mode == MODE_DICTATION:
                                  handle_dictation_final(dictation_processor, transcript, typed_word_history, activation_id)
                                  last_interim_transcript = "" # Clear interim after final
+                                 # --- NEW: Send hide command to tooltip --- >
+                                 if tooltip_mgr and tooltip_enabled:
+                                     try:
+                                         tooltip_queue.put_nowait(("hide", activation_id))
+                                     except queue.Full:
+                                         logging.warning(f"Tooltip queue full sending hide on final for ID {activation_id}.")
+                                     except Exception as e:
+                                         logging.error(f"Error sending hide on final to tooltip queue: {e}")
+                                 # --- End hide command --- >
                             elif active_mode == MODE_COMMAND:
                                  final_command_text = transcript # Store final command text
                                  logging.debug(f"Stored final transcript for Command Mode: '{final_command_text}'")
-                                 # Hide interim tooltip only if manager exists AND is enabled
-                                 if tooltip_mgr and config_manager.get("modules.tooltip_enabled", True):
-                                     tooltip_queue.put_nowait(("hide", activation_id))
-                    else:
-                        logging.debug(f"Ignoring transcript for activation {activation_id} (current is {current_activation_id})")
+                                 # --- NEW: Send hide command to tooltip --- >
+                                 if tooltip_mgr and tooltip_enabled:
+                                     try:
+                                         tooltip_queue.put_nowait(("hide", activation_id))
+                                     except queue.Full:
+                                         logging.warning(f"Tooltip queue full sending hide on final command for ID {activation_id}.")
+                                     except Exception as e:
+                                         logging.error(f"Error sending hide on final command to tooltip queue: {e}")
+                                 # --- End hide command --- >
+                        else:
+                            logging.debug(f"Ignoring transcript for activation {activation_id} (current is {current_activation_id})")
 
                 except queue.Empty: pass
                 except Exception as e: logging.error(f"Error processing transcript queue: {e}", exc_info=True)

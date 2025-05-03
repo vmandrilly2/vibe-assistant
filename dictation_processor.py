@@ -9,55 +9,19 @@ from pynput.keyboard import Key # For action execution check later
 from i18n import _, get_current_language, ALL_DICTATION_REPLACEMENTS
 
 class DictationProcessor:
-    """Handles the processing of interim and final dictation results."""
+    """Handles the processing of final dictation results, including corrections and keyword actions."""
 
-    def __init__(self, tooltip_q: queue.Queue, keyboard_sim, action_confirm_q: queue.Queue, transcription_active_event):
+    def __init__(self, keyboard_sim, action_confirm_q: queue.Queue, transcription_active_event):
         """
         Args:
-            tooltip_q: Queue for sending updates to the TooltipManager.
             keyboard_sim: Instance of KeyboardSimulator for typing actions.
             action_confirm_q: Queue for triggering the ActionConfirmManager UI.
-            transcription_active_event: Event signalling if transcription is active (for tooltip checks).
+            transcription_active_event: Event signalling if transcription is active (for tooltip checks - REMOVE THIS? Not used anymore here).
         """
-        self.tooltip_queue = tooltip_q
         self.keyboard_sim = keyboard_sim
         self.action_confirm_queue = action_confirm_q
         self.transcription_active_event = transcription_active_event
         logging.info("DictationProcessor initialized.")
-
-    def handle_interim(self, transcript: str, activation_id):
-        """Handles interim dictation results by displaying them in a temporary tooltip
-           for a specific activation ID.
-        """
-        if not transcript:
-            return
-
-        # Log the interim transcript
-        # logging.debug(f"DictationProcessor Interim: '{transcript}' (ID: {activation_id})") # Less verbose log
-
-        # --- Tooltip Update Logic --- >
-        try:
-            # Check if transcription is still active using the event
-            if not self.transcription_active_event.is_set():
-                logging.debug("Tooltip update ignored: transcription_active_event is not set.")
-                return
-            
-            # Get current mouse position
-            x, y = pyautogui.position()
-            # Send update command to the tooltip manager thread with the activation ID
-            # Note: TooltipManager itself is not directly accessed here, only its queue
-            if self.tooltip_queue: # Check if queue exists
-                self.tooltip_queue.put_nowait(("update", (transcript, x, y, activation_id)))
-                # Send show command with the activation ID
-                self.tooltip_queue.put_nowait(("show", activation_id))
-            else:
-                logging.warning("Tooltip queue not available in DictationProcessor.")
-        except pyautogui.FailSafeException:
-             logging.warning("PyAutoGUI fail-safe triggered (mouse moved to corner?).")
-        except queue.Full:
-            logging.warning(f"Tooltip queue full when sending interim update for activation ID {activation_id}.")
-        except Exception as e:
-            logging.error(f"Error getting mouse position or updating tooltip in DictationProcessor: {e}")
 
     def handle_final(self, final_transcript: str, history: list, activation_id):
         """Handles the final dictation transcript segment based on history.
@@ -76,14 +40,6 @@ class DictationProcessor:
         logging.debug(f"DictationProcessor handling final segment '{final_transcript}' for ID {activation_id}")
 
         action_to_confirm = None # Initialize
-
-        # --- Hide the interim tooltip for this specific activation --- >
-        try:
-            if self.tooltip_queue:
-                self.tooltip_queue.put_nowait(("hide", activation_id))
-            # else: Already warned if queue is missing during interim
-        except queue.Full:
-            logging.warning(f"Tooltip queue full trying to hide on final for ID {activation_id}.")
 
         # --- Step A: Calculate Target Word List & Detect Actions --- >
 

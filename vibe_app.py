@@ -50,9 +50,8 @@ from pynput.keyboard import Key, KeyCode # Import KeyCode
 # --- Core Logic Managers/Processors ---
 from keyboard_simulator import KeyboardSimulator
 from openai_manager import OpenAIManager
-from stt_manager import stt_manager
+from stt_manager import STTConnectionHandler
 from dictation_processor import DictationProcessor
-from command_processor import CommandProcessor
 
 # --- Constants ---
 from constants import (
@@ -88,9 +87,8 @@ if not DEEPGRAM_API_KEY:
 if not OPENAI_API_KEY:
     # Check config if modules requiring OpenAI are enabled
     translation_enabled = config_manager.get("modules.translation_enabled", True)
-    command_interp_enabled = config_manager.get("modules.command_interpretation_enabled", False)
-    if translation_enabled or command_interp_enabled:
-        logging.warning("OPENAI_API_KEY not found in environment variables or .env, but required by enabled modules (Translation/Command Interpretation). These features may fail.")
+    if translation_enabled:
+        logging.warning("OPENAI_API_KEY not found in environment variables or .env, but required by enabled Translation module. This feature may fail.")
     else:
          logging.info("OPENAI_API_KEY not found, but not required by currently enabled modules.")
 
@@ -107,18 +105,17 @@ openai_client = None
 openai_manager = None
 # Check both API key existence AND config setting
 translation_enabled = config_manager.get("modules.translation_enabled", True)
-command_interp_enabled = config_manager.get("modules.command_interpretation_enabled", False)
-if translation_enabled or command_interp_enabled:
+if translation_enabled:
     if OPENAI_API_KEY:
         try:
             openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
             openai_manager = OpenAIManager(openai_client) # Instantiate the manager
-            logging.info("OpenAI client and manager initialized (needed for Translation and/or Command Interpretation).")
+            logging.info("OpenAI client and manager initialized (needed for Translation module).")
         except Exception as e:
             logging.error(f"Failed to initialize OpenAI client or manager: {e}")
     # Warning about missing key logged earlier
 else:
-    logging.info("OpenAI client not initialized as Translation and Command Interpretation modules are disabled in config.")
+    logging.info("OpenAI client not initialized as Translation module is disabled in config.")
 
 # --- Logging Setup ---
 LOG_DIR = "logs" # Define log directory
@@ -173,13 +170,6 @@ else:
     logging.info("Translation Disabled (Target Language is None)")
 dictation_button_name = config_manager.get('triggers.dictation_button', 'middle')
 logging.info(f"Dictation Trigger: {dictation_button_name}")
-command_button_name = config_manager.get('triggers.command_button', None)
-command_mod_name = config_manager.get('triggers.command_modifier', None)
-if command_button_name:
-    mod_str = f" + {command_mod_name}" if command_mod_name else ""
-    logging.info(f"Command Trigger: {command_button_name}{mod_str}")
-else:
-    logging.info("Command Trigger: Disabled")
 # --- End Initial Logging ---
 
 
@@ -208,6 +198,20 @@ action_confirm_queue = queue.Queue()
 ui_interaction_cancelled = False # Flag specifically for UI hover interactions
 initial_activation_pos = None # Position where activation started
 start_time = None # Timestamp when activation started
+
+# --- NEW: State for Concurrent STT Sessions ---
+MAX_CONCURRENT_SESSIONS = 4
+active_stt_sessions = {} # Stores session data keyed by activation_id
+# Session Data Structure: { 'handler': STTConnectionHandler, 'processor': DictationProcessor, 'buffered_transcripts': [], 'is_processing_allowed': bool, 'stop_requested': bool, 'processing_complete': bool, 'creation_time': float }
+currently_processing_session_id = None # ID of the session currently allowed to process/type
+sessions_waiting_for_processing = [] # List of activation_ids waiting their turn
+latest_session_id = None # Track the ID of the most recently started session for UI status
+typing_in_progress = threading.Event() # Event to signal if keyboard sim is busy - MAYBE USE ASYNCIO EVENT?
+# --- NEW: Lock for shared session state ---
+session_state_lock = asyncio.Lock()
+# --- NEW: Queue for serialized typing output ---
+typing_queue = asyncio.Queue()
+# --- END NEW ---
 
 # --- State for Pending Action Confirmation --- >
 g_pending_action = None      # Stores the name of the action detected (e.g., "Enter")
@@ -249,7 +253,7 @@ def handle_dictation_final(dictation_processor: DictationProcessor, final_transc
             if detected_action:
                 logging.info(f"DictationProcessor detected action: '{detected_action}'")
                 g_pending_action = detected_action # Store pending action
-                g_action_confirmed = False # Reset confirmation status
+                g_action_confirmed = False
             else:
                 # Clear pending action if current segment has none
                 if g_pending_action:
@@ -369,21 +373,17 @@ def on_click(x, y, button, pressed):
     # --- Handle Press ---
     if pressed:
         # --- Set the *actual* active mode based on which trigger was pressed --- >
-        # This overrides the config setting if both triggers are configured and command is pressed
-        # TODO: Revisit this logic - should pressing command trigger *change* the mode in config?
-        # For now, let's respect the trigger used for the *current* activation, but keep config mode separate.
-        current_session_mode = trigger_mode # Use the mode determined by the trigger for this session
+        # Always use Dictation mode since Command mode is disabled
+        current_session_mode = MODE_DICTATION
 
         ui_interaction_cancelled = False # Reset flag on new press
         if not transcription_active_event.is_set():
             logging.info(f"Trigger button pressed - starting mode: {current_session_mode}.")
             # Clear specific state based on the mode being activated
-            if current_session_mode == MODE_DICTATION:
-                typed_word_history.clear()
-                final_source_text = ""
-                last_interim_transcript = ""
-            elif current_session_mode == MODE_COMMAND:
-                final_command_text = ""
+            # Clear dictation state (only mode currently)
+            typed_word_history.clear() # Still need to clear this? No, it's per-session now.
+            final_source_text = "" # This global is likely obsolete
+            last_interim_transcript = ""
 
             # Set general active flag and time/pos
             transcription_active_event.set()
@@ -427,27 +427,12 @@ def on_click(x, y, button, pressed):
         hover_lang_code = None
         if status_mgr and hasattr(status_mgr, 'hovered_data') and status_mgr.hovered_data:
             hover_data = status_mgr.hovered_data
-            if hover_data.get("type") == "mode":
-                hover_mode = hover_data.get("value")
-            elif hover_data.get("type") in ["source", "target"]:
+            if hover_data.get("type") in ["source", "target"]:
                 hover_lang_type = hover_data.get("type")
                 hover_lang_code = hover_data.get("value")
 
         # Process Hover Selection if Found
-        if hover_mode:
-            logging.info(f"Trigger release over mode option: {hover_mode}. Selecting mode.")
-            try: ui_action_queue.put_nowait(("select_mode", hover_mode))
-            except queue.Full: logging.warning(f"Action queue full sending hover mode selection ({hover_mode}).")
-            ui_interaction_cancelled = True
-            logging.debug("Set ui_interaction_cancelled flag due to mode hover selection.")
-            try:
-                 selection_data = {"type": "mode", "value": hover_mode}
-                 status_queue.put_nowait(("selection_made", selection_data))
-            except queue.Full: logging.warning(f"Status queue full sending selection confirmation.")
-            transcription_active_event.clear() # Clear event to signal stop
-            return
-
-        elif hover_lang_type and (hover_lang_code is not None or (hover_lang_type == 'target' and hover_lang_code is None)):
+        if hover_lang_type and (hover_lang_code is not None or (hover_lang_type == 'target' and hover_lang_code is None)):
             logging.info(f"Trigger release over language option: Type={hover_lang_type}, Code={hover_lang_code}. Selecting language.")
             try: ui_action_queue.put_nowait(("select_language", {"type": hover_lang_type, "lang": hover_lang_code}))
             except queue.Full: logging.warning(f"Action queue full sending hover language selection.")
@@ -530,16 +515,254 @@ def on_release(key):
         logging.debug(f"Modifier released: {key}. Currently pressed: {modifier_keys_pressed}")
 
 
+async def process_typing_queue():
+    """Processes the typing queue one item at a time."""
+    global typing_in_progress # Use the global event
+    logging.info("Typing queue processor started.")
+    while True:
+        try:
+            text_to_type = await typing_queue.get()
+            logging.debug(f"Dequeued typing job: '{text_to_type}'")
+            # Using a threading.Event in async code isn't ideal, but keyboard_sim is synchronous.
+            # We essentially block this async task while typing happens.
+            # A cleaner way might involve run_in_executor if typing is slow,
+            # but let's keep it simple for now.
+            if typing_in_progress.is_set():
+                 logging.warning("Typing processor: Found typing_in_progress already set? Waiting...")
+                 # This shouldn't happen with a single consumer queue, but as a safeguard:
+                 while typing_in_progress.is_set():
+                     await asyncio.sleep(0.05)
+
+            typing_in_progress.set()
+            logging.debug(f"Simulating typing: '{text_to_type}'")
+            if keyboard_sim:
+                # --- Simplified: Only type text, no backspace action --- >
+                if isinstance(text_to_type, str):
+                    keyboard_sim.simulate_typing(text_to_type)
+                else:
+                    logging.error(f"Typing processor received non-string data: {type(text_to_type)}")
+                # Add a small delay after typing to prevent issues?
+                await asyncio.sleep(0.05)
+            else:
+                 logging.error("Keyboard simulator not available in typing processor!")
+
+            typing_queue.task_done() # Mark task as complete
+            typing_in_progress.clear()
+            logging.debug("Typing job complete.")
+
+        except asyncio.CancelledError:
+            logging.info("Typing queue processor cancelled.")
+            break
+        except Exception as e:
+            logging.error(f"Error in typing queue processor: {e}", exc_info=True)
+            # Clear the flag just in case it was set during the error
+            typing_in_progress.clear()
+            # Avoid tight loop on error
+            await asyncio.sleep(0.1)
+
+
+# --- NEW: Helper for Processing Transcripts ---
+# Added tooltip_enabled parameter
+async def _process_transcript_data(session_id: any, session_data: dict, transcript_data: dict, tooltip_enabled: bool):
+    """Processes a single transcript data dict for the given session ID.
+       Assumes lock is NOT held when called. Accesses session_data directly.
+    """
+    # Removed redundant check for session_id existence as it's checked before calling
+
+    processor = session_data.get('processor')
+    history = session_data.get('history') # Operate on history within session_data
+    session_mode = session_data.get('mode', MODE_DICTATION)
+
+    if processor is None or history is None:
+        logging.error(f"_process_transcript_data: Missing processor or history for session {session_id}.")
+        return
+
+    msg_type = transcript_data.get("type")
+    transcript = transcript_data.get("transcript")
+    is_final_dg = transcript_data.get("is_final_dg")
+
+    if msg_type == "interim" and not is_final_dg:
+        if session_mode == MODE_DICTATION:
+            # Handle interim for tooltip (if enabled and desired)
+            # Use the passed tooltip_enabled flag
+            if tooltip_mgr and tooltip_enabled:
+                try:
+                    # Getting position might be slow/problematic here
+                    # Consider passing position if available or making tooltip simpler
+                    x, y = pyautogui.position() # Potential issue
+                    tooltip_queue.put_nowait(("update", (transcript, x, y, session_id)))
+                    tooltip_queue.put_nowait(("show", session_id))
+                except pyautogui.FailSafeException:
+                    logging.warning("PyAutoGUI fail-safe triggered during interim tooltip update.")
+                except queue.Full:
+                    logging.warning(f"Tooltip queue full sending interim update for session {session_id}.")
+                except Exception as e:
+                    logging.error(f"Error sending interim update to tooltip queue: {e}")
+        # Ignore interim for command mode for now
+
+    elif msg_type == "final" or is_final_dg: # Process Deepgram finals
+        if session_mode == MODE_DICTATION:
+            logging.debug(f"_process_transcript_data: Processing final dictation for {session_id}...")
+            try:
+                # Pass the history list directly
+                new_history, text_typed, detected_action = processor.handle_final(
+                    final_transcript=transcript,
+                    history=history, # Pass the current history list
+                    activation_id=session_id
+                )
+                # Update the session's history IN PLACE (since history is a list)
+                # This relies on handle_final potentially modifying the list or returning a new one
+                # Let's assume handle_final returns the potentially modified list
+                session_data['history'][:] = new_history # Replace contents
+
+                # Queue typing job
+                if text_typed:
+                    try:
+                        await typing_queue.put(text_typed)
+                        logging.debug(f"Queued text for typing from session {session_id}: '{text_typed}'")
+                    except Exception as q_err:
+                        logging.error(f"Error queuing text '{text_typed}' for typing: {q_err}")
+
+                # Handle detected action (pending action state is still global - needs review)
+                if detected_action:
+                    # --- MODIFIED: Only set global pending action if none is already pending ---
+                    if g_pending_action is None:
+                        logging.info(f"DictationProcessor detected action for {session_id}: '{detected_action}'. Setting as pending.")
+                        g_pending_action = detected_action
+                        g_action_confirmed = False
+                    else:
+                        logging.warning(f"DictationProcessor detected action '{detected_action}' for session {session_id}, but another action '{g_pending_action}' is already pending. Ignoring new action.")
+                    # --- END MODIFIED ---
+
+                # Hide tooltip after final dictation segment
+                # Use the passed tooltip_enabled flag
+                if tooltip_mgr and tooltip_enabled and is_final_dg: # Only hide on actual DG final?
+                    try:
+                        tooltip_queue.put_nowait(("hide", session_id))
+                    except queue.Full:
+                        logging.warning(f"Tooltip queue full sending hide on final for ID {session_id}.")
+                    except Exception as e:
+                        logging.error(f"Error sending hide on final to tooltip queue: {e}")
+
+            except Exception as e:
+                logging.error(f"Error calling handle_final for session {session_id}: {e}", exc_info=True)
+
+        elif session_mode == MODE_COMMAND:
+            session_data['final_command_text'] = transcript # Store final command text
+            logging.debug(f"Stored final transcript for Command Mode Session {session_id}: '{transcript}'")
+            # TODO: Trigger command processor execution here if needed
+            # command_task = asyncio.create_task(command_processor.process_command(transcript))
+            # Hide tooltip after final command segment (optional)
+             # Use the passed tooltip_enabled flag
+            if tooltip_mgr and tooltip_enabled and is_final_dg: # Only hide on actual DG final?
+                 try:
+                     tooltip_queue.put_nowait(("hide", session_id))
+                 except queue.Full:
+                     logging.warning(f"Tooltip queue full sending hide on final command for ID {session_id}.")
+                 except Exception as e:
+                     logging.error(f"Error sending hide on final command to tooltip queue: {e}")
+            # --- End hide command --- >
+
+# --- NEW: Handoff Logic Function --- >
+async def _handle_session_handoff(completed_session_id: any):
+    """Handles the process of activating the next waiting session.
+       Assumes the session_state_lock is HELD when called.
+       Releases the lock before processing buffered transcripts.
+    """
+    global currently_processing_session_id # Need to modify global
+
+    logging.debug(f"Executing session handoff logic (called for completed_session_id: {completed_session_id})")
+
+    # 1. Remove the completed session (if it exists)
+    if completed_session_id in active_stt_sessions:
+        logging.debug(f"Removing completed session {completed_session_id} from active_stt_sessions.")
+        try:
+            del active_stt_sessions[completed_session_id]
+        except KeyError:
+            logging.warning(f"_handle_session_handoff: Session {completed_session_id} was already removed.")
+    else:
+        logging.debug(f"_handle_session_handoff: Completed session {completed_session_id} not found, perhaps already handled.")
+
+    # 2. Check if the completed session was the one being processed
+    if currently_processing_session_id == completed_session_id:
+        logging.info(f"Session {completed_session_id} was the active processor. Clearing slot.")
+        currently_processing_session_id = None
+    else:
+         logging.debug(f"Completed session {completed_session_id} was not the active processor ({currently_processing_session_id}).")
+
+
+    # 3. If the processing slot is now empty, find the next waiting session
+    session_to_activate_data = None
+    next_session_id_to_process = None
+
+    if currently_processing_session_id is None:
+        logging.debug("Processing slot is empty, checking waitlist...")
+        while sessions_waiting_for_processing:
+            potential_next_id = sessions_waiting_for_processing.pop(0) # Get FIFO
+            if potential_next_id in active_stt_sessions:
+                # Found a valid waiting session
+                next_session_id_to_process = potential_next_id
+                session_to_activate_data = active_stt_sessions[next_session_id_to_process]
+                currently_processing_session_id = next_session_id_to_process # Assign new processor
+                session_to_activate_data['is_processing_allowed'] = True
+                logging.info(f"Activating processing for next waiting session: {next_session_id_to_process}")
+                break # Exit loop once a valid session is found and assigned
+            else:
+                logging.warning(f"Session {potential_next_id} from waitlist not found in active sessions. Skipping.")
+        if not next_session_id_to_process:
+             logging.info("No valid sessions waiting for processing.")
+    else:
+        logging.debug(f"Processing slot is already occupied by {currently_processing_session_id}. No handoff activation needed now.")
+
+
+    # --- Determine buffered transcripts *before* releasing lock ---
+    buffered_transcripts_to_process = []
+    if session_to_activate_data and next_session_id_to_process:
+         buffered_transcripts = session_to_activate_data.get('buffered_transcripts', [])
+         if buffered_transcripts:
+              logging.info(f"Preparing to process {len(buffered_transcripts)} buffered transcript(s) for session {next_session_id_to_process}...")
+              buffered_transcripts_to_process = list(buffered_transcripts)
+              session_to_activate_data['buffered_transcripts'] = [] # Clear buffer *within lock*
+
+
+    # 4. Release the lock *before* potentially long processing
+    logging.debug("Releasing session state lock in _handle_session_handoff")
+    # session_state_lock.release() # REMOVE: Let the calling 'async with' handle release
+
+    # 5. Process buffered transcripts (if any) for the newly activated session *outside* the lock
+    if next_session_id_to_process and session_to_activate_data and buffered_transcripts_to_process:
+        processor_to_run = session_to_activate_data.get('processor')
+        if processor_to_run:
+            logging.debug(f"Started processing buffered transcripts for {next_session_id_to_process}...")
+            for buffered_data in buffered_transcripts_to_process:
+                try:
+                    # Pass the session data dict directly now
+                    # Also pass tooltip_enabled flag (assuming it's available in this scope - needs adjustment if not)
+                    # NOTE: tooltip_enabled is NOT currently available here. This needs fixing.
+                    # We need to get tooltip_enabled from config_manager within this function or pass it down.
+                    # Let's get it from config_manager for now.
+                    local_tooltip_enabled = config_manager.get("modules.tooltip_enabled", True)
+                    await _process_transcript_data(next_session_id_to_process, session_to_activate_data, buffered_data, local_tooltip_enabled)
+                except Exception as e:
+                    logging.error(f"Error processing buffered transcript for {next_session_id_to_process}: {e}", exc_info=True)
+            logging.debug(f"Finished processing buffered transcripts for {next_session_id_to_process}.")
+        else:
+            logging.error(f"Cannot process buffered transcripts for {next_session_id_to_process}: Missing processor in session data.")
+
+    logging.debug("Finished _handle_session_handoff logic.")
+
 # --- Main Application Logic ---
 async def main():
     global g_pending_action, g_action_confirmed
     global tooltip_mgr, status_mgr, buffered_audio_input, action_confirm_mgr
     global mouse_controller, keyboard_sim, openai_manager
+    # --- NEW: Explicitly declare globals used within main --- >
+    global currently_processing_session_id, latest_session_id, current_activation_id, active_stt_sessions, sessions_waiting_for_processing
     # --- MODIFIED: Use stt_mgr --- >
-    global stt_mgr
-    global dictation_processor, command_processor
-    global typed_word_history, final_source_text, final_command_text
+    global dictation_processor
     global ui_interaction_cancelled, initial_activation_pos, start_time # Keep start_time global
+    # --- NEW: Add lock to globals potentially used in main context (though it's accessed directly) ---
+    global session_state_lock
 
     # --- Instantiate ConfigManager ---
     # Already done globally: config_manager = ConfigManager()
@@ -550,7 +773,7 @@ async def main():
     status_indicator_enabled = config_manager.get("modules.status_indicator_enabled", True)
     action_confirm_enabled = config_manager.get("modules.action_confirm_enabled", True)
     audio_buffer_enabled = config_manager.get("modules.audio_buffer_enabled", True)
-    command_interpretation_enabled = config_manager.get("modules.command_interpretation_enabled", False)
+    # command_interpretation_enabled = config_manager.get("modules.command_interpretation_enabled", False) # REMOVED
 
     # --- Initialize Systray --- >
     # Pass config_manager to systray
@@ -616,24 +839,8 @@ async def main():
         transcription_active_event=transcription_active_event
     )
 
-    # --- Initialize Command Processor (Conditional) --- >
-    command_processor = None
-    if command_interpretation_enabled:
-        if openai_manager and keyboard_sim:
-             # Pass config_manager instead of config dict
-            command_processor = CommandProcessor(
-                openai_manager=openai_manager,
-                keyboard_sim=keyboard_sim,
-                config_manager=config_manager # Pass manager
-            )
-        else:
-            logging.warning("Command Interpretation enabled, but dependencies (OpenAI Manager or Keyboard Sim) missing. CommandProcessor not initialized.")
-    else:
-        logging.info("Command Interpretation disabled. CommandProcessor not initialized.")
-
     # --- Initialize Deepgram Client & STT Manager (Conditional) --- >
     deepgram_client = None
-    stt_mgr = None
     transcript_queue = None # Initialize transcript queue
 
     try:
@@ -641,20 +848,13 @@ async def main():
         deepgram_client = DeepgramClient(DEEPGRAM_API_KEY, config_dg)
         logging.info("Deepgram client initialized.")
 
-        # --- Initialize STT Manager --- >
-        if buffered_audio_input and deepgram_client: # Depends on audio buffer and client
-             transcript_queue = queue.Queue() # Create transcript queue here
-             stt_mgr = stt_manager(
-                 stt_client=deepgram_client,
-                 status_q=status_queue,
-                 transcript_q=transcript_queue,
-                 background_recorder=buffered_audio_input
-             )
-        else:
-            logging.warning("STT Manager cannot be initialized (Background Audio Recorder or DG Client missing/disabled).")
+        # --- NEW: Initialize Transcript Queue (needed for handlers) ---
+        transcript_queue = queue.Queue()
+        logging.info("Transcript queue initialized.")
+        # STTConnectionHandler instances will be created on demand
 
     except Exception as e:
-        logging.error(f"Failed to initialize Deepgram client or STT Manager: {e}")
+        logging.error(f"Failed to initialize Deepgram client: {e}")
         if systray_ui.exit_app_event: systray_ui.exit_app_event.set()
         # sys.exit(1) # Consider exiting if STT is critical
     # --- End STT Manager Initialization --- >
@@ -669,11 +869,17 @@ async def main():
     keyboard_listener.start()
     logging.info("Input listeners started.")
 
+    # --- NEW: Start Typing Queue Processor Task --- >
+    typing_task = asyncio.create_task(process_typing_queue(), name="TypingProcessor")
+    logging.info("Typing queue processor task created.")
+    # --- END NEW ---
+
     # --- Loop Variables --- >
     is_stopping = False # Track if stop flow is active
     stop_initiated_time = 0 # Track when stop was first detected
     active_mode_on_stop = None # Store mode used when stop begins
     stopping_start_time = None # Store the start_time for the specific stop cycle
+    # --- NEW: Store the ID being stopped ---\n    stopping_activation_id = None
 
     # --- NEW: Store active mode for the current session --- >
     current_session_mode = None # Set when 'initiate_dg_connection' is received
@@ -691,6 +897,7 @@ async def main():
                 stopping_start_time = start_time # CAPTURE start_time for this stop cycle
                 stop_detected_this_cycle = True
                 active_mode_on_stop = current_session_mode # Use the mode from the current session for stop flow
+                stopping_activation_id = current_activation_id # <<< CAPTURE the ID being stopped
                 if not active_mode_on_stop:
                     logging.warning("Stop detected, but current_session_mode was not set! Falling back to config mode.")
                     active_mode_on_stop = config_manager.get("general.active_mode", MODE_DICTATION)
@@ -740,23 +947,96 @@ async def main():
                 elif action_command == "initiate_dg_connection":
                     received_activation_id = action_data.get("activation_id")
                     current_session_mode = action_data.get("mode", MODE_DICTATION) # <<< STORE session mode
-                    # Double check if still active and manager exists
-                    if transcription_active_event.is_set() and not is_stopping and stt_mgr:
-                        logging.info(f"Received initiate_dg_connection for ID {received_activation_id}. Starting STT manager listening.")
-                        current_activation_id = received_activation_id # Set the global ID
-                        # Get language from config
+
+                    # --- Acquire lock before checking/modifying shared state ---
+                    async with session_state_lock:
+                        # --- Check if we can start a new session ---
+                        if len(active_stt_sessions) >= MAX_CONCURRENT_SESSIONS:
+                            logging.warning(f"Max concurrent sessions ({MAX_CONCURRENT_SESSIONS}) reached. Ignoring new activation {received_activation_id}.")
+                            # Optional: Send some feedback to UI?
+                            # Mark transcription_active_event based on received ID matching current?
+                            # This part needs care - how do we know which activation failed?
+                            # Maybe just log and rely on the user releasing the button
+                            # transcription_active_event.clear() # Careful with this
+                            # Clean up global state related to this aborted activation attempt
+                            # start_time = None # Also careful - might belong to another active session
+                            # current_activation_id = None # Careful
+                            logging.debug("Ignoring initiation due to max sessions reached. State modifications skipped inside lock.")
+                            continue # Continue the main loop
+
+                        # --- Proceed with creating session (still inside lock) ---
+                        logging.info(f"Creating new STT session for ID {received_activation_id} (Mode: {current_session_mode}). Total active: {len(active_stt_sessions) + 1}")
+
+                        # Get language/options from config for this session
                         current_source_lang = config_manager.get("general.selected_language", "en-US")
                         current_dg_options = LiveOptions(
                             model="nova-2", language=current_source_lang, interim_results=True, smart_format=True,
                             encoding="linear16", channels=1, sample_rate=16000, punctuate=True, numerals=True,
                             utterance_end_ms="1000", vad_events=True, endpointing=300
                         )
-                        await stt_mgr.start_listening(current_dg_options, received_activation_id)
+
+                        # Create Handler & Processor for this session
+                        new_handler = STTConnectionHandler(
+                            activation_id=received_activation_id,
+                            stt_client=deepgram_client,
+                            status_q=status_queue, # Still pass status_q for potential UI updates
+                            transcript_q=transcript_queue,
+                            ui_action_q=ui_action_queue, # <<< PASS ui_action_queue
+                            background_recorder=buffered_audio_input,
+                            options=current_dg_options
+                        )
+                        new_processor = DictationProcessor(
+                            keyboard_sim=keyboard_sim,
+                            action_confirm_q=action_confirm_queue,
+                            transcription_active_event=transcription_active_event # Is this event still needed by processor?
+                        )
+                        new_history = [] # Create a new history list for this processor instance
+
+                        creation_time = time.monotonic()
+                        latest_session_id = received_activation_id # Update latest session ID
+
+                        # Determine if this new session can process immediately
+                        can_process_now = (currently_processing_session_id is None)
+
+                        session_data = {
+                            'handler': new_handler,
+                            'processor': new_processor,
+                            'history': new_history, # Store history here
+                            'mode': current_session_mode,
+                            'buffered_transcripts': [],
+                            'is_processing_allowed': can_process_now,
+                            'stop_requested': False,
+                            'processing_complete': False,
+                            'creation_time': creation_time,
+                            'final_command_text': "" # Add placeholder for command mode text
+                        }
+                        active_stt_sessions[received_activation_id] = session_data
+
+                        # Assign processing slot or add to waitlist
+                        if can_process_now:
+                            logging.debug(f"Session {received_activation_id} starting and processing immediately.")
+                            currently_processing_session_id = received_activation_id
+                        else:
+                            logging.debug(f"Session {received_activation_id} starting but must wait for {currently_processing_session_id} to finish.")
+                            sessions_waiting_for_processing.append(received_activation_id)
+                            # Keep sorted by creation time
+                            sessions_waiting_for_processing.sort(key=lambda act_id: active_stt_sessions.get(act_id, {}).get('creation_time', float('inf')))
+
+                    # --- Start the STT connection task *outside* the lock ---
+                    # Ensure handler was created before lock was released
+                    if received_activation_id in active_stt_sessions:
+                        handler_to_start = active_stt_sessions[received_activation_id].get('handler')
+                        if handler_to_start:
+                            asyncio.create_task(handler_to_start.start_listening(), name=f"STTHandler_{received_activation_id}")
+                        else:
+                            logging.error(f"Failed to start handler for {received_activation_id}: Handler object missing after lock release.")
                     else:
-                         logging.warning(f"Ignoring initiate_dg_connection command because transcription is no longer active, stopping, or STT Manager is missing (ID: {received_activation_id}).")
+                         logging.warning(f"Session {received_activation_id} disappeared before handler could be started.")
+
 
                 # --- Handle Action Confirmation Message --- >
                 elif action_command == "action_confirmed":
+                    # This part doesn't directly modify session state, lock not needed here
                     confirmed_action = action_data
                     if confirmed_action == g_pending_action:
                         logging.info(f"Executing confirmed action immediately: {g_pending_action}")
@@ -782,6 +1062,80 @@ async def main():
                     else:
                          logging.warning(f"Received confirmation for '{confirmed_action}' but '{g_pending_action}' was pending/reset.")
 
+                # --- NEW: Handle Connection Status Update from Handlers --- >
+                elif action_command == "connection_update":
+                    status_data = action_data
+                    status_activation_id = status_data.get("activation_id")
+                    new_status = status_data.get("status", "idle")
+
+                    logging.debug(f"Received connection update: ID={status_activation_id}, Status={new_status}")
+
+                    # --- Forward status to UI ONLY if it's from the latest session (no lock needed for latest_session_id check) ---
+                    if status_activation_id == latest_session_id:
+                        if status_mgr:
+                            try:
+                                # Pass the simplified status along
+                                ui_status_data = {"status": new_status}
+                                status_queue.put_nowait(("connection_update", ui_status_data))
+                            except queue.Full:
+                                logging.warning(f"Status queue full sending UI update for latest session {latest_session_id}.")
+                        else:
+                            logging.debug("Status Indicator disabled, not forwarding status.")
+
+                    # --- Handle session completion on disconnect/error --- >
+                    if new_status in ["disconnected", "error"]:
+                        logging.debug(f"Handling disconnect/error for session {status_activation_id}...")
+                        async with session_state_lock:
+                            if status_activation_id and status_activation_id in active_stt_sessions:
+                                logging.info(f"Detected disconnect/error for session {status_activation_id}. Marking as complete and triggering handoff check.")
+                                session_data = active_stt_sessions.get(status_activation_id)
+                                if session_data:
+                                    session_data['processing_complete'] = True
+                                    # Call handoff logic, passing the ID of the session that just completed.
+                                    # The handoff function will handle removal and potentially activating the next session.
+                                    # It will release the lock itself before processing buffers.
+                                    await _handle_session_handoff(status_activation_id)
+                                else:
+                                    logging.warning(f"Cannot mark session {status_activation_id} complete or handoff: not found in active_stt_sessions within lock.")
+                                    # Lock is released here automatically by 'async with'
+                            elif status_activation_id:
+                                logging.debug(f"Received disconnect/error for session {status_activation_id}, but it was not found in active_stt_sessions (might have already been handled).")
+                                # Lock is released here
+                            else:
+                                logging.warning("Received disconnect/error status update without a valid activation_id.")
+                                # Lock is released here
+                        logging.debug(f"Finished handling disconnect/error for session {status_activation_id}.")
+
+
+                elif action_command == "selection_made":
+                    logging.debug(f"StatusIndicator received selection_made: {action_data}")
+                    if not action_data:
+                        logging.error("Invalid selection_made data received.")
+                        return
+
+                    type = action_data.get("type")
+                    value = action_data.get("value")
+                    activation_id = action_data.get("activation_id")
+
+                    if type == "mode":
+                        logging.info(f"UI selected mode: {value}")
+                        config_manager.update("general.active_mode", value)
+                        config_manager.save()
+                        systray_ui.config_reload_event.set()
+                        if is_stopping: ui_interaction_cancelled = True
+                        ui_interaction_cancelled = True
+                    elif type == "language":
+                        lang_type = action_data.get("lang_type")
+                        lang = action_data.get("lang")
+                        logging.info(f"UI selected language: {lang_type} = {lang}")
+                        config_manager.update(f"general.{lang_type}_language", lang)
+                        config_manager.save()
+                        systray_ui.config_reload_event.set()
+                        if is_stopping: ui_interaction_cancelled = True
+                        ui_interaction_cancelled = True
+                    else:
+                        logging.error(f"Unknown selection type: {type}")
+
             except queue.Empty: pass
             except Exception as e: logging.error(f"Error processing UI action queue: {e}", exc_info=True)
 
@@ -790,14 +1144,28 @@ async def main():
             if is_stopping:
                 logging.debug(f"Processing stop flow steps for {active_mode_on_stop}...")
                 action_executed_this_stop = False # Initialize here to ensure it always exists
-                # --- Stop STT Listening --- >
-                if stt_mgr and stt_mgr.is_listening:
-                    logging.info("Signaling STTManager to stop listening...")
-                    stop_task = asyncio.create_task(stt_mgr.stop_listening())
-                    try:
-                        await asyncio.wait_for(stop_task, timeout=2.0)
-                    except asyncio.TimeoutError: logging.warning("Timeout waiting for STTManager to stop.")
-                    except Exception as e: logging.error(f"Error during STTManager stop: {e}")
+
+                # --- Stop the specific STT Listener for the session that ended ---
+                handler_to_stop = None
+                session_exists_for_stop = False
+                async with session_state_lock: # Protect reading session data
+                    if stopping_activation_id and stopping_activation_id in active_stt_sessions:
+                        session_to_stop = active_stt_sessions[stopping_activation_id]
+                        handler_to_stop = session_to_stop.get('handler')
+                        session_to_stop['stop_requested'] = True # Mark stop requested within lock
+                        session_exists_for_stop = True
+                    elif stopping_activation_id:
+                        logging.warning(f"Stop flow: Session {stopping_activation_id} not found in active_stt_sessions (inside lock).")
+                    else:
+                        logging.warning("Stop flow: stopping_activation_id was not set.")
+
+                # Call stop_listening outside the lock
+                if session_exists_for_stop and handler_to_stop:
+                    logging.info(f"Signaling STT Handler for session {stopping_activation_id} to stop listening...")
+                    stop_task = asyncio.create_task(handler_to_stop.stop_listening(), name=f"StopHandler_{stopping_activation_id}")
+                    logging.debug(f"Stop task created for handler {stopping_activation_id}.")
+                elif session_exists_for_stop:
+                     logging.warning(f"Stop flow: No handler found for active session {stopping_activation_id} to stop (handler_to_stop was None).")
 
                 # --- Hide Tooltip (if dictation mode) --- >
                 if tooltip_mgr and active_mode_on_stop == MODE_DICTATION:
@@ -855,12 +1223,19 @@ async def main():
                                      logging.debug("Stop flow action check: No final_source_text for Dictation.")
                             elif active_mode_on_stop == MODE_COMMAND:
                                 command_interp_mod_enabled = config_manager.get("modules.command_interpretation_enabled")
-                                if command_processor and final_command_text and command_interp_mod_enabled:
-                                     logging.info(f"Processing command input post-stop via CommandProcessor: '{final_command_text}'")
-                                     action_task = asyncio.create_task(command_processor.process_command(final_command_text))
+                                final_command_text_session = None
+                                # Safely get final command text for the stopped session (NEEDS LOCK? Probably not critical here)
+                                async with session_state_lock:
+                                     if stopping_activation_id and stopping_activation_id in active_stt_sessions:
+                                         final_command_text_session = active_stt_sessions[stopping_activation_id].get('final_command_text')
+
+                                if command_processor and final_command_text_session and command_interp_mod_enabled:
+                                     logging.info(f"Processing command input post-stop via CommandProcessor: '{final_command_text_session}'")
+                                     # action_task = asyncio.create_task(command_processor.process_command(final_command_text_session))
+                                     logging.warning("Command processing task creation is currently commented out.") # Placeholder
                                 elif not command_processor: logging.error("CommandProcessor not initialized, cannot process command.")
                                 elif not command_interp_mod_enabled: logging.info("Command interpretation module disabled, skipping command processing.")
-                                else: logging.debug("Stop flow action check: No final_command_text for Command mode.")
+                                else: logging.debug(f"Stop flow action check: No final_command_text found for Command mode session {stopping_activation_id}.")
                     else:
                          logging.info(f"Duration < min ({min_duration}s), discarding action post-stop for {active_mode_on_stop}.")
 
@@ -879,12 +1254,16 @@ async def main():
 
 
                 # --- Clear state relevant to the *just completed* action --- >
-                if active_mode_on_stop == MODE_DICTATION: typed_word_history.clear(); final_source_text = ""
-                elif active_mode_on_stop == MODE_COMMAND: final_command_text = ""
+                if active_mode_on_stop == MODE_DICTATION:
+                    # typed_word_history.clear(); final_source_text = "" # REMOVED - Now per session
+                    pass
+                elif active_mode_on_stop == MODE_COMMAND:
+                    # final_command_text = "" # REMOVED - Now per session
+                    pass
                 current_session_mode = None # Reset session mode after stop
 
                 # --- Reset global state AFTER processing stop flow --- >
-                logging.debug("Stop flow processing complete. Resetting state.")
+                logging.debug("Stop flow processing complete. Resetting flags.")
                 new_activation_occurred = (start_time != stopping_start_time)
                 if new_activation_occurred:
                     logging.info(f"New activation detected during stop flow. Keeping current start_time.")
@@ -897,6 +1276,7 @@ async def main():
 
                 active_mode_on_stop = None
                 stopping_start_time = None
+                stopping_activation_id = None # Clear the stopped ID
                 is_stopping = False # Mark stopping as complete
 
             # --- Check Config Reload --- >
@@ -923,13 +1303,80 @@ async def main():
             if action_confirm_enabled and action_confirm_mgr and not action_confirm_mgr.thread.is_alive() and not action_confirm_mgr._stop_event.is_set(): logging.error("Action Confirmation thread died."); break
             if audio_buffer_enabled and buffered_audio_input and not buffered_audio_input.thread.is_alive() and not buffered_audio_input.running.is_set(): logging.error("Background Audio Recorder thread died."); break
             # --- MODIFIED: Check stt_mgr Task Health --- >
-            if stt_mgr and stt_mgr._connection_task and stt_mgr._connection_task.done():
-                try:
-                    exc = stt_mgr._connection_task.exception()
-                    if exc: logging.error(f"STTManager task ended with exception: {exc}", exc_info=exc); break # Exit on STT task error
-                    elif stt_mgr.is_listening: logging.warning("STTManager task finished unexpectedly."); # Consider restart?
-                except asyncio.CancelledError: logging.info("STTManager task was cancelled.")
-                except Exception as e: logging.error(f"Error checking STTManager task state: {e}")
+            # --- REMOVED: Old STT Manager Task Health Check ---
+            # if stt_mgr and stt_mgr._connection_task and stt_mgr._connection_task.done():
+            #     try:
+            #         exc = stt_mgr._connection_task.exception()
+            #         if exc: logging.error(f"STTManager task ended with exception: {exc}", exc_info=exc); break # Exit on STT task error
+            #         elif stt_mgr.is_listening: logging.warning("STTManager task finished unexpectedly."); # Consider restart?
+            #     except asyncio.CancelledError: logging.info("STTManager task was cancelled.")
+            #     except Exception as e: logging.error(f"Error checking STTManager task state: {e}")
+            # --- NEW: Check individual handler tasks? ---
+            # TODO: Need logic to iterate through active_stt_sessions and check health of each handler's _connection_task
+            # --- End Placeholder ---
+
+            # --- NEW: Check individual handler tasks? ---
+            # Check health of individual STT handlers
+            try:
+                # Iterate over a copy of the keys to allow safe removal within the loop if needed
+                active_ids_to_check = []
+                async with session_state_lock: # Protect access to keys
+                    active_ids_to_check = list(active_stt_sessions.keys())
+
+                completed_by_error = [] # Collect IDs that failed
+                for session_id in active_ids_to_check:
+                    handler = None
+                    task = None
+                    # Re-acquire lock briefly to get handler and check if still valid
+                    async with session_state_lock:
+                        if session_id in active_stt_sessions:
+                            session_data = active_stt_sessions[session_id]
+                            handler = session_data.get('handler')
+                        else:
+                            continue # Session removed by other logic
+
+                    if handler and handler._connection_task and handler._connection_task.done():
+                        task = handler._connection_task
+                        try:
+                            exc = task.exception()
+                            if exc:
+                                logging.error(f"STT Handler task for session {session_id} ended with exception: {exc}", exc_info=exc)
+                                completed_by_error.append(session_id)
+                            elif handler.is_listening:
+                                logging.warning(f"STT Handler task for session {session_id} finished unexpectedly.")
+                                completed_by_error.append(session_id) # Treat as error/completion
+                        except asyncio.CancelledError:
+                            logging.info(f"STT Handler task for session {session_id} was cancelled (detected in health check). Session might be stopping normally.")
+                            # If it wasn't marked complete yet, treat it as completed now
+                            async with session_state_lock:
+                                if session_id in active_stt_sessions and not active_stt_sessions[session_id].get('processing_complete'):
+                                    logging.warning(f"Session {session_id} cancelled but not marked complete. Forcing completion.")
+                                    completed_by_error.append(session_id)
+                        except Exception as e:
+                            logging.error(f"Error checking STT Handler task state for session {session_id}: {e}")
+
+                # Process handoffs for sessions that completed due to error/unexpected stop
+                if completed_by_error:
+                    logging.debug(f"Processing handoffs for {len(completed_by_error)} sessions completed by error/unexpected stop.")
+                    async with session_state_lock:
+                        for errored_session_id in completed_by_error:
+                             if errored_session_id in active_stt_sessions:
+                                 session_data = active_stt_sessions[errored_session_id]
+                                 if not session_data.get('processing_complete'):
+                                      session_data['processing_complete'] = True
+                                      if session_data.get('handler'):
+                                           session_data['handler'].is_listening = False # Ensure handler state is correct
+                                      # Trigger handoff logic
+                                      await _handle_session_handoff(errored_session_id)
+                                 else:
+                                     logging.debug(f"Session {errored_session_id} was already marked complete, skipping handoff trigger in health check.")
+                             else:
+                                 logging.debug(f"Errored session {errored_session_id} was already removed, skipping handoff trigger in health check.")
+                    logging.debug("Finished processing handoffs for errored sessions.")
+
+            except Exception as e:
+                 logging.error(f"Error during STT handler health check loop: {e}", exc_info=True)
+            # --- End Placeholder ---
 
             # --- Process Transcript Queue --- >
             if transcript_queue: # Check if queue exists
@@ -938,54 +1385,41 @@ async def main():
                     msg_type = transcript_data.get("type")
                     transcript = transcript_data.get("transcript")
                     activation_id = transcript_data.get("activation_id")
+                    is_final_dg = transcript_data.get("is_final_dg") # Get Deepgram final flag
 
-                    # Ensure we only process transcripts for the *current* activation
-                    if activation_id == current_activation_id:
-                        active_mode = current_session_mode # Use mode from current session
-                        if msg_type == "interim":
-                            if active_mode == MODE_DICTATION:
-                                # --- NEW: Send interim directly to tooltip --- >
-                                if tooltip_mgr and tooltip_enabled:
-                                    try:
-                                        x, y = pyautogui.position()
-                                        tooltip_queue.put_nowait(("update", (transcript, x, y, activation_id)))
-                                        tooltip_queue.put_nowait(("show", activation_id))
-                                    except pyautogui.FailSafeException:
-                                        logging.warning("PyAutoGUI fail-safe triggered (mouse moved to corner?).")
-                                    except queue.Full:
-                                        logging.warning(f"Tooltip queue full sending interim update for activation ID {activation_id}.")
-                                    except Exception as e:
-                                        logging.error(f"Error sending interim update to tooltip queue: {e}")
-                                # --- End interim tooltip handling --- >
-                            elif active_mode == MODE_COMMAND: # Optionally show interim for command?
-                                handle_dictation_interim(dictation_processor, transcript, activation_id)
-                        elif msg_type == "final":
-                            if active_mode == MODE_DICTATION:
-                                 handle_dictation_final(dictation_processor, transcript, typed_word_history, activation_id)
-                                 last_interim_transcript = "" # Clear interim after final
-                                 # --- NEW: Send hide command to tooltip --- >
-                                 if tooltip_mgr and tooltip_enabled:
-                                     try:
-                                         tooltip_queue.put_nowait(("hide", activation_id))
-                                     except queue.Full:
-                                         logging.warning(f"Tooltip queue full sending hide on final for ID {activation_id}.")
-                                     except Exception as e:
-                                         logging.error(f"Error sending hide on final to tooltip queue: {e}")
-                                 # --- End hide command --- >
-                            elif active_mode == MODE_COMMAND:
-                                 final_command_text = transcript # Store final command text
-                                 logging.debug(f"Stored final transcript for Command Mode: '{final_command_text}'")
-                                 # --- NEW: Send hide command to tooltip --- >
-                                 if tooltip_mgr and tooltip_enabled:
-                                     try:
-                                         tooltip_queue.put_nowait(("hide", activation_id))
-                                     except queue.Full:
-                                         logging.warning(f"Tooltip queue full sending hide on final command for ID {activation_id}.")
-                                     except Exception as e:
-                                         logging.error(f"Error sending hide on final command to tooltip queue: {e}")
-                                 # --- End hide command --- >
+                    should_process_now = False
+                    session_data_for_processing = None
+                    buffer_transcript = False
+
+                    async with session_state_lock:
+                        if activation_id in active_stt_sessions:
+                            session_data = active_stt_sessions[activation_id]
+                            if session_data.get('is_processing_allowed'):
+                                should_process_now = True
+                                session_data_for_processing = session_data # Keep ref for processing outside lock
+                            else:
+                                # Buffer it if session exists but not allowed to process
+                                session_data['buffered_transcripts'].append(transcript_data)
+                                buffer_transcript = True
+                                logging.debug(f"Buffered transcript ({msg_type}, final_dg={is_final_dg}) for waiting session {activation_id}")
                         else:
-                            logging.debug(f"Ignoring transcript for activation {activation_id} (current is {current_activation_id})")
+                            # Session doesn't exist (already completed/removed?)
+                            logging.debug(f"Ignoring transcript ({msg_type}, final_dg={is_final_dg}) for inactive/unknown activation ID: {activation_id}")
+                            # No action needed, lock released
+
+                    # --- Process or handle tooltip *outside* the lock ---
+                    if should_process_now and session_data_for_processing:
+                        logging.debug(f"Processing transcript ({msg_type}, final_dg={is_final_dg}) for active session {activation_id}")
+                        # Pass tooltip_enabled flag
+                        await _process_transcript_data(activation_id, session_data_for_processing, transcript_data, tooltip_enabled)
+                    elif not buffer_transcript and not should_process_now:
+                        # This case handles transcripts for sessions that *just* finished and were removed
+                        # or interim transcripts for sessions that are not the currently processing one (if we decide to show tooltips only for the active one)
+                        # Currently, the logic above handles the \"removed\" case by logging and ignoring.
+                        # Let's consider if interim tooltips for non-active sessions are needed.
+                        # For now, only the active session calls _process_transcript_data which handles tooltips.
+                        pass
+                        # Optional: Handle interim tooltips for non-active sessions here if desired
 
                 except queue.Empty: pass
                 except Exception as e: logging.error(f"Error processing transcript queue: {e}", exc_info=True)
@@ -998,27 +1432,49 @@ async def main():
         logging.info("Stopping Vibe App...")
         if not systray_ui.exit_app_event.is_set(): systray_ui.exit_app_event.set()
 
+        # --- NEW: Cancel Typing Task --- >
+        if 'typing_task' in locals() and typing_task and not typing_task.done():
+            logging.info("Cancelling typing queue processor task...")
+            typing_task.cancel()
+            try:
+                await asyncio.wait_for(typing_task, timeout=1.0)
+                logging.info("Typing queue processor task stopped.")
+            except asyncio.TimeoutError:
+                logging.warning("Timeout waiting for typing task to cancel.")
+            except asyncio.CancelledError:
+                logging.info("Typing queue processor task cancelled successfully.")
+            except Exception as e:
+                 logging.error(f"Error stopping typing task: {e}")
+        # --- END NEW ---
+
         # --- MODIFIED: More Robust Stop Sequence ---
         stt_stopped_cleanly = False # Flag to track STT shutdown
         # 1. Stop Async Tasks First (like STT)
-        if 'stt_mgr' in locals() and stt_mgr:
-             logging.info("Stopping STT Manager...")
-             # Ensure listening is stopped cleanly
-             try:
-                 # Check if a connection task is running and needs stopping
-                 if stt_mgr.is_listening or (stt_mgr._connection_task and not stt_mgr._connection_task.done()):
-                     # --- ADD TIMEOUT --- >
-                     stop_task = stt_mgr.stop_listening()
-                     await asyncio.wait_for(stop_task, timeout=3.0)
-                     logging.info("STT Manager stop_listening completed within timeout.")
-                     # --- END ADD TIMEOUT --- >
-                     # await stt_mgr.stop_listening() # stop_listening now handles cancellation and disconnect
-                 logging.info("STT Manager stopped.")
-                 stt_stopped_cleanly = True # Mark as stopped if no exception/timeout
-             except asyncio.TimeoutError:
-                 logging.warning("Timeout (3s) waiting for STTManager to stop listening.")
-             except Exception as e:
-                 logging.error(f"Error stopping STT Manager: {e}")
+        # --- NEW: Stop all active STT Handlers ---
+        logging.info("Stopping all active STT Handlers...")
+        stop_tasks = []
+        for session_id, session_data in list(active_stt_sessions.items()): # Use list copy for safe iteration
+            handler = session_data.get('handler')
+            if handler:
+                logging.debug(f"Requesting stop for handler {session_id}...")
+                # Use default timeout (3s) defined in handler's stop_listening
+                stop_tasks.append(asyncio.create_task(handler.stop_listening(), name=f"StopHandler_{session_id}"))
+            else:
+                logging.warning(f"No handler found for session {session_id} during shutdown.")
+
+        if stop_tasks:
+            logging.info(f"Waiting for {len(stop_tasks)} STT handler(s) to stop...")
+            # Wait for all stop tasks to complete (no individual timeout here, handled in stop_listening)
+            done, pending = await asyncio.wait(stop_tasks, timeout=5.0) # Overall timeout for all handlers
+            if pending:
+                logging.warning(f"{len(pending)} STT handler stop tasks timed out after 5s.")
+                for task in pending:
+                    task.cancel() # Attempt to cancel timed out tasks
+            logging.info("Finished waiting for STT handler stop tasks.")
+        else:
+            logging.info("No active STT handlers to stop.")
+        active_stt_sessions.clear() # Clear sessions after attempting stop
+        # --- END NEW ---
 
         # 2. Stop Thread-Based Managers (Signal them first)
         managers_to_stop = []
@@ -1145,3 +1601,6 @@ if __name__ == "__main__":
          logging.critical("PyAutoGUI FAILSAFE triggered! Exiting.")
     except Exception as e:
         logging.error(f"An unexpected error occurred in main run: {e}", exc_info=True)
+
+# --- NEW: Typing Queue Processor Task --- >
+

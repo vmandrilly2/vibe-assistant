@@ -120,17 +120,11 @@ class DictationProcessor:
         target_words = [entry['text'] for entry in history] # Start with existing words again for processing
         original_words_segment = text_segment_to_process.split()
 
+        # --- Simplified: Append all words from the segment (no backspace handling) --- >
         for word in original_words_segment:
-            if not word: continue
-            cleaned_word = word.rstrip(punctuation_to_strip).lower()
-
-            if cleaned_word in back_keywords:
-                if target_words:
-                    removed = target_words.pop()
-                    # logging.info(f"Processor: backspace removed '{removed}'.")
-                # else: logging.info("Processor: backspace ignored (empty target).")
-            else:
-                target_words.append(word) # Append original word with punctuation
+            if word: # Append original word with punctuation
+                target_words.append(word)
+        # --- End Simplified ---
 
         logging.debug(f"Final target_words after segment processing: {target_words}")
 
@@ -138,27 +132,17 @@ class DictationProcessor:
         target_text = " ".join(target_words) + (' ' if target_words else '')
         # logging.debug(f"Processor calculated target_text: '{target_text}'")
 
-        # --- Step C: Calculate Current Text on Screen (Estimate from OLD history) --- >
-        current_text_estimate = " ".join([entry['text'] for entry in history]) + (' ' if history else '')
-        # logging.debug(f"Processor estimated current text: '{current_text_estimate}'")
+        # --- Calculate text based on OLD history --- >
+        old_text = " ".join([entry['text'] for entry in history]) + (' ' if history else '')
 
-        # --- Step D: Calculate Diff --- >
-        common_prefix_len = 0
-        min_len = min(len(current_text_estimate), len(target_text))
-        while common_prefix_len < min_len and current_text_estimate[common_prefix_len] == target_text[common_prefix_len]:
-            common_prefix_len += 1
-        backspaces_needed = len(current_text_estimate) - common_prefix_len
-        text_to_type = target_text[common_prefix_len:]
-        # logging.debug(f"Processor Diff: Back={backspaces_needed}, Type='{text_to_type}'")
-
-        # --- Step E: Execute Typing Actions (using keyboard_sim instance) --- >
-        if not self.keyboard_sim:
-            logging.error("KeyboardSimulator not available in DictationProcessor.")
+        # --- Determine the NEW text to be typed (diff) --- >
+        if target_text.startswith(old_text):
+            text_to_queue_for_typing = target_text[len(old_text):]
         else:
-            if backspaces_needed > 0:
-                self.keyboard_sim.simulate_backspace(backspaces_needed)
-            if text_to_type:
-                self.keyboard_sim.simulate_typing(text_to_type)
+            # Fallback if something unexpected happened (e.g., history divergence?)
+            # In this simplified model, just queue the whole new target text
+            logging.warning(f"Target text '{target_text}' did not start with old text '{old_text}'. Queuing full target.")
+            text_to_queue_for_typing = target_text
 
         # --- Step F: Update History to Match Target State --- >
         new_history = []
@@ -172,7 +156,7 @@ class DictationProcessor:
                     new_history.append(entry)
         # else: logging.debug("Processor history cleared.")
 
-        # Return updated history, the text string *as typed*, and detected action
-        return new_history, target_text, action_to_confirm
+        # Return updated history, the full text for this segment, and detected action
+        return new_history, text_to_queue_for_typing, action_to_confirm
 
     # Methods handle_interim and handle_final will be added next. 

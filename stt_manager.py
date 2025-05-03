@@ -8,8 +8,36 @@ from deepgram import (
     LiveTranscriptionEvents,
     LiveOptions,
     Microphone,
+    # StreamSources, # Removed
+    # --- MODIFIED: Import response types from specific client path ---
+    # LiveTranscriptionResponse, # Added for type hinting
+    # MetadataResponse, # Added for type hinting
+    # SpeechStartedResponse, # Added for type hinting
+    # UtteranceEndResponse, # Added for type hinting
+    # ErrorResponse, # Added for type hinting
+    # CloseResponse # Added for type hinting
+    # Attempting specific imports based on likely structure
 )
-# --- MODIFIED: Import BackgroundAudioRecorder --- >
+# --- MODIFIED: Import response types directly from v1 package as indicated by its __init__.py ---
+# from deepgram.clients.live.v1.async_client import (
+#    LiveTranscriptionResponse,
+#    MetadataResponse,
+#    SpeechStartedResponse,
+#    UtteranceEndResponse,
+#    ErrorResponse,
+#    CloseResponse
+# )
+# --- REMOVED Imports for Response Types (causing errors) ---
+# from deepgram.clients.live.v1.client import (
+#     LiveTranscriptionResponse,
+#     MetadataResponse,
+#     SpeechStartedResponse,
+#     UtteranceEndResponse,
+#     ErrorResponse,
+#     CloseResponse,
+#     OpenResponse # Also import OpenResponse used in _on_open type hint
+# )
+# --- END REMOVED ---
 from background_audio_recorder import BackgroundAudioRecorder
 
 # --- Constants (Consider moving to a shared config or passing via options) --- >
@@ -18,68 +46,72 @@ MAX_CONNECT_ATTEMPTS = 3
 ATTEMPT_TIMEOUTS_SEC = [1.0, 2.0, 3.0] # Timeout for each attempt
 RETRY_DELAYS_SEC = [0.5, 0.2]         # Delay *before* attempt 2 and attempt 3
 # --- END NEW ---
-BUFFER_SEND_DURATION_CAP_SEC = 5.0 # Max seconds of buffer to send
 
+class STTConnectionHandler:
+    """Manages a single connection and transcription lifecycle with the STT service (Deepgram)."""
 
-class stt_manager:
-    """Manages the connection and transcription lifecycle with the STT service (e.g., Deepgram)."""
+    MAX_CONNECT_ATTEMPTS = 3 # Class variable for default
 
-    # --- MODIFIED: Init signature --- >
-    def __init__(self, stt_client: DeepgramClient, status_q: queue.Queue, transcript_q: queue.Queue, background_recorder: BackgroundAudioRecorder):
+    def __init__(self,
+                 activation_id: any, # Unique identifier for this session
+                 stt_client: DeepgramClient,
+                 status_q: queue.Queue,
+                 transcript_q: queue.Queue,
+                 ui_action_q: queue.Queue,
+                 background_recorder: BackgroundAudioRecorder,
+                 options: LiveOptions):
         """
         Args:
-            stt_client: An initialized DeepgramClient instance (or similar for other providers).
-            status_q: Queue to send status updates (e.g., 'connecting', 'connected', 'error', 'disconnected').
-            transcript_q: Queue to send received transcripts (interim/final).
-            background_recorder: The BackgroundAudioRecorder instance to get the pre-activation buffer.
+            activation_id: The unique ID for this specific connection instance.
+            stt_client: An initialized DeepgramClient instance.
+            status_q: Queue to send status updates (tagged with activation_id).
+            transcript_q: Queue to send received transcripts (tagged with activation_id).
+            ui_action_q: Queue to send internal state/connection updates to the main loop.
+            background_recorder: The BackgroundAudioRecorder instance.
+            options: The LiveOptions for this specific connection.
         """
-        self.client = stt_client # Use generic name
+        self.activation_id = activation_id
+        self.client = stt_client
         self.status_queue = status_q
         self.transcript_queue = transcript_q
-        # --- MODIFIED: Use generic name --- >
+        self.ui_action_queue = ui_action_q
         self.background_recorder = background_recorder
+        self.options = options # Store the specific options for this instance
 
-        self.dg_connection = None # Keep specific name for Deepgram connection object for now
+        self.dg_connection = None
         self.microphone = None
-        self.is_listening = False # Flag indicating if we intend to be listening
-        self._connect_lock = asyncio.Lock() # Prevent concurrent start/stop operations
-        self._connection_established_event = asyncio.Event() # Signal successful connection
-        self._current_options = None # Store options used for the current/last connection attempt
-        self._current_activation_id = None # Store ID for associating transcripts
+        self.is_listening = False # Flag indicating if we intend to be listening for this instance
+        self._connect_lock = asyncio.Lock() # Prevent concurrent start/stop for *this instance*
+        self._connection_established_event = asyncio.Event()
+        self._connection_task = None # Task managing the connection loop for this instance
+        self._explicitly_stopped = False # Flag to distinguish intentional stop from errors/disconnects
 
-        # Task management for the connection loop
-        self._connection_task = None
-
-        logging.info("stt_manager initialized.") # Use class name
+        logging.info(f"STTConnectionHandler initialized for ID: {self.activation_id}")
 
     def _send_status(self, status: str):
-        """Helper to send status updates to the queue."""
+        """Helper to send status updates tagged with the activation ID."""
         try:
-            # Include the current listening intention state?
-            self.status_queue.put_nowait(("connection_update", {"status": status}))
-            # --- MODIFIED: Use class name in log --- >
-            logging.debug(f"stt_manager sent status: {status}")
+            status_data = {"status": status, "activation_id": self.activation_id}
+            self.ui_action_queue.put_nowait(("connection_update", status_data))
+            logging.debug(f"STTHandler[{self.activation_id}]: Sent status to main loop: {status}")
         except queue.Full:
-            logging.warning(f"Status queue full when sending STT status: {status}")
+            logging.warning(f"UI Action queue full when sending STTHandler[{self.activation_id}] status: {status}")
         except Exception as e:
-            logging.error(f"Error sending STT status update: {e}")
+            logging.error(f"Error sending STTHandler[{self.activation_id}] status update to UI Action Queue: {e}")
 
-    # --- Internal STT Callbacks (Deepgram specific for now) --- >
-    # These run in the context of the SDK's async management
+    # --- Internal STT Callbacks (Now methods of the class) ---
 
-    async def _on_open(self, *args, **kwargs):
-        logging.debug(f"_on_open received args: {args}, kwargs: {kwargs}")
-        logging.info("STT connection opened.") # Generic message
+    async def _on_open(self, sender, open, **kwargs):
+        logging.debug(f"STTHandler[{self.activation_id}] _on_open received: {open}")
+        logging.info(f"STT connection opened for ID: {self.activation_id}.")
         self._send_status("connected")
         self._connection_established_event.set()
 
-    async def _on_message(self, *args, **kwargs):
-        # --- MODIFIED: Use class name in logs --- >
-        logging.debug(f"_on_message received args: {args}, kwargs: {kwargs}")
-        result = kwargs.get('result')
-        if not result:
-            logging.error(f"STTManager _on_message did not find 'result' in kwargs: {kwargs}")
-            return
+    async def _on_message(self, sender, result, **kwargs):
+        logging.debug(f"STTHandler[{self.activation_id}] _on_message received.")
+        if not hasattr(result, 'channel') or not hasattr(result.channel, 'alternatives') or not result.channel.alternatives:
+             logging.error(f"STTHandler[{self.activation_id}] _on_message: Invalid result structure: {result}")
+             return
         try:
             transcript = result.channel.alternatives[0].transcript
             if transcript:
@@ -87,244 +119,251 @@ class stt_manager:
                 transcript_data = {
                     "type": message_type,
                     "transcript": transcript,
-                    "activation_id": self._current_activation_id
+                    "activation_id": self.activation_id,
+                    "is_final_dg": result.is_final # Pass Deepgram's final flag
                 }
-                logging.debug(f"STTManager sending transcript ({message_type}) for activation {self._current_activation_id}: {transcript!r}")
+                # logging.debug(f"STTHandler[{self.activation_id}] sending transcript ({message_type}): {transcript!r}")
                 self.transcript_queue.put_nowait(transcript_data)
         except queue.Full:
-            logging.warning(f"Transcript queue full. Discarding {message_type} transcript.")
+            logging.warning(f"Transcript queue full for STTHandler[{self.activation_id}]. Discarding {message_type} transcript.")
         except (AttributeError, IndexError) as e:
-            logging.error(f"Error processing STT message in STTManager: {e} - Result: {result}")
+            logging.error(f"Error processing STT message in STTHandler[{self.activation_id}]: {e} - Result: {result}")
         except Exception as e:
-            logging.error(f"Unhandled error in STTManager _on_message: {e}", exc_info=True)
+            logging.error(f"Unhandled error in STTHandler[{self.activation_id}] _on_message: {e}", exc_info=True)
 
-    async def _on_metadata(self, *args, **kwargs):
-        logging.debug(f"_on_metadata received args: {args}, kwargs: {kwargs}")
-        metadata = kwargs.get('metadata')
-        logging.debug(f"STT Metadata (STTManager): {metadata}")
+    async def _on_metadata(self, sender, metadata, **kwargs):
+        logging.debug(f"STTHandler[{self.activation_id}] _on_metadata received: {metadata}")
 
-    async def _on_speech_started(self, *args, **kwargs):
-        logging.debug(f"_on_speech_started received args: {args}, kwargs: {kwargs}")
-        logging.debug("STT Speech Started (STTManager)")
+    async def _on_speech_started(self, sender, speech_started, **kwargs):
+        logging.debug(f"STTHandler[{self.activation_id}] _on_speech_started received: {speech_started}")
 
-    async def _on_utterance_end(self, *args, **kwargs):
-        logging.debug(f"_on_utterance_end received args: {args}, kwargs: {kwargs}")
-        logging.debug("STT Utterance Ended (STTManager)")
+    async def _on_utterance_end(self, sender, utterance_end, **kwargs):
+        logging.debug(f"STTHandler[{self.activation_id}] _on_utterance_end received: {utterance_end}")
 
-    async def _on_error(self, *args, **kwargs):
-        logging.debug(f"_on_error received args: {args}, kwargs: {kwargs}")
-        error = kwargs.get('error')
-        if not error:
-            logging.error(f"STTManager _on_error did not find 'error' in kwargs: {kwargs}. Args: {args}")
-            return
-        logging.error(f"STT Handled Error (STTManager): {error}")
+    async def _on_error(self, sender, error, **kwargs):
+        logging.error(f"STT Handled Error for ID {self.activation_id}: {error}")
         self._send_status("error")
+        # Consider setting is_listening = False here or rely on connection loop to handle?
+        # Let connection loop handle disconnect/retry logic based on this error trigger.
 
-    async def _on_close(self, *args, **kwargs):
-        logging.debug(f"_on_close received args: {args}, kwargs: {kwargs}")
-        logging.info("STT connection closed (STTManager).") # Generic message
+    async def _on_close(self, sender, close, **kwargs):
+        logging.debug(f"STTHandler[{self.activation_id}] _on_close received: {close}")
+        # Only log INFO if it wasn't an explicit stop initiated by our code
+        if not self._explicitly_stopped:
+            logging.info(f"STT connection closed unexpectedly for ID: {self.activation_id}.")
+        else:
+            logging.info(f"STT connection closed cleanly for ID: {self.activation_id}.")
+
         self._send_status("disconnected")
+        # Clear the established event in case of unexpected closure
+        self._connection_established_event.clear()
+        # Don't set is_listening=False here, the connection_loop handles retry logic
 
-    async def _on_unhandled(self, *args, **kwargs):
-        logging.debug(f"_on_unhandled received args: {args}, kwargs: {kwargs}")
-        unhandled = kwargs.get('unhandled')
-        logging.warning(f"STT Unhandled Websocket Message (STTManager): {unhandled}")
+    async def _on_unhandled(self, unhandled, **kwargs):
+        logging.warning(f"STT Unhandled Websocket Message for ID {self.activation_id}: {unhandled}")
 
-    # --- Connection Management --- >
+    # --- Connection Management ---
 
-    async def start_listening(self, options: LiveOptions, activation_id):
-        """Initiates the connection and listening process."""
+    async def start_listening(self):
+        """Initiates the connection and listening process for this instance."""
         async with self._connect_lock:
             if self.is_listening:
-                logging.warning("start_listening called while already listening or starting.")
+                logging.warning(f"STTHandler[{self.activation_id}]: start_listening called while already listening.")
                 return
-            # --- MODIFIED: Use class name in log --- >
-            logging.info(f"stt_manager: Starting listening process (Activation ID: {activation_id})...")
+            logging.info(f"STTHandler[{self.activation_id}]: Starting listening process...")
             self.is_listening = True
-            self._current_options = options
-            self._current_activation_id = activation_id
+            self._explicitly_stopped = False # Reset flag on start
 
             if self._connection_task and not self._connection_task.done():
-                logging.debug("Cancelling previous connection task.")
+                logging.debug(f"STTHandler[{self.activation_id}]: Cancelling previous connection task.")
                 self._connection_task.cancel()
                 try:
                     await self._connection_task
                 except asyncio.CancelledError:
-                    logging.debug("Previous connection task cancelled successfully.")
+                    logging.debug(f"STTHandler[{self.activation_id}]: Previous connection task cancelled successfully.")
                 except Exception as e:
-                    logging.warning(f"Error awaiting previous connection task cancellation: {e}")
+                    logging.warning(f"STTHandler[{self.activation_id}]: Error awaiting previous task cancellation: {e}")
 
             self._connection_task = asyncio.create_task(self._connection_loop())
+            logging.debug(f"STTHandler[{self.activation_id}]: Connection task created.")
 
-
-    async def stop_listening(self):
-        """Stops the listening process and closes the connection."""
+    async def stop_listening(self, timeout=3.0):
+        """Stops the listening process and closes the connection for this instance."""
         async with self._connect_lock:
             if not self.is_listening and (not self._connection_task or self._connection_task.done()):
-                logging.warning("stop_listening called but not actively listening or task already done.")
-                if self._connection_task and self._connection_task.done():
-                     await self._disconnect()
-                     self._connection_task = None
-                self.is_listening = False
+                logging.warning(f"STTHandler[{self.activation_id}]: stop_listening called but not actively listening or task already done.")
+                # Attempt cleanup just in case
+                await self._disconnect()
+                self.is_listening = False # Ensure state is correct
                 return
-            # --- MODIFIED: Use class name in log --- >
-            logging.info("stt_manager: Stopping listening process...")
-            self.is_listening = False
 
+            logging.info(f"STTHandler[{self.activation_id}]: Stopping listening process (timeout={timeout}s)...")
+            self.is_listening = False # Signal loop to stop retrying/connecting
+            self._explicitly_stopped = True # Mark as intentional stop
+
+            stop_task = None
             if self._connection_task and not self._connection_task.done():
-                logging.debug("Cancelling connection task due to stop_listening.")
-                self._connection_task.cancel()
-                try:
-                    await self._connection_task
-                except asyncio.CancelledError:
-                    logging.debug("Connection task cancelled successfully during stop.")
-                except Exception as e:
-                    logging.error(f"Error awaiting connection task cancellation during stop: {e}")
+                logging.debug(f"STTHandler[{self.activation_id}]: Cancelling connection task due to stop_listening.")
+                # We don't cancel the task directly here anymore.
+                # Instead, we signal the loop via is_listening=False and rely on _disconnect.
+                # We primarily want to await the _disconnect process.
+                pass # Let the disconnect handle finish()
 
-            await self._disconnect()
-            self._connection_task = None
-            self._current_activation_id = None
-            # --- MODIFIED: Use class name in log --- >
-            logging.info("stt_manager: Listening stopped.")
+            try:
+                logging.debug(f"STTHandler[{self.activation_id}]: Awaiting disconnect...")
+                # Use wait_for to apply the timeout to the disconnect process
+                await asyncio.wait_for(self._disconnect(), timeout=timeout)
+                logging.info(f"STTHandler[{self.activation_id}]: Disconnect completed within timeout.")
+            except asyncio.TimeoutError:
+                 logging.warning(f"STTHandler[{self.activation_id}]: Timeout ({timeout}s) waiting for disconnect. Resources might not be fully released immediately.")
+                 # Attempt to cancel the task forcefully if disconnect timed out
+                 if self._connection_task and not self._connection_task.done():
+                     self._connection_task.cancel()
+                     try: await self._connection_task
+                     except asyncio.CancelledError: pass
+                     except Exception: pass # Ignore further errors
+            except Exception as e:
+                logging.error(f"STTHandler[{self.activation_id}]: Error during disconnect: {e}")
+            finally:
+                 # Clean up the task reference
+                 if self._connection_task and self._connection_task.done():
+                     # Check for exceptions if task finished due to error/cancellation
+                     try: self._connection_task.result()
+                     except asyncio.CancelledError: logging.debug(f"STTHandler[{self.activation_id}]: Connection task was cancelled during stop.")
+                     except Exception as task_exc: logging.error(f"STTHandler[{self.activation_id}]: Connection task finished with error: {task_exc}")
+                 self._connection_task = None
+                 logging.info(f"STTHandler[{self.activation_id}]: Listening stopped.")
 
 
     async def _disconnect(self):
-        """Safely disconnects the microphone and websocket connection."""
-        # --- MODIFIED: Use class name in logs --- >
-        logging.debug("stt_manager: Disconnecting...")
+        """Safely disconnects the microphone and websocket connection for this instance."""
+        logging.debug(f"STTHandler[{self.activation_id}]: Disconnecting...")
+        # Ensure is_listening is False to prevent connection loop from restarting
+
         if self.microphone:
-            logging.debug("Finishing STT microphone...")
-            self.microphone.finish()
-            self.microphone = None
-            logging.info("STT microphone finished.")
+            logging.debug(f"STTHandler[{self.activation_id}]: Finishing microphone...")
+            try:
+                self.microphone.finish()
+            except Exception as e:
+                 logging.warning(f"STTHandler[{self.activation_id}]: Error finishing microphone: {e}")
+            finally:
+                 self.microphone = None
+            logging.debug(f"STTHandler[{self.activation_id}]: Microphone finished.")
 
         if self.dg_connection:
-            logging.debug("Finishing STT connection...")
+            logging.debug(f"STTHandler[{self.activation_id}]: Finishing STT connection...")
             try:
+                # DG SDK's finish() handles closing the websocket
                 await self.dg_connection.finish()
-                logging.info("STT connection finished.")
+                logging.debug(f"STTHandler[{self.activation_id}]: STT connection finish called.")
             except asyncio.CancelledError:
-                 logging.warning("STT finish cancelled during disconnect.")
+                 logging.warning(f"STTHandler[{self.activation_id}]: STT finish cancelled during disconnect.")
             except Exception as e:
-                logging.error(f"Error during STT connection finish: {e}")
+                # Log errors, e.g., if connection was already closed
+                logging.warning(f"STTHandler[{self.activation_id}]: Error during STT connection finish: {e}")
             finally:
-                self.dg_connection = None
+                self.dg_connection = None # Clear reference
 
         self._connection_established_event.clear()
-        logging.debug("stt_manager: Disconnect complete.")
+        logging.debug(f"STTHandler[{self.activation_id}]: Disconnect process complete.")
 
 
     async def _connection_loop(self):
-        """Manages the connection attempts and stays connected while is_listening is True."""
+        """Manages the connection attempts for this specific instance."""
         attempts = 0
+        connect_start_time = time.monotonic() # Track start for overall timeout? Maybe not needed if per-attempt works
+
         while self.is_listening:
-            if attempts >= MAX_CONNECT_ATTEMPTS:
-                # --- MODIFIED: Use class name in log --- >
-                logging.error(f"stt_manager: Maximum connection attempts ({MAX_CONNECT_ATTEMPTS}) reached.")
+            if attempts >= self.MAX_CONNECT_ATTEMPTS:
+                logging.error(f"STTHandler[{self.activation_id}]: Maximum connection attempts ({self.MAX_CONNECT_ATTEMPTS}) reached.")
                 self._send_status("error")
-                self.is_listening = False
+                self.is_listening = False # Stop trying
                 break
 
             attempts += 1
-            # --- MODIFIED: Get timeout and delay for this specific attempt ---
             current_attempt_timeout = ATTEMPT_TIMEOUTS_SEC[attempts - 1]
-            # Delay happens *before* the next attempt, calculate it now if needed for logging/logic
-            # But apply it later in the loop if the attempt fails.
-            # --- END MODIFIED ---
 
-            # --- MODIFIED: Use class name in log and mention attempt timeout --- >
-            logging.info(f"stt_manager: Attempting connection (Attempt {attempts}/{MAX_CONNECT_ATTEMPTS}, Timeout: {current_attempt_timeout}s)...")
+            logging.info(f"STTHandler[{self.activation_id}]: Attempting connection (Attempt {attempts}/{self.MAX_CONNECT_ATTEMPTS}, Timeout: {current_attempt_timeout}s)...")
             self._send_status("connecting")
             self._connection_established_event.clear()
 
             try:
-                # --- MODIFIED: Use per-attempt timeout ---
                 connection_successful = await asyncio.wait_for(
                     self._connect_and_stream(),
                     timeout=current_attempt_timeout
                 )
-                # --- END MODIFIED ---
 
                 if connection_successful:
-                    # --- MODIFIED: Use class name in log --- >
-                    logging.info("stt_manager: Connection successful. Monitoring connection.")
+                    logging.info(f"STTHandler[{self.activation_id}]: Connection successful. Monitoring.")
                     attempts = 0 # Reset attempts on success
-                    # --- MODIFIED: Check connection status slightly less frequently ---
+
+                    # Monitor loop
                     while self.is_listening and self.dg_connection and await self.dg_connection.is_connected():
-                         await asyncio.sleep(0.2) # Reduced sleep from 0.5 to 0.2 for faster detection of disconnect? Or keep 0.5? Let's try 0.2
+                         await asyncio.sleep(0.2) # Check connection periodically
 
-                    # --- MODIFIED: Connection Lost Handling ---
-                    if self.is_listening:
-                         # --- MODIFIED: Use class name in log --- >
-                         logging.warning("stt_manager: Connection lost. Will attempt reconnect.")
-                         await self._disconnect()
-                         # No delay needed here, the loop will continue and apply the correct retry delay *before* the next attempt if attempts > 0
-                    # --- END MODIFIED ---
-                    else:
-                         # --- MODIFIED: Use class name in log --- >
-                         logging.info("stt_manager: Stop requested while connected.")
-                         await self._disconnect()
-                         break # Exit loop cleanly on stop request
+                    # --- Connection Lost Handling ---
+                    if self.is_listening: # If loop exited but we weren't told to stop explicitly
+                         logging.warning(f"STTHandler[{self.activation_id}]: Connection lost. Cleaning up and will retry if attempts remain.")
+                         await self._disconnect() # Clean up before retry
+                         # Delay is applied at the end of the outer loop before next attempt
+                    else: # is_listening became False, explicit stop
+                         logging.info(f"STTHandler[{self.activation_id}]: Stop requested while connected. Exiting loop.")
+                         await self._disconnect() # Ensure clean disconnect
+                         break # Exit loop cleanly
 
-                else:
-                    # --- MODIFIED: Use class name in log --- >
-                    logging.warning(f"stt_manager: Connection attempt {attempts} failed internally.")
-                    await self._disconnect()
-                    if self.is_listening and attempts < MAX_CONNECT_ATTEMPTS:
-                         # --- MODIFIED: Apply specific delay before next attempt ---
-                         current_retry_delay = RETRY_DELAYS_SEC[attempts - 1]
-                         logging.info(f"Waiting {current_retry_delay}s before retry.")
-                         await asyncio.sleep(current_retry_delay)
-                         # --- END MODIFIED ---
+                else: # _connect_and_stream returned False (internal error)
+                    logging.warning(f"STTHandler[{self.activation_id}]: Connection attempt {attempts} failed internally.")
+                    # _disconnect() should have been called within _connect_and_stream
+                    # Apply delay before next attempt if applicable
+
 
             except asyncio.TimeoutError:
-                # --- MODIFIED: Use class name in log, mention specific timeout --- >
-                logging.warning(f"stt_manager: Connection attempt {attempts} timed out after {current_attempt_timeout}s.")
-                await self._disconnect()
-                if self.is_listening and attempts < MAX_CONNECT_ATTEMPTS:
-                     # --- MODIFIED: Apply specific delay before next attempt ---
-                     current_retry_delay = RETRY_DELAYS_SEC[attempts - 1]
-                     logging.info(f"Waiting {current_retry_delay}s before retry.")
-                     await asyncio.sleep(current_retry_delay)
-                     # --- END MODIFIED ---
+                logging.warning(f"STTHandler[{self.activation_id}]: Connection attempt {attempts} timed out after {current_attempt_timeout}s.")
+                # await self._disconnect() # Ensure cleanup on timeout -- REMOVE THIS
+                # Allow loop to continue to retry logic
 
             except asyncio.CancelledError:
-                 # --- MODIFIED: Use class name in log --- >
-                 logging.info("stt_manager: Connection loop cancelled.")
-                 await self._disconnect()
-                 break
+                 logging.info(f"STTHandler[{self.activation_id}]: Connection loop cancelled.")
+                 await self._disconnect() # Still cleanup if cancelled explicitly
+                 break # Exit loop
 
             except Exception as e:
-                # --- MODIFIED: Use class name in log --- >
-                logging.error(f"stt_manager: Unexpected error in connection loop (Attempt {attempts}): {e}", exc_info=True)
-                await self._disconnect()
-                self._send_status("error")
-                if self.is_listening and attempts < MAX_CONNECT_ATTEMPTS:
-                     # --- MODIFIED: Apply specific delay before next attempt ---
-                     current_retry_delay = RETRY_DELAYS_SEC[attempts - 1]
-                     logging.info(f"Waiting {current_retry_delay}s before retry after error.")
-                     await asyncio.sleep(current_retry_delay)
-                     # --- END MODIFIED ---
-                else:
-                     # Ensure we break if error happens on last attempt or if not listening
-                     self.is_listening = False # Mark as not listening on unhandled error exit
-                     break # Exit loop
+                logging.error(f"STTHandler[{self.activation_id}]: Unexpected error in connection loop (Attempt {attempts}): {e}", exc_info=True)
+                # await self._disconnect() # Ensure cleanup -- REMOVE THIS
+                self._send_status("error") # Send error status on unexpected exception
+                # Allow loop to continue to retry logic
 
-        # --- Cleanup check ---
-        if not self.is_listening:
-             # --- MODIFIED: Use class name in log --- >
-             logging.info("stt_manager: Connection loop finished (stop requested, max attempts, or error).")
-             await self._disconnect() # Ensure disconnect on any exit path
+            # --- Apply Retry Delay ---
+            if self.is_listening and attempts < self.MAX_CONNECT_ATTEMPTS:
+                 current_retry_delay = RETRY_DELAYS_SEC[attempts - 1]
+                 logging.info(f"STTHandler[{self.activation_id}]: Waiting {current_retry_delay}s before retry.")
+                 try:
+                     await asyncio.sleep(current_retry_delay)
+                 except asyncio.CancelledError:
+                      logging.info(f"STTHandler[{self.activation_id}]: Retry delay sleep cancelled.")
+                      await self._disconnect() # Ensure cleanup
+                      break # Exit loop
+
+        # --- Loop End ---
+        logging.info(f"STTHandler[{self.activation_id}]: Connection loop finished.")
+        if not self._explicitly_stopped: # Ensure status is error if loop ended unexpectedly
+             if attempts >= self.MAX_CONNECT_ATTEMPTS:
+                  pass # Error status already sent
+             else: # Likely connection lost or other error
+                  self._send_status("error")
+        # Final cleanup call (should be redundant if disconnects happened correctly, but safe)
+        await self._disconnect()
 
 
     async def _connect_and_stream(self) -> bool:
-        """Attempts a single connection, sends buffer, starts microphone."""
+        """Attempts a single connection, sends buffer, starts microphone for this instance."""
         start_connect_monotonic = time.monotonic()
         connection_established_monotonic = None
         try:
-            self.dg_connection = self.client.listen.asyncwebsocket.v("1")
+            # --- Create connection instance ---
+            self.dg_connection = self.client.listen.asynclive.v("1") # Use asynclive
 
-            # Register internal handlers
+            # --- Register handlers ---
             self.dg_connection.on(LiveTranscriptionEvents.Open, self._on_open)
             self.dg_connection.on(LiveTranscriptionEvents.Transcript, self._on_message)
             self.dg_connection.on(LiveTranscriptionEvents.Metadata, self._on_metadata)
@@ -334,64 +373,102 @@ class stt_manager:
             self.dg_connection.on(LiveTranscriptionEvents.Close, self._on_close)
             self.dg_connection.on(LiveTranscriptionEvents.Unhandled, self._on_unhandled)
 
-            await self.dg_connection.start(self._current_options)
+            # --- Start the connection ---
+            logging.debug(f"STTHandler[{self.activation_id}]: Attempting dg_connection.start...")
+            start_success = await self.dg_connection.start(self.options)
+            logging.debug(f"STTHandler[{self.activation_id}]: dg_connection.start completed. Success: {start_success}")
+            if not start_success:
+                 logging.error(f"STTHandler[{self.activation_id}]: Failed to start Deepgram connection.")
+                 await self._disconnect() # Clean up attempt
+                 return False
 
-            await self._connection_established_event.wait()
+            # --- Wait for Open event ---
+            try:
+                 logging.debug(f"STTHandler[{self.activation_id}]: Waiting for connection established event...")
+                 await asyncio.wait_for(self._connection_established_event.wait(), timeout=ATTEMPT_TIMEOUTS_SEC[0]/2 or 0.5) # Short wait for Open
+                 logging.debug(f"STTHandler[{self.activation_id}]: Connection established event received.")
+            except asyncio.TimeoutError:
+                 logging.error(f"STTHandler[{self.activation_id}]: Timeout waiting for connection Open event.")
+                 await self._disconnect()
+                 return False
+
             connection_established_monotonic = time.monotonic()
 
-            # --- Send Buffer --- >
-            # --- MODIFIED: Use generic recorder variable --- >
+            # --- Send Buffer ---
             if self.background_recorder:
                  connection_duration_sec = max(0, connection_established_monotonic - start_connect_monotonic)
-                 duration_to_send_sec = min(connection_duration_sec, BUFFER_SEND_DURATION_CAP_SEC)
-                 # --- MODIFIED: Use class name in log --- >
-                 logging.info(f"STTManager: Connection took {connection_duration_sec:.2f}s. Sending buffer for last {duration_to_send_sec:.2f}s.")
-                 # --- MODIFIED: Use generic recorder variable --- >
+                 duration_to_send_sec = connection_duration_sec
+                 logging.info(f"STTHandler[{self.activation_id}]: Connection took {connection_duration_sec:.2f}s. Sending buffer for last {duration_to_send_sec:.2f}s.")
+                 logging.debug(f"STTHandler[{self.activation_id}]: Getting buffer from recorder...")
                  pre_activation_buffer = self.background_recorder.get_buffer_last_n_seconds(duration_to_send_sec, connection_established_monotonic)
+                 logging.debug(f"STTHandler[{self.activation_id}]: Buffer retrieved (size: {len(pre_activation_buffer) if pre_activation_buffer else 0} chunks). Sending...")
 
                  if pre_activation_buffer:
                      total_bytes = sum(len(chunk) for chunk in pre_activation_buffer)
-                     # --- MODIFIED: Use class name in log --- >
-                     logging.info(f"STTManager: Sending pre-activation buffer: {len(pre_activation_buffer)} chunks, {total_bytes} bytes.")
+                     logging.info(f"STTHandler[{self.activation_id}]: Sending pre-activation buffer: {len(pre_activation_buffer)} chunks, {total_bytes} bytes.")
                      for chunk in pre_activation_buffer:
                          if self.dg_connection and await self.dg_connection.is_connected():
-                             try: await self.dg_connection.send(chunk); await asyncio.sleep(0.001)
-                             except Exception as send_err: logging.warning(f"STTManager: Error sending buffer chunk: {send_err}"); break
-                         else: logging.warning("STTManager: Connection lost while sending buffer."); break
+                             try: await self.dg_connection.send(chunk); await asyncio.sleep(0.001) # Small yield
+                             except Exception as send_err: logging.warning(f"STTHandler[{self.activation_id}]: Error sending buffer chunk: {send_err}"); break
+                         else: logging.warning(f"STTHandler[{self.activation_id}]: Connection closed while sending buffer."); break
                  else:
-                     # --- MODIFIED: Use class name in log --- >
-                     logging.info("STTManager: No pre-activation buffer to send.")
+                     logging.info(f"STTHandler[{self.activation_id}]: No pre-activation buffer to send.")
+                 logging.debug(f"STTHandler[{self.activation_id}]: Finished sending buffer.")
             else:
-                 # --- MODIFIED: Use class name in log --- >
-                 logging.warning("STTManager: BackgroundAudioRecorder not available, cannot send buffer.")
+                 logging.warning(f"STTHandler[{self.activation_id}]: BackgroundAudioRecorder not available, cannot send buffer.")
 
-            # --- Microphone Setup --- >
-            original_send = self.dg_connection.send
-            async def logging_send_wrapper(data):
-                is_conn_connected = False
-                if self.dg_connection:
-                    try: is_conn_connected = await self.dg_connection.is_connected()
-                    except Exception: pass
-                if is_conn_connected:
-                    try:
-                        await original_send(data)
-                    except Exception as mic_send_err:
-                        # --- MODIFIED: Use class name in log --- >
-                        logging.warning(f"STTManager: Error sending mic data: {mic_send_err}")
-            self.microphone = Microphone(logging_send_wrapper)
+            # --- Microphone Setup ---
+            # Ensure microphone is stopped if somehow existed before
+            if self.microphone: self.microphone.finish()
+
+            # Wrapper for sending mic data
+            async def microphone_callback(data):
+                 if self.dg_connection and await self.dg_connection.is_connected():
+                     try:
+                         await self.dg_connection.send(data)
+                     except Exception as mic_send_err:
+                         logging.warning(f"STTHandler[{self.activation_id}]: Error sending mic data: {mic_send_err}")
+                         # Consider stopping mic or connection here?
+
+            self.microphone = Microphone(microphone_callback)
+            logging.debug(f"STTHandler[{self.activation_id}]: Microphone object created. Starting microphone...")
             self.microphone.start()
-            # --- MODIFIED: Use class name in log --- >
-            logging.info("stt_manager: Microphone started.")
-            return True
+            logging.info(f"STTHandler[{self.activation_id}]: Microphone started.")
+            return True # Connection successful
 
         except asyncio.CancelledError:
-             # --- MODIFIED: Use class name in log --- >
-             logging.info("stt_manager: _connect_and_stream cancelled.")
-             await self._disconnect()
+             logging.info(f"STTHandler[{self.activation_id}]: _connect_and_stream cancelled.")
+             await self._disconnect() # Ensure cleanup
              return False
         except Exception as e:
-            # --- MODIFIED: Use class name in log --- >
-            logging.error(f"stt_manager: Error during connect/stream setup: {e}", exc_info=True)
-            await self._disconnect()
-            self._send_status("error")
+            logging.error(f"STTHandler[{self.activation_id}]: Error during connect/stream setup: {e}", exc_info=True)
+            await self._disconnect() # Ensure cleanup
+            # Don't send error status here, let the connection loop handle retries/final error
             return False
+
+# --- Remove the old stt_manager class definition ---
+# class stt_manager: ... (Delete or comment out this old class)
+
+# --- Example Usage (for testing the new class directly, needs adjustment) ---
+async def example_main():
+     # Needs full setup with queues, recorder, DG client etc.
+     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(filename)s:%(lineno)d - %(message)s')
+     print("Testing STTConnectionHandler...")
+     # Replace with actual initialization
+     # dg_client = DeepgramClient(...)
+     # status_q = queue.Queue()
+     # transcript_q = queue.Queue()
+     # recorder = BackgroundAudioRecorder(...)
+     # recorder.start()
+     # options = LiveOptions(...)
+
+     # handler1 = STTConnectionHandler("test-1", dg_client, status_q, transcript_q, recorder, options)
+     # await handler1.start_listening()
+     # await asyncio.sleep(10)
+     # await handler1.stop_listening()
+     # recorder.stop()
+     pass
+
+if __name__ == '__main__':
+     # asyncio.run(example_main())
+     print("Run this module via the main vibe_app.py which will instantiate STTConnectionHandler.")

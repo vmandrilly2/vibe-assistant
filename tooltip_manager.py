@@ -33,6 +33,7 @@ class TooltipManager:
         self._tk_ready = threading.Event() # Signal when Tkinter root is ready
         self.active_tooltip_id = None # <<< NEW: Store the ID of the currently active tooltip
         # --- Store ConfigManager reference ---
+        self.last_known_pos = (0, 0) # Store the last position received
         self.config_manager = initial_config # Rename initial_config to config_manager for clarity
         self._apply_tooltip_config() # Apply initial config using the manager
 
@@ -120,57 +121,98 @@ class TooltipManager:
 
     def _check_queue(self):
         """Processes messages from the queue using root.after."""
-        # Check stop event first
-        if self._stop_event.is_set():
-            logging.debug("Stop event set, initiating Tkinter cleanup.")
-            self._cleanup_tk()
-            return # Stop rescheduling
-
         try:
-            # Process all available messages in the queue
+            # Check stop event AND enabled status from config manager
+            module_enabled = self.config_manager.get("modules.tooltip_enabled", True)
+            if self._stop_event.is_set() or not module_enabled:
+                if not module_enabled and not self._stop_event.is_set():
+                    logging.debug("TooltipManager: Module disabled via config, stopping checks and hiding.")
+                    self._hide_tooltip() # Ensure tooltip is hidden if disabled
+                # No cleanup needed if just disabled, only if stopped
+                if self._stop_event.is_set():
+                    self._cleanup_tk()
+                # Schedule one last check in case it gets re-enabled or stopped
+                if self.root and not self._stop_event.is_set():
+                    self.root.after(500, self._check_queue) # Check less frequently when disabled
+                return # Stop processing queue if stopped or disabled
+        except Exception as e:
+            logging.error(f"Error checking stop/enabled status in TooltipManager: {e}")
+            self._stop_event.set() # Stop if error occurs here
+            self._cleanup_tk()
+            return
+
+        # --- If enabled and not stopped, process queue ---
+        needs_update = False
+        try:
             while not self.queue.empty():
                 command, data = self.queue.get_nowait()
                 if command == "update":
-                    # Unpack data including the activation ID
                     text, x, y, activation_id = data
-                    self._update_tooltip(text, x, y, activation_id)
+                    self.last_known_pos = (x, y) # Store the received position
+                    # Only update if the ID matches the currently active tooltip
+                    if activation_id == self.active_tooltip_id:
+                        self.label.config(text=text)
+                        needs_update = True # Mark for geometry update
+                    # If a new activation starts while tooltip is shown from previous,
+                    # ignore updates for the old one.
                 elif command == "show":
-                    # Get the activation ID
                     activation_id = data
-                    self._show_tooltip(activation_id)
+                    # If already showing for this ID, do nothing extra
+                    # If showing for a *different* ID, or hidden, update ID and show
+                    if activation_id != self.active_tooltip_id or self.root.state() == 'withdrawn':
+                        logging.debug(f"Tooltip show request for ID: {activation_id}. Current: {self.active_tooltip_id}")
+                        # We need the initial position here. Assume it comes with 'show' or was set by a prior 'update'.
+                        # If 'show' comes first, position might be default until first 'update'.
+                        # To fix this, the initial position should ideally be sent with the 'show' command.
+                        # For now, we'll rely on last_known_pos being set by an update.
+                        self.active_tooltip_id = activation_id
+                        # Reset text if showing for a new activation
+                        self.label.config(text="...") # Initial text placeholder
+                        self.root.deiconify()
+                        needs_update = True # Mark for geometry update
                 elif command == "hide":
-                    # Get the activation ID
-                    activation_id = data # May be None for general hide
-                    self._hide_tooltip(activation_id)
+                    activation_id = data
+                    # Only hide if the request matches the currently active tooltip ID,
+                    # or if the ID is None (e.g., from ESC key)
+                    if activation_id is None or activation_id == self.active_tooltip_id:
+                        self._hide_tooltip()
+                        needs_update = False # Geometry update not needed after hiding
+                    else:
+                        logging.debug(f"Tooltip hide request ignored for ID: {activation_id} (Active: {self.active_tooltip_id})")
                 elif command == "stop":
-                    # This command ensures we wake up and check the _stop_event
-                    logging.debug("Received stop command in queue.")
-                    self._stop_event.set() # Ensure it's set
-                    # We don't break the loop here, let the check at the start handle it
-                    # This ensures cleanup happens before returning
-
+                    logging.debug("Received stop command in TooltipManager queue.")
+                    self._stop_event.set()
+                    # Cleanup will happen at the start of the next check
+                elif command == "reload_config": # Handle explicit config reload signal
+                    logging.debug("TooltipManager received reload_config signal.")
+                    self.config_manager = data # Update internal reference
+                    self._apply_tooltip_config() # Re-apply style settings
+                    needs_update = True # Re-apply geometry potentially
         except queue.Empty:
-            pass # No messages, just reschedule
+            pass
         except tk.TclError as e:
-            logging.warning(f"Tkinter error during queue processing: {e}. Stopping tooltip.")
-            self._stop_event.set()
-            self._cleanup_tk()
-            return # Stop rescheduling
+            if "application has been destroyed" not in str(e):
+                logging.warning(f"Tooltip Tkinter error processing queue: {e}.")
+            self._stop_event.set() # Ensure cleanup happens
+            # Cleanup happens at start of next loop or finally block
         except Exception as e:
-            logging.error(f"Error processing tooltip queue: {e}", exc_info=True)
-            # Consider stopping if there's a persistent error
-            # self._stop_event.set()
-            # self._cleanup_tk()
-            # return
+            logging.error(f"Error processing TooltipManager queue: {e}", exc_info=True)
+            self._stop_event.set() # Ensure cleanup happens
 
-        # Reschedule the check if not stopping
-        if not self._stop_event.is_set() and self.root:
-             try:
-                 self.root.after(50, self._check_queue)
-             except tk.TclError:
-                 logging.warning("Tooltip root destroyed before rescheduling queue check.")
-                 self._stop_event.set()
-                 self._cleanup_tk() # Attempt cleanup just in case
+        if needs_update and self.root and self.root.winfo_exists() and self.root.state() == 'normal':
+            try:
+                # Use the last known position received from the queue
+                self._update_position(self.last_known_pos[0], self.last_known_pos[1])
+            except tk.TclError:
+                pass # Ignore if root destroyed during update
+            except Exception as e:
+                logging.warning(f"Error updating tooltip position: {e}")
+
+        # --- Reschedule Check --- >
+        if self.root and not self._stop_event.is_set(): # Reschedule even if disabled, but less frequently
+            check_interval_ms = 50 if module_enabled else 500
+            self.root.after(check_interval_ms, self._check_queue)
+        # No else needed, loop stops if root gone or stop event set
 
     def _cleanup_tk(self):
         """Safely destroys the Tkinter window from the Tkinter thread."""
@@ -186,59 +228,39 @@ class TooltipManager:
             except Exception as e:
                 logging.error(f"Unexpected error during Tkinter destroy: {e}", exc_info=True)
 
-    def _update_tooltip(self, text, x, y, activation_id):
-        # --- NEW: Check if transcription is still active --- >
-        if not self.transcription_active_event.is_set():
-            logging.debug("Tooltip update ignored: transcription_active_event is not set.")
-            return
-        # --- END NEW ---
-
-        # Check if root exists and stop event isn't set
-        if self.root and self.label and not self._stop_event.is_set():
-            try:
-                self.label.config(text=text)
-                offset_x = 15
-                offset_y = -30
-                self.root.geometry(f"+{x + offset_x}+{y + offset_y}")
-                # Store the ID associated with this visible tooltip
-                self.active_tooltip_id = activation_id
-            except tk.TclError as e:
-                 logging.warning(f"Failed to update tooltip (window likely closed): {e}")
-                 self._stop_event.set() # Stop if window is broken
-            except pyautogui.FailSafeException: # Catch failsafe during update
-                 logging.warning("PyAutoGUI fail-safe triggered during tooltip update.")
-                 # Optionally trigger app stop?
-                 self._stop_event.set() # Stop tooltip thread
-
-    def _show_tooltip(self, activation_id):
-        # --- NEW: Check if transcription is still active --- >
-        if not self.transcription_active_event.is_set():
-            logging.debug("Tooltip show ignored: transcription_active_event is not set.")
-            return
-        # --- END NEW ---
-
+    def _update_position(self, x, y):
+        """Updates the tooltip position based on provided coordinates."""
         if self.root and not self._stop_event.is_set():
             try:
-                self.root.deiconify() # Show the window
-                # Store the ID associated with this visible tooltip
-                self.active_tooltip_id = activation_id
-                logging.debug(f"Tooltip shown for activation ID: {activation_id}")
+                offset_x = 15  # Example offset
+                offset_y = 10 # Adjusted offset
+                # Ensures width/height are calculated based on current label content
+                self.root.update_idletasks()
+                new_x = x + offset_x
+                new_y = y + offset_y
+                # Add boundary checks if necessary (optional)
+                # screen_width = self.root.winfo_screenwidth()
+                # screen_height = self.root.winfo_screenheight()
+                # tooltip_width = self.root.winfo_width()
+                # tooltip_height = self.root.winfo_height()
+                # if new_x + tooltip_width > screen_width: new_x = screen_width - tooltip_width
+                # if new_y + tooltip_height > screen_height: new_y = screen_height - tooltip_height
+                # if new_x < 0: new_x = 0
+                # if new_y < 0: new_y = 0
+                self.root.geometry(f"+{new_x}+{new_y}")
             except tk.TclError as e:
-                 logging.warning(f"Failed to show tooltip (window likely closed): {e}")
-                 self._stop_event.set()
+                logging.warning(f"Failed to update tooltip position (window likely closed): {e}")
+                self._stop_event.set()
 
-    def _hide_tooltip(self, activation_id):
-        # Only hide if not stopping AND the activation ID matches the currently shown tooltip
-        # --- Allow hiding even if ID doesn't match if activation_id is None (general hide) ---
+    def _hide_tooltip(self):
+        # Hide whenever requested if the window is currently visible
         if self.root and not self._stop_event.is_set():
-            should_hide = activation_id is None or self.active_tooltip_id == activation_id
+            should_hide = self.root.state() == 'normal'
             if should_hide:
                 try:
                     self.root.withdraw() # Hide the window
-                    logging.debug(f"Tooltip hidden (requested ID: {activation_id}, current: {self.active_tooltip_id})")
+                    logging.debug(f"Tooltip hidden (current active ID was: {self.active_tooltip_id})")
                     self.active_tooltip_id = None # Clear the ID since it's hidden
                 except tk.TclError as e:
                      logging.warning(f"Failed to hide tooltip (window likely closed): {e}")
-                     self._stop_event.set()
-            elif self.root.winfo_viewable(): # Only log if the tooltip is actually visible
-                logging.debug(f"Ignored hide tooltip command for activation ID {activation_id} (current: {self.active_tooltip_id})") 
+                     self._stop_event.set() 

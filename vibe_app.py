@@ -950,7 +950,8 @@ async def main():
                             elif active_mode == MODE_COMMAND:
                                  final_command_text = transcript # Store final command text
                                  logging.debug(f"Stored final transcript for Command Mode: '{final_command_text}'")
-                                 if tooltip_mgr: # Hide interim tooltip
+                                 # Hide interim tooltip only if manager exists AND is enabled
+                                 if tooltip_mgr and config_manager.get("modules.tooltip_enabled", True):
                                      tooltip_queue.put_nowait(("hide", activation_id))
                     else:
                         logging.debug(f"Ignoring transcript for activation {activation_id} (current is {current_activation_id})")
@@ -966,11 +967,11 @@ async def main():
         logging.info("Stopping Vibe App...")
         if not systray_ui.exit_app_event.is_set(): systray_ui.exit_app_event.set()
 
-        # Stop Modules Conditionally
-        if audio_buffer_enabled and buffered_audio_input: buffered_audio_input.stop()
-        if tooltip_enabled and tooltip_mgr: tooltip_mgr.stop()
-        if status_indicator_enabled and status_mgr: status_mgr.stop()
-        if action_confirm_enabled and action_confirm_mgr: action_confirm_mgr.stop()
+        # Stop Modules Conditionally (Based on initial enabled state - stopping dynamically is harder)
+        if config_manager.get("modules.audio_buffer_enabled") and buffered_audio_input: buffered_audio_input.stop()
+        if config_manager.get("modules.tooltip_enabled") and tooltip_mgr: tooltip_mgr.stop()
+        if config_manager.get("modules.status_indicator_enabled") and status_mgr: status_mgr.stop()
+        if config_manager.get("modules.action_confirm_enabled") and action_confirm_mgr: action_confirm_mgr.stop()
         logging.info("Component managers stop requested.")
 
         # Stop Deepgram Manager if it exists

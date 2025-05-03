@@ -69,34 +69,8 @@ from deepgram import (
     Microphone, # Import Microphone class
 )
 
-# --- Configuration Loading (REMOVED - Handled by ConfigManager) ---
-# CONFIG_FILE = "config.json" <-- REMOVED
-# DEFAULT_CONFIG = {...} <-- REMOVED
-# def load_config(): ... <-- REMOVED
-# def apply_config(cfg): ... <-- REMOVED
-# config = load_config() <-- REMOVED
-
-# --- Global Configurable Variables (REMOVED - Use ConfigManager) ---
-# DICTATION_TRIGGER_BUTTON = None <-- REMOVED
-# COMMAND_TRIGGER_BUTTON = None <-- REMOVED
-# COMMAND_MODIFIER_KEY_STR = None <-- REMOVED
-# COMMAND_MODIFIER_KEY = None <-- REMOVED
-# MIN_DURATION_SEC = 0.5 <-- REMOVED
-# SELECTED_LANGUAGE = "en-US" <-- REMOVED
-# TARGET_LANGUAGE = None <-- REMOVED
-# OPENAI_MODEL = "gpt-4.1-nano" <-- REMOVED
-# TOOLTIP_ALPHA = 0.85 <-- REMOVED
-# TOOLTIP_BG = "lightyellow" <-- REMOVED
-# TOOLTIP_FG = "black" <-- REMOVED
-# TOOLTIP_FONT_FAMILY = "Arial" <-- REMOVED
-# TOOLTIP_FONT_SIZE = 10 <-- REMOVED
-# ACTIVE_MODE = MODE_DICTATION <-- REMOVED
-
 # --- NEW: State Variables for Dictation Flow ---
 last_interim_transcript = "" # Store the most recent interim result
-
-# --- Config Saving Function (REMOVED - Handled by ConfigManager) ---
-# def save_config_local(cfg_dict): ... <-- REMOVED
 
 # --- Initial Configuration Application (REPLACED) ---
 # Instantiate ConfigManager early
@@ -577,7 +551,8 @@ async def main():
     command_interpretation_enabled = config_manager.get("modules.command_interpretation_enabled", False)
 
     # --- Initialize Systray --- >
-    systray_thread = threading.Thread(target=systray_ui.run_systray, args=(systray_ui.exit_app_event,), daemon=True)
+    # Pass config_manager to systray
+    systray_thread = threading.Thread(target=systray_ui.run_systray, args=(systray_ui.exit_app_event, config_manager), daemon=True)
     systray_thread.start()
     logging.info("Systray UI thread started.")
 

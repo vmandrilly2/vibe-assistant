@@ -57,7 +57,7 @@ class SessionMonitor:
             main_frame.pack(fill=tk.BOTH, expand=True, side=tk.TOP)
 
             # Header Row
-            headers = ["Slot", "ID", "State", "Processing", "StopReq", "Buffered", "Timeouts", "ActiveProc", "MicOn"]
+            headers = ["Slot", "ID", "State", "Processing", "StopReq", "Buffered", "Timeouts", "ActiveProc", "MicOn", "Button"]
             for col, header in enumerate(headers):
                 tk.Label(main_frame, text=header, font=("Segoe UI", 9, "bold")).grid(row=0, column=col, padx=3, pady=2, sticky="w")
 
@@ -84,6 +84,10 @@ class SessionMonitor:
                 self.labels[slot_num]["active_proc"].grid(row=slot_num, column=7, padx=3, sticky="w")
                 self.labels[slot_num]["mic_on"] = tk.Label(main_frame, text="-", anchor="w", width=5)
                 self.labels[slot_num]["mic_on"].grid(row=slot_num, column=8, padx=3, sticky="w")
+                # --- END NEW ---
+                # --- NEW Button Status Column ---
+                self.labels[slot_num]["button"] = tk.Label(main_frame, text="-", anchor="w", width=8)
+                self.labels[slot_num]["button"].grid(row=slot_num, column=9, padx=3, sticky="w")
                 # --- END NEW ---
 
             main_frame.grid_columnconfigure(1, weight=1) # Allow ID column to expand
@@ -227,6 +231,9 @@ class SessionMonitor:
                 active_proc_text = "Y" if session_data.get('is_active_processor') else "N"
                 mic_on_text = "Y" if session_data.get('is_microphone_active') else "N"
                 # --- END NEW ---
+                # --- NEW Button Status Text ---
+                button_text = "Released" if session_data.get('button_released') else "Pressed"
+                # --- END NEW ---
 
                 # --- ADD LOGGING ---
                 logging.debug(f"_update_display: Slot {slot_num} (ID: {session_id_for_slot}), State: {state_text}, MicFlag: {session_data.get('is_microphone_active')}, Setting MicLabel: {mic_on_text}")
@@ -246,6 +253,10 @@ class SessionMonitor:
                 self.labels[slot_num]["mic_on"].config(text=mic_on_text)
                 # --- END NEW ---
 
+                # --- NEW: Update Button Status Label ---
+                self.labels[slot_num]["button"].config(text=button_text)
+                # --- END NEW ---
+
             elif session_id_for_slot in waiting_ids: # Session is waiting (might not have full data)
                  self.labels[slot_num]["id"].config(text=str(session_id_for_slot))
                  self.labels[slot_num]["state"].config(text="Waiting (Init)")
@@ -256,6 +267,9 @@ class SessionMonitor:
                  self.labels[slot_num]["active_proc"].config(text="-")
                  # Keep mic_on as potentially last known state or clear? Let's clear for waiting.
                  self.labels[slot_num]["mic_on"].config(text="-")
+                 # --- NEW Button Status Column ---
+                 self.labels[slot_num]["button"].config(text="-")
+                 # --- END NEW ---
 
             else:
                 # Slot is empty
@@ -271,6 +285,10 @@ class SessionMonitor:
                 # --- NEW: Clear Monitor Flags for idle --- >
                 self.labels[slot_num]["active_proc"].config(text="-")
                 self.labels[slot_num]["mic_on"].config(text="-")
+                # --- END NEW ---
+
+                # --- NEW Button Status Column ---
+                self.labels[slot_num]["button"].config(text="-")
                 # --- END NEW ---
 
         # --- NEW: Update global stats --- >

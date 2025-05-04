@@ -88,6 +88,7 @@ class STTConnectionHandler:
         self.connection_start_time = None # Track when connection attempt starts
         self.retry_count = 0 # Track connection retries
         self.is_microphone_active = False # NEW: Track mic state
+        self._accept_mic_data = False # NEW: Control sending in callback
 
         logging.info(f"STTConnectionHandler initialized for ID: {self.activation_id}")
 
@@ -187,6 +188,7 @@ class STTConnectionHandler:
             logging.info(f"STTHandler[{self.activation_id}]: Starting listening process...")
             self.is_listening = True
             self._explicitly_stopped = False # Reset flag on start
+            self._accept_mic_data = False # Ensure False on new start
 
             if self._connection_task and not self._connection_task.done():
                 logging.debug(f"STTHandler[{self.activation_id}]: Cancelling previous connection task.")
@@ -204,6 +206,7 @@ class STTConnectionHandler:
     async def stop_listening(self, timeout=3.0):
         """Stops the listening process and closes the connection for this instance."""
         async with self._connect_lock:
+            self._accept_mic_data = False # <<< SET FALSE IMMEDIATELY
             if not self.is_listening and (not self._connection_task or self._connection_task.done()):
                 logging.warning(f"STTHandler[{self.activation_id}]: stop_listening called but not actively listening or task already done.")
                 # Attempt cleanup just in case
@@ -215,9 +218,15 @@ class STTConnectionHandler:
             self.is_listening = False # Signal loop to stop retrying/connecting
             self._explicitly_stopped = True # Mark as intentional stop
 
+            # --- NEW: Cancel the connection task --- >
+            if self._connection_task and not self._connection_task.done():
+                logging.debug(f"STTHandler[{self.activation_id}]: Cancelling connection task due to stop_listening.")
+                self._connection_task.cancel()
+            # --- END NEW ---
+
             try:
-                # This method only sets flags now. Actual stopping happens elsewhere.
-                logging.debug(f"STTHandler[{self.activation_id}]: stop_listening called. Internal state flags set.")
+                # This method only sets flags and cancels task now.
+                logging.debug(f"STTHandler[{self.activation_id}]: stop_listening called. Internal state flags set, task cancelled.") # Updated log
             except Exception as e:
                 # Should not happen as we are just setting flags
                 logging.error(f"STTHandler[{self.activation_id}]: Unexpected error in stop_listening: {e}", exc_info=True)
@@ -225,6 +234,7 @@ class STTConnectionHandler:
     async def _disconnect(self):
         """Safely disconnects the microphone and websocket connection for this instance."""
         logging.debug(f"STTHandler[{self.activation_id}]: Disconnecting...")
+        self._accept_mic_data = False # <<< SET FALSE IMMEDIATELY
         # Ensure is_listening is False to prevent connection loop from restarting
 
         if self.microphone:
@@ -258,6 +268,7 @@ class STTConnectionHandler:
 
     async def stop_microphone(self):
         """Stops the microphone if it's running."""
+        self._accept_mic_data = False # <<< SET FALSE IMMEDIATELY
         if self.microphone:
             logging.debug(f"STTHandler[{self.activation_id}]: Finishing microphone...")
             try:
@@ -446,12 +457,25 @@ class STTConnectionHandler:
             else:
                  logging.warning(f"STTHandler[{self.activation_id}]: BackgroundAudioRecorder not available, cannot send buffer.")
 
+            # --- SET FLAG: Okay to send live mic data now --- >
+            self._accept_mic_data = True
+            logging.debug(f"STTHandler[{self.activation_id}]: Set _accept_mic_data=True")
+
             # --- Microphone Setup ---
             # Ensure microphone is stopped if somehow existed before
             if self.microphone: self.microphone.finish()
 
             # Wrapper for sending mic data
             async def microphone_callback(data):
+                 # --- ADD LOGGING --- >
+                 current_time_mic_cb = time.monotonic()
+                 logging.debug(f"STTHandler[{self.activation_id}]: microphone_callback invoked at {current_time_mic_cb:.3f}. Flag _accept_mic_data = {self._accept_mic_data}")
+                 # --- END LOGGING --- >
+                 # --- NEW: Check flag before sending --- >
+                 if not self._accept_mic_data:
+                     # logging.debug(f"STTHandler[{self.activation_id}]: Mic data received but sending blocked by flag.")
+                     return # Do not send
+                 # --- END NEW ---
                  if self.dg_connection and await self.dg_connection.is_connected():
                      try:
                          await self.dg_connection.send(data)

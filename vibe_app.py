@@ -211,7 +211,7 @@ initial_activation_pos = None # Position where activation started
 start_time = None # Timestamp when activation started
 
 # --- NEW: State for Concurrent STT Sessions ---
-MAX_CONCURRENT_SESSIONS = 4
+MAX_CONCURRENT_SESSIONS = 40
 active_stt_sessions = {} # Stores session data keyed by activation_id
 # Session Data Structure: { 'handler': STTConnectionHandler, 'processor': DictationProcessor, 'buffered_transcripts': [], 'is_processing_allowed': bool, 'stop_requested': bool, 'processing_complete': bool, 'creation_time': float }
 currently_processing_session_id = None # ID of the session currently allowed to process/type
@@ -697,47 +697,22 @@ async def _process_transcript_data(session_id: any, session_data: dict, transcri
 async def _handle_session_handoff(completed_session_id: any):
     """Handles the process of activating the next waiting session.
        Assumes the session_state_lock is HELD when called.
-       Focuses only on removing the completed session and activating the next.
-       Disconnection and stat calculation happen elsewhere.
+       Focuses only on activating the next session if the processing slot is free.
+       Session removal and stat calculation happen in _wait_and_cleanup.
     """
     global currently_processing_session_id # Need to modify global
 
-    logging.debug(f"Executing simplified session handoff logic (called for completed_session_id: {completed_session_id})")
+    logging.debug(f"Executing simplified session handoff logic (called after session {completed_session_id} completed its pipeline)") # Updated log
 
-    # --- 1. Remove the completed session --- >
-    completed_session_data = active_stt_sessions.pop(completed_session_id, None) # Remove and get data
-    if completed_session_data:
-        logging.debug(f"Removed completed session {completed_session_id} from active_stt_sessions.")
-        # --- Calculate Stats (Moved here from wait_and_cleanup for simplicity) --- >
-        if completed_session_data.get('button_released'): # Only calculate if stop was initiated
-            global total_successful_stops, min_stop_duration, max_stop_duration, total_stops_final_missed
-            total_successful_stops += 1
-            logging.info(f"Session {completed_session_id} marked as successful stop. Total: {total_successful_stops}")
-            stop_time = completed_session_data.get('stop_signal_time')
-            handoff_time = time.monotonic()
-            if stop_time:
-                duration = handoff_time - stop_time
-                min_stop_duration = min(min_stop_duration, duration)
-                max_stop_duration = max(max_stop_duration, duration)
-                logging.info(f"Successful stop duration for {completed_session_id}: {duration:.3f}s (Min: {min_stop_duration:.3f}s, Max: {max_stop_duration:.3f}s)")
-            else:
-                logging.warning(f"Could not calculate stop duration for {completed_session_id}: missing stop_time.")
-            # Increment final missed count if applicable
-            if not completed_session_data.get('final_transcript_received'):
-                total_stops_final_missed += 1
-                logging.info(f"Session {completed_session_id} missed final transcript before stop. Total Missed: {total_stops_final_missed}")
-        # --- END STATS CALC ---
-    else:
-        logging.warning(f"_handle_session_handoff: Completed session {completed_session_id} not found in active_stt_sessions during removal.")
+    # --- Session removal and stats calculation are MOVED to _wait_and_cleanup ---
 
-    # --- 2. Check if the completed session was the one being processed --- >
+    # --- Check if the completed session was the one being processed ---
+    # This check might still be relevant to decide IF we need to activate a new one,
+    # but the primary check is just if the slot is None.
     if currently_processing_session_id == completed_session_id:
-        logging.debug(f"Session {completed_session_id} was the active processor. Clearing processing slot.")
+        logging.debug(f"Session {completed_session_id} finished processing. Clearing processing slot.")
         currently_processing_session_id = None
-    else:
-         logging.debug(f"Completed session {completed_session_id} was not the active processor ({currently_processing_session_id}). No change to processing slot needed now.")
-
-    # --- 3. If the processing slot is now empty, find and activate the next waiting session --- >
+    # --- If the slot is now empty, find and activate the next waiting session ---
     session_to_activate_data = None
     next_session_id_to_process = None
     buffered_transcripts_to_process = []
@@ -751,7 +726,7 @@ async def _handle_session_handoff(completed_session_id: any):
                 session_to_activate_data = active_stt_sessions[next_session_id_to_process]
                 currently_processing_session_id = next_session_id_to_process
                 session_to_activate_data['is_processing_allowed'] = True
-                # --- Get buffered transcripts --- >
+                # --- Get buffered transcripts ---
                 buffered_transcripts = session_to_activate_data.get('buffered_transcripts', [])
                 if buffered_transcripts:
                     logging.info(f"Activating processing for {next_session_id_to_process}. Preparing to process {len(buffered_transcripts)} buffered transcript(s)...")
@@ -776,14 +751,18 @@ async def _handle_session_handoff(completed_session_id: any):
         # NOTE: Still need to handle getting tooltip_enabled flag correctly here
         local_tooltip_enabled = config_manager.get("modules.tooltip_enabled", True)
         logging.debug(f"Started processing buffered transcripts for {next_session_id_to_process} outside lock...")
-        for buffered_data in buffered_transcripts_to_process:
+        # --- Launch processing in a separate task to avoid blocking handoff --- >
+        async def process_buffers_task():
             try:
-                await _process_transcript_data(next_session_id_to_process, session_to_activate_data, buffered_data, local_tooltip_enabled)
+                for buffered_data in buffered_transcripts_to_process:
+                    await _process_transcript_data(next_session_id_to_process, session_to_activate_data, buffered_data, local_tooltip_enabled)
+                logging.debug(f"Finished processing buffered transcripts for {next_session_id_to_process}.")
             except Exception as e:
-                logging.error(f"Error processing buffered transcript for {next_session_id_to_process}: {e}", exc_info=True)
-        logging.debug(f"Finished processing buffered transcripts for {next_session_id_to_process}.")
+                logging.error(f"Error in process_buffers_task for {next_session_id_to_process}: {e}", exc_info=True)
+        asyncio.create_task(process_buffers_task(), name=f"ProcessBuffers_{next_session_id_to_process}")
+        # --- END LAUNCH TASK --- >
 
-    logging.debug("Finished simplified _handle_session_handoff logic.")
+    logging.debug("Finished simplified _handle_session_handoff logic (activation check only).") # Updated log
 
 # --- NEW: Helper to Send State to Monitor --- >
 async def send_state_to_monitor():
@@ -808,6 +787,7 @@ async def send_state_to_monitor():
                     # --- NEW Monitor Flags ---
                     'is_active_processor': act_id == currently_processing_session_id,
                     'is_microphone_active': data.get('handler').is_microphone_active if data.get('handler') else False,
+                    'button_released': data.get('button_released', False), # <-- ADD THIS
                     # --- END NEW ---
                     # Add other relevant simple fields if needed
                 }
@@ -883,11 +863,6 @@ async def _wait_and_cleanup(session_id: any, handler: STTConnectionHandler, proc
         logging.warning(f"_wait_and_cleanup[{session_id}]: Timeout waiting for handler disconnect task.")
     except Exception as e:
         logging.error(f"_wait_and_cleanup[{session_id}]: Error during handler disconnect task: {e}", exc_info=True)
-
-    # --- Signal Handler State (Internal Flags) --- >
-    logging.debug(f"_wait_and_cleanup[{session_id}]: Signaling handler internal state to stop...")
-    stop_listen_task = asyncio.create_task(handler.stop_listening(), name=f"CleanupStopListen_{session_id}")
-    # Don't necessarily need to await this flag setting task
 
     # --- Trigger Session Handoff --- >
     logging.debug(f"_wait_and_cleanup[{session_id}]: Triggering session handoff...")
@@ -1057,8 +1032,9 @@ async def main():
                 stop_initiated_time = current_time
                 stopping_start_time = start_time # CAPTURE start_time for this stop cycle
                 stop_detected_this_cycle = True
-                active_mode_on_stop = current_session_mode # Use the mode from the current session for stop flow
-                stopping_activation_id = current_activation_id # <<< CAPTURE the ID being stopped
+                active_mode_on_stop = MODE_DICTATION # Default or get from the latest session?
+                stopping_activation_id = latest_session_id # <<< USE LATEST ID
+
                 # --- NEW: Record stop signal time --- >
                 current_monotonic_time = time.monotonic()
                 async with session_state_lock:
@@ -1383,6 +1359,10 @@ async def main():
                 # --- Trigger Cleanup Task --- >
                 if session_exists_for_stop and handler_to_stop and processing_finished_event:
                     logging.info(f"Session {stopping_activation_id}: Button released. Stopping Mic, Sending Close, Launching background cleanup...")
+                    # --- Call stop_listening FIRST to signal loop & cancel task --- >
+                    asyncio.create_task(handler_to_stop.stop_listening(), name=f"StopListen_{stopping_activation_id}")
+                    # --- END NEW CALL --- >
+
                     # --- RE-ADD direct stop calls --- >
                     # 1. Stop microphone immediately (and wait briefly)
                     logging.debug(f"Session {stopping_activation_id}: Stopping microphone...")

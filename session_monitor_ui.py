@@ -25,6 +25,7 @@ class SessionMonitor:
         self._stop_event = threading.Event()
         self._tk_ready = threading.Event()
         self.last_state = {} # Store last received state to update UI efficiently
+        self.headers = [] # Added to store headers
 
         logging.info("SessionMonitor initialized.")
 
@@ -57,41 +58,40 @@ class SessionMonitor:
             main_frame.pack(fill=tk.BOTH, expand=True, side=tk.TOP)
 
             # Header Row
-            headers = ["Slot", "ID", "State", "Processing", "StopReq", "Buffered", "Timeouts", "ActiveProc", "MicOn", "Button"]
-            for col, header in enumerate(headers):
-                tk.Label(main_frame, text=header, font=("Segoe UI", 9, "bold")).grid(row=0, column=col, padx=3, pady=2, sticky="w")
+            self.headers = [
+                "Slot", "ID", "State", "StopReq", "Buffered", # Core Info
+                "SessionTime", "ButtonTime", "MicTime", "DGConnTime", # Durations
+                "ConnLatency", "Timeouts", "Buffer(ms)", "WaitProcTime" # Specific Metrics
+            ]
+            column_widths = {
+                "ID": 12, "State": 10, "StopReq": 4, "Buffered": 4,
+                "SessionTime": 9, "ButtonTime": 9, "MicTime": 9, "DGConnTime": 9,
+                "ConnLatency": 9, "Timeouts": 4, "Buffer(ms)": 7, "WaitProcTime": 9
+            }
+            self.labels = {}
+            for col, header in enumerate(self.headers):
+                # Use custom widths if specified, otherwise default
+                width = column_widths.get(header, 8) # Default width 8 if not specified
+                tk.Label(main_frame, text=header, font=("Segoe UI", 9, "bold")).grid(row=0, column=col, padx=2, pady=2, sticky="w")
 
             # Data Rows (placeholders)
-            self.labels = {}
             for i in range(self.max_sessions):
                 slot_num = i + 1
                 self.labels[slot_num] = {}
-                tk.Label(main_frame, text=f"Slot {slot_num}:").grid(row=slot_num, column=0, padx=3, sticky="w")
-                self.labels[slot_num]["id"] = tk.Label(main_frame, text="-", anchor="w", justify="left", width=15)
-                self.labels[slot_num]["id"].grid(row=slot_num, column=1, padx=3, sticky="w")
-                self.labels[slot_num]["state"] = tk.Label(main_frame, text="Idle", anchor="w", width=15)
-                self.labels[slot_num]["state"].grid(row=slot_num, column=2, padx=3, sticky="w")
-                self.labels[slot_num]["processing"] = tk.Label(main_frame, text="-", anchor="w", width=5)
-                self.labels[slot_num]["processing"].grid(row=slot_num, column=3, padx=3, sticky="w")
-                self.labels[slot_num]["stop_req"] = tk.Label(main_frame, text="-", anchor="w", width=5)
-                self.labels[slot_num]["stop_req"].grid(row=slot_num, column=4, padx=3, sticky="w")
-                self.labels[slot_num]["buffered"] = tk.Label(main_frame, text="-", anchor="w", width=5)
-                self.labels[slot_num]["buffered"].grid(row=slot_num, column=5, padx=3, sticky="w")
-                self.labels[slot_num]["timeouts"] = tk.Label(main_frame, text="-", anchor="w", width=5)
-                self.labels[slot_num]["timeouts"].grid(row=slot_num, column=6, padx=3, sticky="w")
-                # --- NEW Columns ---
-                self.labels[slot_num]["active_proc"] = tk.Label(main_frame, text="-", anchor="w", width=5)
-                self.labels[slot_num]["active_proc"].grid(row=slot_num, column=7, padx=3, sticky="w")
-                self.labels[slot_num]["mic_on"] = tk.Label(main_frame, text="-", anchor="w", width=5)
-                self.labels[slot_num]["mic_on"].grid(row=slot_num, column=8, padx=3, sticky="w")
-                # --- END NEW ---
-                # --- NEW Button Status Column ---
-                self.labels[slot_num]["button"] = tk.Label(main_frame, text="-", anchor="w", width=8)
-                self.labels[slot_num]["button"].grid(row=slot_num, column=9, padx=3, sticky="w")
-                # --- END NEW ---
+                # Slot number label
+                tk.Label(main_frame, text=f"Slot {slot_num}:").grid(row=slot_num, column=0, padx=2, sticky="w")
 
-            main_frame.grid_columnconfigure(1, weight=1) # Allow ID column to expand
-            main_frame.grid_columnconfigure(2, weight=1) # Allow State column to expand
+                # Create labels for each data column based on headers[1:]
+                for col, header in enumerate(self.headers[1:], start=1):
+                    label_key = header.lower().replace("(", "").replace(")", "") # Generate key like 'id', 'sessiontime'
+                    width = column_widths.get(header, 8)
+                    label_widget = tk.Label(main_frame, text="-", anchor="w", justify="left", width=width)
+                    label_widget.grid(row=slot_num, column=col, padx=2, sticky="w")
+                    self.labels[slot_num][label_key] = label_widget
+
+            # Configure column weights (optional, for resizing)
+            main_frame.grid_columnconfigure(1, weight=1) # Allow ID column to expand slightly
+            main_frame.grid_columnconfigure(2, weight=1) # Allow State column to expand slightly
 
             # --- NEW: Global Stats Frame --- >
             stats_frame = tk.Frame(self.root, padx=5, pady=5)
@@ -183,17 +183,24 @@ class SessionMonitor:
         # --- END NEW ---
 
         # Create a mapping of activation_id to slot for easier lookup (can be optimized)
-        id_to_slot = {sid: i + 1 for i, sid in enumerate(active_sessions.keys())}
-        
-        # Add waiting IDs to the map if not already there (assign temporary slots)
-        next_slot = len(id_to_slot) + 1
-        for wid in waiting_ids:
-            if wid not in id_to_slot:
-                 id_to_slot[wid] = next_slot
-                 next_slot += 1
-                 if next_slot > self.max_sessions: break # Don't display more than max
+        # --- MODIFIED: Use a list of active/waiting IDs in display order --- >
+        # Get active sessions sorted by creation time (approximated by dict order for now)
+        sorted_active_ids = sorted(active_sessions.keys(), key=lambda x: active_sessions[x].get('creation_time', 0))
+        # Get waiting IDs (already sorted by creation time in backend)
+        waiting_ids_list = list(waiting_ids) # Use the list directly
+        # Combine, ensuring no duplicates, maintaining order
+        display_order_ids = []
+        seen_ids = set()
+        for sid in sorted_active_ids + waiting_ids_list:
+            if sid not in seen_ids:
+                display_order_ids.append(sid)
+                seen_ids.add(sid)
+
+        id_to_slot = {sid: i + 1 for i, sid in enumerate(display_order_ids[:self.max_sessions])}
+        # --- END MODIFIED --- >
 
         # Update labels for each slot
+        current_monotonic_time = time.monotonic()
         for slot_num in range(1, self.max_sessions + 1):
             session_id_for_slot = None
             session_data = None
@@ -202,94 +209,118 @@ class SessionMonitor:
             for sid, s_num in id_to_slot.items():
                  if s_num == slot_num:
                       session_id_for_slot = sid
-                      session_data = active_sessions.get(sid) # Get data if it's an active session
+                      # Get data only if it exists in the active_sessions snapshot
+                      session_data = active_sessions.get(sid)
                       break
-            
+
             if session_id_for_slot and session_data:
                 # Active session found for this slot
-                state = "Active" # Base state
-                if session_id_for_slot == processing_id:
-                    state = "Processing"
+                creation_time = session_data.get('creation_time')
+
+                # --- Determine State Text (Prioritize Complete) ---
+                state_text = "Active" # Default state
+                if session_data.get('processing_complete'):
+                    state_text = "Complete"
+                elif session_id_for_slot == processing_id:
+                    state_text = "Processing"
                 elif session_id_for_slot in waiting_ids:
-                    state = "Waiting"
-                
-                if session_data.get('stop_requested'): state += " (StopReq)"
-                if session_data.get('processing_complete'): state = "Complete"
+                    state_text = "Waiting"
+                elif session_data.get('button_released'): # If button released but not yet complete (timeout case)
+                    if state_text == "Active":
+                         state_text = "Stopping"
 
-                # Extract data safely
-                id_text = str(session_id_for_slot) # Use full ID for now
-                state_text = state
-                processing_text = "Y" if session_data.get('is_processing_allowed') else "N"
+                if session_data.get('stop_requested') and state_text != "Complete":
+                     state_text += " (StopReq)"
+
+                # --- Determine other text fields ---
+                id_text = f"{session_id_for_slot:.1f}" # Shorten ID display
                 stop_req_text = "Y" if session_data.get('stop_requested') else "N"
-                buffered_text = str(len(session_data.get('buffered_transcripts', [])))
-
-                # --- NEW: Get timeout count --- >
+                buffered_text = str(session_data.get('buffered_transcripts_count', 0))
                 timeout_text = str(session_data.get('timeout_count', 0))
-                # --- END NEW ---
+                buffer_ms_text = str(session_data.get('buffer_duration_ms', '-'))
 
-                # --- NEW: Get Monitor Flags --- >
-                active_proc_text = "Y" if session_data.get('is_active_processor') else "N"
-                mic_on_text = "Y" if session_data.get('is_microphone_active') else "N"
-                # --- END NEW ---
-                # --- NEW Button Status Text ---
-                button_text = "Released" if session_data.get('button_released') else "Pressed"
-                # --- END NEW ---
+                # --- Placeholder for Timings --- >
+                session_time_text = "-"
+                button_time_text = "-"
+                mic_time_text = "-"
+                dg_conn_time_text = "-"
+                conn_latency_text = "-"
+                wait_proc_time_text = "-"
+                # --- End Placeholder --- >
 
-                # --- ADD LOGGING ---
-                logging.debug(f"_update_display: Slot {slot_num} (ID: {session_id_for_slot}), State: {state_text}, MicFlag: {session_data.get('is_microphone_active')}, Setting MicLabel: {mic_on_text}")
-                # --- END LOGGING ---
+                # --- NEW: Calculate and Format Timings --- >
+                def format_duration(start_time, end_time, current_time):
+                    if start_time is None: return "-"
+                    # If end_time is set, calculate fixed duration
+                    if end_time is not None:
+                        duration = end_time - start_time
+                        return f"{duration:.3f}s"
+                    # If start_time is set but end_time is not, calculate running time
+                    else:
+                        running_duration = current_time - start_time
+                        return f"{running_duration:.1f}s..."
 
+                def format_latency(start_time, end_time):
+                    if start_time is None: return "Connecting..." # Indicate attempt in progress
+                    if end_time is None: return "Connecting..." # Still in progress
+                    duration = end_time - start_time
+                    return f"{duration:.3f}s"
+
+                # Session Time
+                session_time_text = format_duration(creation_time, session_data.get('session_end_time'), current_monotonic_time)
+
+                # Button Press Time
+                button_time_text = format_duration(creation_time, session_data.get('button_release_time'), current_monotonic_time)
+
+                # Mic Time
+                mic_time_text = format_duration(session_data.get('mic_start_time'), session_data.get('mic_stop_time'), current_monotonic_time)
+
+                # DG Connection Time
+                dg_conn_time_text = format_duration(session_data.get('dg_conn_established_time'), session_data.get('dg_conn_closed_time'), current_monotonic_time)
+
+                # Connection Latency
+                conn_latency_text = format_latency(session_data.get('dg_conn_start_attempt_time'), session_data.get('dg_conn_established_time'))
+
+                # Wait Processing Time
+                wait_proc_time_text = format_duration(session_data.get('wait_start_time'), session_data.get('wait_end_time'), current_monotonic_time)
+                # --- END Timing Calculation --- >
+
+                # Simplified Logging
+                # logging.debug(f"_update_display: Slot {slot_num} (ID: {id_text}), State: {state_text}")
+
+                # Update Core Labels
                 self.labels[slot_num]["id"].config(text=id_text)
                 self.labels[slot_num]["state"].config(text=state_text)
-                self.labels[slot_num]["processing"].config(text=processing_text)
-                self.labels[slot_num]["stop_req"].config(text=stop_req_text)
+                self.labels[slot_num]["stopreq"].config(text=stop_req_text)
                 self.labels[slot_num]["buffered"].config(text=buffered_text)
-                # --- NEW: Update timeout label --- >
                 self.labels[slot_num]["timeouts"].config(text=timeout_text)
-                # --- END NEW ---
 
-                # --- NEW: Update Monitor Flags --- >
-                self.labels[slot_num]["active_proc"].config(text=active_proc_text)
-                self.labels[slot_num]["mic_on"].config(text=mic_on_text)
-                # --- END NEW ---
+                # Update New/Modified Labels (Placeholders for now)
+                self.labels[slot_num]["sessiontime"].config(text=session_time_text)
+                self.labels[slot_num]["buttontime"].config(text=button_time_text)
+                self.labels[slot_num]["mictime"].config(text=mic_time_text)
+                self.labels[slot_num]["dgconntime"].config(text=dg_conn_time_text)
+                self.labels[slot_num]["connlatency"].config(text=conn_latency_text)
+                self.labels[slot_num]["bufferms"].config(text=buffer_ms_text)
+                self.labels[slot_num]["waitproctime"].config(text=wait_proc_time_text)
 
-                # --- NEW: Update Button Status Label ---
-                self.labels[slot_num]["button"].config(text=button_text)
-                # --- END NEW ---
-
-            elif session_id_for_slot in waiting_ids: # Session is waiting (might not have full data)
-                 self.labels[slot_num]["id"].config(text=str(session_id_for_slot))
-                 self.labels[slot_num]["state"].config(text="Waiting (Init)")
-                 self.labels[slot_num]["processing"].config(text="-")
-                 self.labels[slot_num]["stop_req"].config(text="-")
-                 self.labels[slot_num]["buffered"].config(text="-")
-                 self.labels[slot_num]["timeouts"].config(text="-")
-                 self.labels[slot_num]["active_proc"].config(text="-")
-                 # Keep mic_on as potentially last known state or clear? Let's clear for waiting.
-                 self.labels[slot_num]["mic_on"].config(text="-")
-                 # --- NEW Button Status Column ---
-                 self.labels[slot_num]["button"].config(text="-")
-                 # --- END NEW ---
-
+            elif session_id_for_slot: # ID exists (likely waiting) but no full data yet
+                # Simplified display for waiting slots before full data arrives
+                self.labels[slot_num]["id"].config(text=f"{session_id_for_slot:.1f}")
+                self.labels[slot_num]["state"].config(text="Waiting(Init)")
+                # Clear other fields for waiting slots
+                for col_header in self.headers[2:]: # Skip Slot and ID
+                    label_key = col_header.lower().replace("(", "").replace(")", "")
+                    if label_key in self.labels[slot_num]:
+                        self.labels[slot_num][label_key].config(text="-")
             else:
-                # Slot is empty
-                self.labels[slot_num]["id"].config(text="-")
-                self.labels[slot_num]["state"].config(text="Idle")
-                self.labels[slot_num]["processing"].config(text="-")
-                self.labels[slot_num]["stop_req"].config(text="-")
-                self.labels[slot_num]["buffered"].config(text="-")
-                # --- NEW: Clear timeout for idle --- >
-                self.labels[slot_num]["timeouts"].config(text="-")
-                # --- END NEW ---
-
-                # --- NEW: Clear Monitor Flags for idle --- >
-                self.labels[slot_num]["active_proc"].config(text="-")
-                self.labels[slot_num]["mic_on"].config(text="-")
-                # --- END NEW ---
-
-                # --- NEW Button Status Column ---
-                self.labels[slot_num]["button"].config(text="-")
-                # --- END NEW ---
+                # Slot is empty / Idle
+                for col_header in self.headers[1:]: # Skip Slot
+                    label_key = col_header.lower().replace("(", "").replace(")", "")
+                    if label_key in self.labels[slot_num]:
+                         # Set State explicitly to Idle, others to -
+                         text_val = "Idle" if label_key == "state" else "-"
+                         self.labels[slot_num][label_key].config(text=text_val)
 
         # --- NEW: Update global stats --- >
         # Successful Stops

@@ -218,7 +218,13 @@ currently_processing_session_id = None # ID of the session currently allowed to 
 sessions_waiting_for_processing = [] # List of activation_ids waiting their turn
 latest_session_id = None # Track the ID of the most recently started session for UI status
 typing_in_progress = threading.Event() # Event to signal if keyboard sim is busy - MAYBE USE ASYNCIO EVENT?
-# --- NEW: Lock for shared session state ---
+# --- NEW: Track session completion events for accurate end timing --- >
+print("DEBUG: Defining session_completion_events globally...")
+session_completion_events = {} # {activation_id: asyncio.Event}
+print(f"DEBUG: session_completion_events defined globally: {'session_completion_events' in globals()}")
+# --- END NEW ---
+
+# --- NEW: Lock for shared session state --- #
 session_state_lock = asyncio.Lock()
 # --- NEW: Queue for serialized typing output ---
 typing_queue = asyncio.Queue()
@@ -779,7 +785,8 @@ async def send_state_to_monitor():
                 current_active_sessions_snapshot[act_id] = {
                     'is_processing_allowed': data.get('is_processing_allowed'),
                     'stop_requested': data.get('stop_requested'),
-                    'buffered_transcripts_count': len(data.get('buffered_transcripts', [])), # Just send count
+                    # --- MODIFIED: Send count, not list --- >
+                    'buffered_transcripts_count': len(data.get('buffered_transcripts', [])),
                     'processing_complete': data.get('processing_complete'),
                     'timeout_count': data.get('timeout_count', 0),
                     'is_successful_stop': data.get('is_successful_stop', False),
@@ -789,6 +796,19 @@ async def send_state_to_monitor():
                     'is_microphone_active': data.get('handler').is_microphone_active if data.get('handler') else False,
                     'button_released': data.get('button_released', False), # <-- ADD THIS
                     # --- END NEW ---
+                    # --- NEW: Copy Timing Metrics --- >
+                    'creation_time': data.get('creation_time'),
+                    'button_release_time': data.get('button_release_time'),
+                    'mic_start_time': data.get('mic_start_time'),
+                    'mic_stop_time': data.get('mic_stop_time'),
+                    'dg_conn_start_attempt_time': data.get('dg_conn_start_attempt_time'),
+                    'dg_conn_established_time': data.get('dg_conn_established_time'),
+                    'dg_conn_closed_time': data.get('dg_conn_closed_time'),
+                    'buffer_duration_ms': data.get('buffer_duration_ms'),
+                    'wait_start_time': data.get('wait_start_time'),
+                    'wait_end_time': data.get('wait_end_time'),
+                    'session_end_time': data.get('session_end_time'),
+                    # --- END NEW Timing --- >
                     # Add other relevant simple fields if needed
                 }
                 # --- ADD LOGGING --- >
@@ -818,7 +838,7 @@ async def send_state_to_monitor():
 # --- END Monitor Helper ---
 
 # --- NEW: Wait and Cleanup Function ---
-async def _wait_and_cleanup(session_id: any, handler: STTConnectionHandler, processing_event: asyncio.Event):
+async def _wait_and_cleanup(session_id: any, handler: STTConnectionHandler, processing_event: asyncio.Event, completion_event: asyncio.Event):
     """Waits for final processing event, disconnects, and cleans up the session."""
     if not handler or not processing_event:
         logging.error(f"_wait_and_cleanup[{session_id}]: Invalid handler or event provided.")
@@ -881,6 +901,7 @@ async def _wait_and_cleanup(session_id: any, handler: STTConnectionHandler, proc
 
 # --- Main Application Logic ---
 async def main():
+    print("DEBUG: Entering main function...")
     global g_pending_action, g_action_confirmed
     global tooltip_mgr, status_mgr, buffered_audio_input, action_confirm_mgr
     global mouse_controller, keyboard_sim, openai_manager
@@ -891,6 +912,8 @@ async def main():
     global ui_interaction_cancelled, initial_activation_pos, start_time # Keep start_time global
     # --- NEW: Add lock to globals potentially used in main context (though it's accessed directly) ---
     global session_state_lock
+    print(f"DEBUG: session_completion_events in main scope before global: {'session_completion_events' in locals()}")
+    global session_completion_events
     # --- NEW: Session Monitor instance ---
     global session_monitor
 
@@ -1039,6 +1062,9 @@ async def main():
                 current_monotonic_time = time.monotonic()
                 async with session_state_lock:
                     if stopping_activation_id in active_stt_sessions:
+                        # --- NEW: Record Button Release Time --- >
+                        active_stt_sessions[stopping_activation_id]['button_release_time'] = current_monotonic_time
+                        # --- END NEW ---
                         active_stt_sessions[stopping_activation_id]['stop_signal_time'] = current_monotonic_time
                         logging.debug(f"Recorded stop signal time {current_monotonic_time:.3f} for session {stopping_activation_id}")
                     else:
@@ -1093,8 +1119,9 @@ async def main():
                 elif action_command == "initiate_dg_connection":
                     received_activation_id = action_data.get("activation_id")
                     current_session_mode = action_data.get("mode", MODE_DICTATION) # <<< STORE session mode
+                    init_time = time.monotonic() # Approx time handler task is created
 
-                    # --- Acquire lock before checking/modifying shared state ---
+                    # --- Acquire lock before checking/modifying shared state --- #
                     async with session_state_lock:
                         # --- Check if we can start a new session ---
                         if len(active_stt_sessions) >= MAX_CONCURRENT_SESSIONS:
@@ -1143,6 +1170,7 @@ async def main():
 
                         # Determine if this new session can process immediately
                         can_process_now = (currently_processing_session_id is None)
+                        wait_start_time_val = None if can_process_now else creation_time # Record wait start if not processing now
 
                         session_data = {
                             'handler': new_handler,
@@ -1169,8 +1197,23 @@ async def main():
                             # --- NEW: Recording State ---
                             'is_recording': False,
                             # --- END NEW ---
-                            # --- END NEW ---
+                            # --- NEW: Timing Metrics --- >
+                            'button_release_time': None,
+                            'mic_start_time': None,
+                            'mic_stop_time': None,
+                            'dg_conn_start_attempt_time': None,
+                            'dg_conn_established_time': None,
+                            'dg_conn_closed_time': None,
+                            'buffer_duration_ms': None,
+                            'wait_start_time': wait_start_time_val,
+                            'wait_end_time': None,
+                            'session_end_time': None,
+                            # --- END NEW Timing --- >
                         }
+                        # --- NEW: Add completion event --- >
+                        completion_event = asyncio.Event()
+                        session_completion_events[received_activation_id] = completion_event
+                        # --- END NEW ---
                         active_stt_sessions[received_activation_id] = session_data
 
                         # Assign processing slot or add to waitlist
@@ -1192,6 +1235,12 @@ async def main():
                         handler_to_start = active_stt_sessions[received_activation_id].get('handler')
                         if handler_to_start:
                             asyncio.create_task(handler_to_start.start_listening(), name=f"STTHandler_{received_activation_id}")
+                            # --- NEW: Record approximate start times --- >
+                            async with session_state_lock:
+                                if received_activation_id in active_stt_sessions:
+                                    active_stt_sessions[received_activation_id]['dg_conn_start_attempt_time'] = init_time
+                                    active_stt_sessions[received_activation_id]['mic_start_time'] = init_time # Approximate mic start with connection attempt
+                            # --- END NEW ---
                         else:
                             logging.error(f"Failed to start handler for {received_activation_id}: Handler object missing after lock release.")
                     else:
@@ -1273,6 +1322,48 @@ async def main():
                                 # Lock is released here
                         logging.debug(f"Finished handling disconnect/error for session {status_activation_id}.")
 
+                # --- NEW: Handle Connection Timing Updates from Handler --- >
+                elif action_command == "connection_timing_update":
+                    timing_data = action_data
+                    timing_activation_id = timing_data.get("activation_id")
+                    timestamp_type = timing_data.get("type") # e.g., 'established', 'closed'
+                    timestamp_val = timing_data.get("timestamp")
+
+                    if timing_activation_id and timestamp_type and timestamp_val:
+                        async with session_state_lock:
+                            if timing_activation_id in active_stt_sessions:
+                                session_data_ref = active_stt_sessions[timing_activation_id]
+                                if timestamp_type == 'established':
+                                    session_data_ref['dg_conn_established_time'] = timestamp_val
+                                    logging.debug(f"Recorded dg_conn_established_time for {timing_activation_id}")
+                                elif timestamp_type == 'closed':
+                                    session_data_ref['dg_conn_closed_time'] = timestamp_val
+                                    logging.debug(f"Recorded dg_conn_closed_time for {timing_activation_id}")
+                                # Optional: Trigger monitor update here if needed immediately
+                                # asyncio.create_task(send_state_to_monitor(), name=f"SendStateMonitor_Timing_{timing_activation_id}")
+                            else:
+                                logging.warning(f"Received connection_timing_update for inactive session {timing_activation_id}")
+                    else:
+                        logging.warning("Received incomplete connection_timing_update data.")
+                # --- END NEW ---
+
+                # --- NEW: Handle Buffer Info Update from Handler --- >
+                elif action_command == "buffer_info_update":
+                    buffer_data = action_data
+                    buffer_activation_id = buffer_data.get("activation_id")
+                    buffer_duration_ms = buffer_data.get("duration_ms")
+
+                    if buffer_activation_id and buffer_duration_ms is not None:
+                        async with session_state_lock:
+                            if buffer_activation_id in active_stt_sessions:
+                                active_stt_sessions[buffer_activation_id]['buffer_duration_ms'] = buffer_duration_ms
+                                logging.debug(f"Recorded buffer_duration_ms ({buffer_duration_ms}) for {buffer_activation_id}")
+                                # Optional: Trigger monitor update
+                            else:
+                                logging.warning(f"Received buffer_info_update for inactive session {buffer_activation_id}")
+                    else:
+                        logging.warning("Received incomplete buffer_info_update data.")
+                # --- END NEW ---
 
                 elif action_command == "selection_made":
                     logging.debug(f"StatusIndicator received selection_made: {action_data}")
@@ -1351,13 +1442,15 @@ async def main():
                         handler_to_stop = session_to_stop.get('handler')
                         processing_finished_event = session_to_stop.get('processing_finished_event')
                         session_exists_for_stop = True
+                        # --- NEW: Get completion event --- >
+                        completion_event_for_cleanup = session_completion_events.get(stopping_activation_id)
                     elif stopping_activation_id:
                         logging.warning(f"Stop flow: Session {stopping_activation_id} not found in active_stt_sessions (inside lock).")
                     else:
                         logging.warning("Stop flow: stopping_activation_id was not set.")
 
                 # --- Trigger Cleanup Task --- >
-                if session_exists_for_stop and handler_to_stop and processing_finished_event:
+                if session_exists_for_stop and handler_to_stop and processing_finished_event and completion_event_for_cleanup:
                     logging.info(f"Session {stopping_activation_id}: Button released. Stopping Mic, Sending Close, Launching background cleanup...")
                     # --- Call stop_listening FIRST to signal loop & cancel task --- >
                     asyncio.create_task(handler_to_stop.stop_listening(), name=f"StopListen_{stopping_activation_id}")
@@ -1367,6 +1460,12 @@ async def main():
                     # 1. Stop microphone immediately (and wait briefly)
                     logging.debug(f"Session {stopping_activation_id}: Stopping microphone...")
                     stop_mic_task = asyncio.create_task(handler_to_stop.stop_microphone(), name=f"StopMic_{stopping_activation_id}")
+                    # --- Record Mic Stop Time (approximate call time) --- >
+                    mic_stop_call_time = time.monotonic()
+                    async with session_state_lock:
+                        if stopping_activation_id in active_stt_sessions:
+                            active_stt_sessions[stopping_activation_id]['mic_stop_time'] = mic_stop_call_time
+                    # --- End Record --- >
                     try:
                         await asyncio.wait_for(stop_mic_task, timeout=1.0) # Give mic stop a second
                         logging.debug(f"Session {stopping_activation_id}: Microphone stop task completed.")
@@ -1383,9 +1482,9 @@ async def main():
 
                     # 3. Launch background task for waiting and final cleanup
                     logging.debug(f"Session {stopping_activation_id}: Launching background wait-and-cleanup task...") # Adjusted log
-                    asyncio.create_task(_wait_and_cleanup(stopping_activation_id, handler_to_stop, processing_finished_event), name=f"WaitCleanup_{stopping_activation_id}")
+                    asyncio.create_task(_wait_and_cleanup(stopping_activation_id, handler_to_stop, processing_finished_event, completion_event_for_cleanup), name=f"WaitCleanup_{stopping_activation_id}")
                 elif session_exists_for_stop:
-                    logging.warning(f"Session {stopping_activation_id}: Cannot launch cleanup task. Missing handler or event.")
+                    logging.warning(f"Session {stopping_activation_id}: Cannot launch cleanup task. Missing handler, processing_event or completion_event.")
 
                 # --- Reset main loop stop flags immediately --- >
                 # The actual session cleanup happens in the background task.

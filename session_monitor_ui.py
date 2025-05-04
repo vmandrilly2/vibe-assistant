@@ -57,25 +57,34 @@ class SessionMonitor:
             main_frame.pack(fill=tk.BOTH, expand=True, side=tk.TOP)
 
             # Header Row
-            headers = ["Slot", "ID", "State", "Processing", "StopReq", "Buffered", "Timeouts"]
-            for col, header_text in enumerate(headers):
-                 header_label = tk.Label(main_frame, text=header_text, font=("Segoe UI", 9, "bold"), relief=tk.GROOVE, borderwidth=1, padx=3)
-                 header_label.grid(row=0, column=col, sticky="ew", padx=1, pady=1)
+            headers = ["Slot", "ID", "State", "Processing", "StopReq", "Buffered", "Timeouts", "ActiveProc", "MicOn"]
+            for col, header in enumerate(headers):
+                tk.Label(main_frame, text=header, font=("Segoe UI", 9, "bold")).grid(row=0, column=col, padx=3, pady=2, sticky="w")
 
-            # Create placeholder labels for each session slot
+            # Data Rows (placeholders)
+            self.labels = {}
             for i in range(self.max_sessions):
                 slot_num = i + 1
-                self.labels[slot_num] = {} # Initialize dict for this slot
-
-                # Slot Number Label
-                slot_label = tk.Label(main_frame, text=f"{slot_num}:", font=("Segoe UI", 9))
-                slot_label.grid(row=slot_num, column=0, sticky="w", padx=1)
-
-                # Data Labels for the slot
-                for col, key in enumerate(["id", "state", "processing", "stop_req", "buffered", "timeouts"], start=1):
-                    data_label = tk.Label(main_frame, text="-", font=("Segoe UI", 9), anchor="w", relief=tk.SUNKEN, borderwidth=1, padx=3)
-                    data_label.grid(row=slot_num, column=col, sticky="ew", padx=1, pady=1)
-                    self.labels[slot_num][key] = data_label # Store the label widget
+                self.labels[slot_num] = {}
+                tk.Label(main_frame, text=f"Slot {slot_num}:").grid(row=slot_num, column=0, padx=3, sticky="w")
+                self.labels[slot_num]["id"] = tk.Label(main_frame, text="-", anchor="w", justify="left", width=15)
+                self.labels[slot_num]["id"].grid(row=slot_num, column=1, padx=3, sticky="w")
+                self.labels[slot_num]["state"] = tk.Label(main_frame, text="Idle", anchor="w", width=15)
+                self.labels[slot_num]["state"].grid(row=slot_num, column=2, padx=3, sticky="w")
+                self.labels[slot_num]["processing"] = tk.Label(main_frame, text="-", anchor="w", width=5)
+                self.labels[slot_num]["processing"].grid(row=slot_num, column=3, padx=3, sticky="w")
+                self.labels[slot_num]["stop_req"] = tk.Label(main_frame, text="-", anchor="w", width=5)
+                self.labels[slot_num]["stop_req"].grid(row=slot_num, column=4, padx=3, sticky="w")
+                self.labels[slot_num]["buffered"] = tk.Label(main_frame, text="-", anchor="w", width=5)
+                self.labels[slot_num]["buffered"].grid(row=slot_num, column=5, padx=3, sticky="w")
+                self.labels[slot_num]["timeouts"] = tk.Label(main_frame, text="-", anchor="w", width=5)
+                self.labels[slot_num]["timeouts"].grid(row=slot_num, column=6, padx=3, sticky="w")
+                # --- NEW Columns ---
+                self.labels[slot_num]["active_proc"] = tk.Label(main_frame, text="-", anchor="w", width=5)
+                self.labels[slot_num]["active_proc"].grid(row=slot_num, column=7, padx=3, sticky="w")
+                self.labels[slot_num]["mic_on"] = tk.Label(main_frame, text="-", anchor="w", width=5)
+                self.labels[slot_num]["mic_on"].grid(row=slot_num, column=8, padx=3, sticky="w")
+                # --- END NEW ---
 
             main_frame.grid_columnconfigure(1, weight=1) # Allow ID column to expand
             main_frame.grid_columnconfigure(2, weight=1) # Allow State column to expand
@@ -214,6 +223,15 @@ class SessionMonitor:
                 timeout_text = str(session_data.get('timeout_count', 0))
                 # --- END NEW ---
 
+                # --- NEW: Get Monitor Flags --- >
+                active_proc_text = "Y" if session_data.get('is_active_processor') else "N"
+                mic_on_text = "Y" if session_data.get('is_microphone_active') else "N"
+                # --- END NEW ---
+
+                # --- ADD LOGGING ---
+                logging.debug(f"_update_display: Slot {slot_num} (ID: {session_id_for_slot}), State: {state_text}, MicFlag: {session_data.get('is_microphone_active')}, Setting MicLabel: {mic_on_text}")
+                # --- END LOGGING ---
+
                 self.labels[slot_num]["id"].config(text=id_text)
                 self.labels[slot_num]["state"].config(text=state_text)
                 self.labels[slot_num]["processing"].config(text=processing_text)
@@ -223,15 +241,21 @@ class SessionMonitor:
                 self.labels[slot_num]["timeouts"].config(text=timeout_text)
                 # --- END NEW ---
 
-            elif session_id_for_slot: # Must be a waiting ID without full data yet
+                # --- NEW: Update Monitor Flags --- >
+                self.labels[slot_num]["active_proc"].config(text=active_proc_text)
+                self.labels[slot_num]["mic_on"].config(text=mic_on_text)
+                # --- END NEW ---
+
+            elif session_id_for_slot in waiting_ids: # Session is waiting (might not have full data)
                  self.labels[slot_num]["id"].config(text=str(session_id_for_slot))
                  self.labels[slot_num]["state"].config(text="Waiting (Init)")
                  self.labels[slot_num]["processing"].config(text="-")
                  self.labels[slot_num]["stop_req"].config(text="-")
                  self.labels[slot_num]["buffered"].config(text="-")
-                 # --- NEW: Clear timeout for waiting --- >
                  self.labels[slot_num]["timeouts"].config(text="-")
-                 # --- END NEW ---
+                 self.labels[slot_num]["active_proc"].config(text="-")
+                 # Keep mic_on as potentially last known state or clear? Let's clear for waiting.
+                 self.labels[slot_num]["mic_on"].config(text="-")
 
             else:
                 # Slot is empty
@@ -242,6 +266,11 @@ class SessionMonitor:
                 self.labels[slot_num]["buffered"].config(text="-")
                 # --- NEW: Clear timeout for idle --- >
                 self.labels[slot_num]["timeouts"].config(text="-")
+                # --- END NEW ---
+
+                # --- NEW: Clear Monitor Flags for idle --- >
+                self.labels[slot_num]["active_proc"].config(text="-")
+                self.labels[slot_num]["mic_on"].config(text="-")
                 # --- END NEW ---
 
         # --- NEW: Update global stats --- >

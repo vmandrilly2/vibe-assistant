@@ -78,14 +78,16 @@ class STTConnectionHandler:
         self.ui_action_queue = ui_action_q
         self.background_recorder = background_recorder
         self.options = options # Store the specific options for this instance
-
         self.dg_connection = None
-        self.microphone = None
-        self.is_listening = False # Flag indicating if we intend to be listening for this instance
-        self._connect_lock = asyncio.Lock() # Prevent concurrent start/stop for *this instance*
+        self._connection_task = None
+        self.is_listening = False
+        self._explicitly_stopped = False # Flag for intentional stop
         self._connection_established_event = asyncio.Event()
-        self._connection_task = None # Task managing the connection loop for this instance
-        self._explicitly_stopped = False # Flag to distinguish intentional stop from errors/disconnects
+        self._connect_lock = asyncio.Lock() # Lock to prevent concurrent connect attempts
+        self.microphone = None # Store microphone instance
+        self.connection_start_time = None # Track when connection attempt starts
+        self.retry_count = 0 # Track connection retries
+        self.is_microphone_active = False # NEW: Track mic state
 
         logging.info(f"STTConnectionHandler initialized for ID: {self.activation_id}")
 
@@ -99,6 +101,17 @@ class STTConnectionHandler:
             logging.warning(f"UI Action queue full when sending STTHandler[{self.activation_id}] status: {status}")
         except Exception as e:
             logging.error(f"Error sending STTHandler[{self.activation_id}] status update to UI Action Queue: {e}")
+
+    def _send_mic_status_update(self, status: bool):
+        """Helper to send mic status updates via UI action queue."""
+        try:
+            mic_data = {"activation_id": self.activation_id, "mic_active": status}
+            self.ui_action_queue.put_nowait(("mic_status_update", mic_data))
+            logging.debug(f"STTHandler[{self.activation_id}]: Sent mic_status_update ({status}) to main loop.")
+        except queue.Full:
+            logging.warning(f"UI Action queue full sending mic_status_update for {self.activation_id}.")
+        except Exception as e:
+            logging.error(f"Error sending mic_status_update: {e}")
 
     # --- Internal STT Callbacks (Now methods of the class) ---
 
@@ -218,11 +231,13 @@ class STTConnectionHandler:
             logging.debug(f"STTHandler[{self.activation_id}]: Finishing microphone...")
             try:
                 self.microphone.finish()
+                self.is_microphone_active = False # Clear flag
+                self._send_mic_status_update(False) # <-- Signal False
+                self.microphone = None
             except Exception as e:
                  logging.warning(f"STTHandler[{self.activation_id}]: Error finishing microphone: {e}")
             finally:
-                 self.microphone = None
-            logging.debug(f"STTHandler[{self.activation_id}]: Microphone finished.")
+                 logging.debug(f"STTHandler[{self.activation_id}]: Microphone finished.")
 
         if self.dg_connection:
             logging.debug(f"STTHandler[{self.activation_id}]: Finishing STT connection...")
@@ -247,6 +262,8 @@ class STTConnectionHandler:
             logging.debug(f"STTHandler[{self.activation_id}]: Finishing microphone...")
             try:
                 self.microphone.finish()
+                self.is_microphone_active = False # Clear flag
+                self._send_mic_status_update(False) # <-- Signal False
                 self.microphone = None # Clear reference after stopping
                 logging.debug(f"STTHandler[{self.activation_id}]: Microphone finished.")
             except Exception as e:
@@ -444,8 +461,15 @@ class STTConnectionHandler:
 
             self.microphone = Microphone(microphone_callback)
             logging.debug(f"STTHandler[{self.activation_id}]: Microphone object created. Starting microphone...")
-            self.microphone.start()
-            logging.info(f"STTHandler[{self.activation_id}]: Microphone started.")
+            # Start microphone
+            try:
+                self.microphone.start()
+                self.is_microphone_active = True # Set flag
+                self._send_mic_status_update(True) # <-- Signal True
+                logging.debug(f"STTHandler[{self.activation_id}]: Set is_microphone_active=True")
+                logging.info(f"STTHandler[{self.activation_id}]: Microphone started.")
+            except Exception as e:
+                logging.error(f"STTHandler[{self.activation_id}]: Failed to start microphone: {e}", exc_info=True)
             return True # Connection successful
 
         except asyncio.CancelledError:

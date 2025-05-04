@@ -804,9 +804,18 @@ async def send_state_to_monitor():
                     'processing_complete': data.get('processing_complete'),
                     'timeout_count': data.get('timeout_count', 0),
                     'is_successful_stop': data.get('is_successful_stop', False),
-                    'final_transcript_received': data.get('final_transcript_received', False), # NEW
+                    'final_transcript_received': data.get('final_transcript_received', False),
+                    # --- NEW Monitor Flags ---
+                    'is_active_processor': act_id == currently_processing_session_id,
+                    'is_microphone_active': data.get('handler').is_microphone_active if data.get('handler') else False,
+                    # --- END NEW ---
                     # Add other relevant simple fields if needed
                 }
+                # --- ADD LOGGING --- >
+                handler_for_log = data.get('handler')
+                mic_active_for_log = handler_for_log.is_microphone_active if handler_for_log else 'N/A'
+                logging.debug(f"send_state_to_monitor: Session {act_id}, MicActive Flag = {mic_active_for_log}")
+                # --- END LOGGING --- >
 
             state_snapshot = {
                 'active_sessions': current_active_sessions_snapshot,
@@ -851,7 +860,20 @@ async def _wait_and_cleanup(session_id: any, handler: STTConnectionHandler, proc
     except Exception as e:
         logging.error(f"_wait_and_cleanup[{session_id}]: Error waiting for processing event: {e}", exc_info=True)
 
-    # --- Disconnect and Cleanup STT Handler --- >
+    # --- NEW: Wait for Typing Queue --- >
+    if event_received: # Only wait for typing if the final transcript event was actually received
+        logging.debug(f"_wait_and_cleanup[{session_id}]: Waiting for any associated typing jobs to complete...")
+        try:
+            # Wait for all tasks currently in the queue to be processed.
+            await asyncio.wait_for(typing_queue.join(), timeout=10.0) # Timeout after 10s
+            logging.debug(f"_wait_and_cleanup[{session_id}]: Typing queue joined successfully.")
+        except asyncio.TimeoutError:
+            logging.warning(f"_wait_and_cleanup[{session_id}]: Timeout waiting for typing queue to join.")
+        except Exception as e:
+            logging.error(f"_wait_and_cleanup[{session_id}]: Error waiting for typing queue join: {e}", exc_info=True)
+    # --- END NEW --- 
+
+    # --- Disconnect Handler (includes connection finish) ---
     logging.debug(f"_wait_and_cleanup[{session_id}]: Disconnecting handler...")
     disconnect_task = asyncio.create_task(handler._disconnect(), name=f"CleanupDisconnect_{session_id}")
     try:
@@ -1168,6 +1190,9 @@ async def main():
                             'button_released': False,
                             'final_processing_complete': False,
                             # --- END NEW ---
+                            # --- NEW: Recording State ---
+                            'is_recording': False,
+                            # --- END NEW ---
                             # --- END NEW ---
                         }
                         active_stt_sessions[received_activation_id] = session_data
@@ -1318,6 +1343,17 @@ async def main():
                          logging.warning("Received connection_timeout message without an activation_id.")
                 # --- END NEW ---
 
+                # --- NEW: Handle Mic Status Update --- >
+                elif action_command == "mic_status_update":
+                    mic_activation_id = action_data.get("activation_id")
+                    mic_active = action_data.get("mic_active")
+                    if mic_activation_id:
+                        logging.debug(f"Received mic_status_update for {mic_activation_id}: {mic_active}. Triggering monitor update.")
+                        asyncio.create_task(send_state_to_monitor(), name=f"SendStateMonitor_Mic_{mic_activation_id}")
+                    else:
+                        logging.warning("Received mic_status_update message without an activation_id.")
+                # --- END NEW ---
+
             except queue.Empty: pass
             except Exception as e: logging.error(f"Error processing UI action queue: {e}", exc_info=True)
 
@@ -1338,48 +1374,38 @@ async def main():
                         # --- END NEW ---
                         handler_to_stop = session_to_stop.get('handler')
                         processing_finished_event = session_to_stop.get('processing_finished_event')
-                        # session_to_stop['stop_requested'] = True # REMOVED - No longer needed here
                         session_exists_for_stop = True
                     elif stopping_activation_id:
                         logging.warning(f"Stop flow: Session {stopping_activation_id} not found in active_stt_sessions (inside lock).")
                     else:
                         logging.warning("Stop flow: stopping_activation_id was not set.")
 
-                # --- NEW Stop Sequence: Stop Mic, Send Close, Launch Cleanup Task --- >
+                # --- Trigger Cleanup Task --- >
                 if session_exists_for_stop and handler_to_stop and processing_finished_event:
-                    logging.info(f"Session {stopping_activation_id}: Initiating stop sequence (stop mic, send close, launch cleanup task)...")
-
-                    # 1. Stop microphone immediately and wait
+                    logging.info(f"Session {stopping_activation_id}: Button released. Stopping Mic, Sending Close, Launching background cleanup...")
+                    # --- RE-ADD direct stop calls --- >
+                    # 1. Stop microphone immediately (and wait briefly)
                     logging.debug(f"Session {stopping_activation_id}: Stopping microphone...")
                     stop_mic_task = asyncio.create_task(handler_to_stop.stop_microphone(), name=f"StopMic_{stopping_activation_id}")
                     try:
-                        await asyncio.wait_for(stop_mic_task, timeout=1.0)
+                        await asyncio.wait_for(stop_mic_task, timeout=1.0) # Give mic stop a second
                         logging.debug(f"Session {stopping_activation_id}: Microphone stop task completed.")
                     except asyncio.TimeoutError:
                         logging.warning(f"Session {stopping_activation_id}: Timeout waiting for microphone stop task.")
                     except Exception as e:
                         logging.error(f"Session {stopping_activation_id}: Error waiting for microphone stop task: {e}", exc_info=True)
 
-                    # 2. Send CloseStream message (don't wait)
+                    # 2. Send CloseStream (Fire and forget)
                     logging.debug(f"Session {stopping_activation_id}: Sending CloseStream...")
-                    send_close_task = asyncio.create_task(handler_to_stop.send_close_stream(), name=f"SendClose_{stopping_activation_id}")
+                    asyncio.create_task(handler_to_stop.send_close_stream(), name=f"SendCloseStream_{stopping_activation_id}")
+                    await asyncio.sleep(0.05) # Tiny sleep to allow send
+                    # --- END RE-ADD direct stop calls ---
 
-                    # 3. Launch the background cleanup task (don't wait)
-                    logging.debug(f"Session {stopping_activation_id}: Launching background wait-and-cleanup task...")
-                    asyncio.create_task(
-                        _wait_and_cleanup(stopping_activation_id, handler_to_stop, processing_finished_event),
-                        name=f"WaitCleanup_{stopping_activation_id}"
-                    )
-
-                    # --- REMOVED Old Wait/Disconnect/StopListen Logic ---
-                    # --- REMOVED Tooltip Hide (Cleanup task can handle if needed) --- >
-
+                    # 3. Launch background task for waiting and final cleanup
+                    logging.debug(f"Session {stopping_activation_id}: Launching background wait-and-cleanup task...") # Adjusted log
+                    asyncio.create_task(_wait_and_cleanup(stopping_activation_id, handler_to_stop, processing_finished_event), name=f"WaitCleanup_{stopping_activation_id}")
                 elif session_exists_for_stop:
-                     if not handler_to_stop:
-                         logging.warning(f"Stop flow: Session {stopping_activation_id} exists but handler was not found.")
-                     if not processing_finished_event:
-                          logging.warning(f"Stop flow: Session {stopping_activation_id} exists but processing_finished_event was not found.")
-                # --- END NEW Stop Sequence --- >
+                    logging.warning(f"Session {stopping_activation_id}: Cannot launch cleanup task. Missing handler or event.")
 
                 # --- Reset main loop stop flags immediately --- >
                 # The actual session cleanup happens in the background task.

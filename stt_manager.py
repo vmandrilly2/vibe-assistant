@@ -2,6 +2,7 @@ import asyncio
 import logging
 import queue
 import time
+import json
 from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
@@ -201,39 +202,12 @@ class STTConnectionHandler:
             self.is_listening = False # Signal loop to stop retrying/connecting
             self._explicitly_stopped = True # Mark as intentional stop
 
-            stop_task = None
-            if self._connection_task and not self._connection_task.done():
-                logging.debug(f"STTHandler[{self.activation_id}]: Cancelling connection task due to stop_listening.")
-                # We don't cancel the task directly here anymore.
-                # Instead, we signal the loop via is_listening=False and rely on _disconnect.
-                # We primarily want to await the _disconnect process.
-                pass # Let the disconnect handle finish()
-
             try:
-                logging.debug(f"STTHandler[{self.activation_id}]: Awaiting disconnect...")
-                # Use wait_for to apply the timeout to the disconnect process
-                await asyncio.wait_for(self._disconnect(), timeout=timeout)
-                logging.info(f"STTHandler[{self.activation_id}]: Disconnect completed within timeout.")
-            except asyncio.TimeoutError:
-                 logging.warning(f"STTHandler[{self.activation_id}]: Timeout ({timeout}s) waiting for disconnect. Resources might not be fully released immediately.")
-                 # Attempt to cancel the task forcefully if disconnect timed out
-                 if self._connection_task and not self._connection_task.done():
-                     self._connection_task.cancel()
-                     try: await self._connection_task
-                     except asyncio.CancelledError: pass
-                     except Exception: pass # Ignore further errors
+                # This method only sets flags now. Actual stopping happens elsewhere.
+                logging.debug(f"STTHandler[{self.activation_id}]: stop_listening called. Internal state flags set.")
             except Exception as e:
-                logging.error(f"STTHandler[{self.activation_id}]: Error during disconnect: {e}")
-            finally:
-                 # Clean up the task reference
-                 if self._connection_task and self._connection_task.done():
-                     # Check for exceptions if task finished due to error/cancellation
-                     try: self._connection_task.result()
-                     except asyncio.CancelledError: logging.debug(f"STTHandler[{self.activation_id}]: Connection task was cancelled during stop.")
-                     except Exception as task_exc: logging.error(f"STTHandler[{self.activation_id}]: Connection task finished with error: {task_exc}")
-                 self._connection_task = None
-                 logging.info(f"STTHandler[{self.activation_id}]: Listening stopped.")
-
+                # Should not happen as we are just setting flags
+                logging.error(f"STTHandler[{self.activation_id}]: Unexpected error in stop_listening: {e}", exc_info=True)
 
     async def _disconnect(self):
         """Safely disconnects the microphone and websocket connection for this instance."""
@@ -267,6 +241,30 @@ class STTConnectionHandler:
         self._connection_established_event.clear()
         logging.debug(f"STTHandler[{self.activation_id}]: Disconnect process complete.")
 
+    async def stop_microphone(self):
+        """Stops the microphone if it's running."""
+        if self.microphone:
+            logging.debug(f"STTHandler[{self.activation_id}]: Finishing microphone...")
+            try:
+                self.microphone.finish()
+                self.microphone = None # Clear reference after stopping
+                logging.debug(f"STTHandler[{self.activation_id}]: Microphone finished.")
+            except Exception as e:
+                 logging.warning(f"STTHandler[{self.activation_id}]: Error finishing microphone: {e}")
+        else:
+             logging.debug(f"STTHandler[{self.activation_id}]: Microphone object not found, cannot stop.")
+
+    async def send_close_stream(self):
+        """Sends the CloseStream message without waiting or disconnecting."""
+        if self.dg_connection and await self.dg_connection.is_connected():
+            try:
+                logging.debug(f"STTHandler[{self.activation_id}]: Sending CloseStream message...")
+                close_payload = { 'type': 'CloseStream' }
+                await self.dg_connection.send(json.dumps(close_payload))
+            except Exception as e:
+                logging.warning(f"STTHandler[{self.activation_id}]: Error sending CloseStream: {e}")
+        else:
+             logging.debug(f"STTHandler[{self.activation_id}]: Cannot send CloseStream, connection not active.")
 
     async def _connection_loop(self):
         """Manages the connection attempts for this specific instance."""
@@ -301,15 +299,23 @@ class STTConnectionHandler:
                     while self.is_listening and self.dg_connection and await self.dg_connection.is_connected():
                          await asyncio.sleep(0.2) # Check connection periodically
 
-                    # --- Connection Lost Handling ---
+                    # --- NEW: Check if loop exited due to intentional stop --- >
+                    if not self.is_listening:
+                        logging.info(f"STTHandler[{self.activation_id}]: Intentional stop detected after monitoring loop exit. Bypassing retry.")
+                        await self._disconnect() # Ensure clean disconnect
+                        break # Exit the main while loop
+                    # --- END NEW --- >
+
+                    # --- Connection Lost Handling --- >
+                    # Original check remains, but the NEW check above should catch most intentional stops
                     if self.is_listening: # If loop exited but we weren't told to stop explicitly
                          logging.warning(f"STTHandler[{self.activation_id}]: Connection lost. Cleaning up and will retry if attempts remain.")
                          await self._disconnect() # Clean up before retry
                          # Delay is applied at the end of the outer loop before next attempt
-                    else: # is_listening became False, explicit stop
-                         logging.info(f"STTHandler[{self.activation_id}]: Stop requested while connected. Exiting loop.")
-                         await self._disconnect() # Ensure clean disconnect
-                         break # Exit loop cleanly
+                    # else: # is_listening became False - handled by the NEW check above
+                    #     logging.info(f"STTHandler[{self.activation_id}]: Stop requested while connected. Exiting loop.")
+                    #     await self._disconnect() # Ensure clean disconnect
+                    #     break # Exit loop cleanly
 
                 else: # _connect_and_stream returned False (internal error)
                     logging.warning(f"STTHandler[{self.activation_id}]: Connection attempt {attempts} failed internally.")
@@ -321,6 +327,12 @@ class STTConnectionHandler:
                 logging.warning(f"STTHandler[{self.activation_id}]: Connection attempt {attempts} timed out after {current_attempt_timeout}s.")
                 # await self._disconnect() # Ensure cleanup on timeout -- REMOVE THIS
                 # Allow loop to continue to retry logic
+                # --- NEW: Report timeout ---
+                try:
+                    self.ui_action_queue.put_nowait(("connection_timeout", {"activation_id": self.activation_id}))
+                except queue.Full:
+                    logging.warning(f"STTHandler[{self.activation_id}]: UI Action queue full reporting connection timeout.")
+                # --- END NEW ---
 
             except asyncio.CancelledError:
                  logging.info(f"STTHandler[{self.activation_id}]: Connection loop cancelled.")
@@ -335,24 +347,24 @@ class STTConnectionHandler:
 
             # --- Apply Retry Delay ---
             if self.is_listening and attempts < self.MAX_CONNECT_ATTEMPTS:
-                 current_retry_delay = RETRY_DELAYS_SEC[attempts - 1]
-                 logging.info(f"STTHandler[{self.activation_id}]: Waiting {current_retry_delay}s before retry.")
-                 try:
-                     await asyncio.sleep(current_retry_delay)
-                 except asyncio.CancelledError:
-                      logging.info(f"STTHandler[{self.activation_id}]: Retry delay sleep cancelled.")
-                      await self._disconnect() # Ensure cleanup
-                      break # Exit loop
+                 retry_delay_index = min(attempts - 1, len(RETRY_DELAYS_SEC) - 1)
+                 delay = RETRY_DELAYS_SEC[retry_delay_index]
+                 logging.info(f"STTHandler[{self.activation_id}]: Waiting {delay}s before retry.")
+                 await asyncio.sleep(delay)
 
         # --- Loop End ---
-        logging.info(f"STTHandler[{self.activation_id}]: Connection loop finished.")
-        if not self._explicitly_stopped: # Ensure status is error if loop ended unexpectedly
-             if attempts >= self.MAX_CONNECT_ATTEMPTS:
-                  pass # Error status already sent
-             else: # Likely connection lost or other error
-                  self._send_status("error")
-        # Final cleanup call (should be redundant if disconnects happened correctly, but safe)
-        await self._disconnect()
+        # --- NEW: Final Status Check --- >
+        if self.is_listening:
+             # If the loop finished but we were supposedly still listening, something went wrong.
+             logging.error(f"STTHandler[{self.activation_id}]: Connection loop finished unexpectedly while is_listening was True!")
+             self._send_status("error") # Send error if loop ended abnormally
+             self.is_listening = False # Ensure state is correct
+        else:
+             logging.info(f"STTHandler[{self.activation_id}]: Connection loop finished normally (is_listening=False).")
+            # Optional: Send disconnected status here if not already sent by _on_close?
+            # It might be redundant if _on_close always fires.
+        # --- END NEW ---
+        await self._disconnect() # Final cleanup attempt
 
 
     async def _connect_and_stream(self) -> bool:

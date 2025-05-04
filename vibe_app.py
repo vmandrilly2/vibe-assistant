@@ -22,6 +22,8 @@ import systray_ui # Import the run function and the reload event
 from background_audio_recorder import BackgroundAudioRecorder
 from mic_ui_manager import MicUIManager, DEFAULT_MODES # Import DEFAULT_MODES
 from tooltip_manager import TooltipManager
+# --- NEW: Import Session Monitor --- >
+from session_monitor_ui import SessionMonitor
 
 # --- Internationalization (i18n) Import >
 import i18n
@@ -195,6 +197,15 @@ modifier_keys_pressed = set()
 ui_action_queue = queue.Queue()
 # --- Queue for Action Confirmation UI --- >
 action_confirm_queue = queue.Queue()
+# --- NEW: Queue for Session Monitor UI --- >
+monitor_queue = queue.Queue()
+
+# --- NEW: Global Stats for Monitor --- >
+total_successful_stops = 0
+min_stop_duration = float('inf')
+max_stop_duration = 0.0
+total_stops_final_missed = 0 # NEW
+
 ui_interaction_cancelled = False # Flag specifically for UI hover interactions
 initial_activation_pos = None # Position where activation started
 start_time = None # Timestamp when activation started
@@ -638,11 +649,30 @@ async def _process_transcript_data(session_id: any, session_data: dict, transcri
                 # Use the passed tooltip_enabled flag
                 if tooltip_mgr and tooltip_enabled and is_final_dg: # Only hide on actual DG final?
                     try:
+                        # --- NEW: Mark final transcript as received --- >
+                        session_data['final_transcript_received'] = True
+                        # --- END NEW ---
+                        # --- NEW: Record final result time on actual Deepgram final --- >
+                        if 'final_result_time' not in session_data or session_data['final_result_time'] is None:
+                           session_data['final_result_time'] = time.monotonic()
+                           logging.debug(f"Recorded final result time (Deepgram Final) {session_data['final_result_time']:.3f} for session {session_id}")
+                        # --- END NEW ---
                         tooltip_queue.put_nowait(("hide", session_id))
                     except queue.Full:
                         logging.warning(f"Tooltip queue full sending hide on final for ID {session_id}.")
                     except Exception as e:
                         logging.error(f"Error sending hide on final to tooltip queue: {e}")
+
+                # --- NEW: Signal processing finished on final DG message --- >
+                if is_final_dg:
+                    finish_event = session_data.get('processing_finished_event')
+                    # --- NEW: Set flag along with event --- >
+                    session_data['final_processing_complete'] = True
+                    # --- END NEW ---
+                    if finish_event and not finish_event.is_set():
+                        finish_event.set()
+                        logging.debug(f"Signaled processing_finished_event for session {session_id}")
+                # --- END NEW ---
 
             except Exception as e:
                 logging.error(f"Error calling handle_final for session {session_id}: {e}", exc_info=True)
@@ -667,89 +697,190 @@ async def _process_transcript_data(session_id: any, session_data: dict, transcri
 async def _handle_session_handoff(completed_session_id: any):
     """Handles the process of activating the next waiting session.
        Assumes the session_state_lock is HELD when called.
-       Releases the lock before processing buffered transcripts.
+       Focuses only on removing the completed session and activating the next.
+       Disconnection and stat calculation happen elsewhere.
     """
     global currently_processing_session_id # Need to modify global
 
-    logging.debug(f"Executing session handoff logic (called for completed_session_id: {completed_session_id})")
+    logging.debug(f"Executing simplified session handoff logic (called for completed_session_id: {completed_session_id})")
 
-    # 1. Remove the completed session (if it exists)
-    if completed_session_id in active_stt_sessions:
-        logging.debug(f"Removing completed session {completed_session_id} from active_stt_sessions.")
-        try:
-            del active_stt_sessions[completed_session_id]
-        except KeyError:
-            logging.warning(f"_handle_session_handoff: Session {completed_session_id} was already removed.")
+    # --- 1. Remove the completed session --- >
+    completed_session_data = active_stt_sessions.pop(completed_session_id, None) # Remove and get data
+    if completed_session_data:
+        logging.debug(f"Removed completed session {completed_session_id} from active_stt_sessions.")
+        # --- Calculate Stats (Moved here from wait_and_cleanup for simplicity) --- >
+        if completed_session_data.get('button_released'): # Only calculate if stop was initiated
+            global total_successful_stops, min_stop_duration, max_stop_duration, total_stops_final_missed
+            total_successful_stops += 1
+            logging.info(f"Session {completed_session_id} marked as successful stop. Total: {total_successful_stops}")
+            stop_time = completed_session_data.get('stop_signal_time')
+            handoff_time = time.monotonic()
+            if stop_time:
+                duration = handoff_time - stop_time
+                min_stop_duration = min(min_stop_duration, duration)
+                max_stop_duration = max(max_stop_duration, duration)
+                logging.info(f"Successful stop duration for {completed_session_id}: {duration:.3f}s (Min: {min_stop_duration:.3f}s, Max: {max_stop_duration:.3f}s)")
+            else:
+                logging.warning(f"Could not calculate stop duration for {completed_session_id}: missing stop_time.")
+            # Increment final missed count if applicable
+            if not completed_session_data.get('final_transcript_received'):
+                total_stops_final_missed += 1
+                logging.info(f"Session {completed_session_id} missed final transcript before stop. Total Missed: {total_stops_final_missed}")
+        # --- END STATS CALC ---
     else:
-        logging.debug(f"_handle_session_handoff: Completed session {completed_session_id} not found, perhaps already handled.")
+        logging.warning(f"_handle_session_handoff: Completed session {completed_session_id} not found in active_stt_sessions during removal.")
 
-    # 2. Check if the completed session was the one being processed
+    # --- 2. Check if the completed session was the one being processed --- >
     if currently_processing_session_id == completed_session_id:
-        logging.info(f"Session {completed_session_id} was the active processor. Clearing slot.")
+        logging.debug(f"Session {completed_session_id} was the active processor. Clearing processing slot.")
         currently_processing_session_id = None
     else:
-         logging.debug(f"Completed session {completed_session_id} was not the active processor ({currently_processing_session_id}).")
+         logging.debug(f"Completed session {completed_session_id} was not the active processor ({currently_processing_session_id}). No change to processing slot needed now.")
 
-
-    # 3. If the processing slot is now empty, find the next waiting session
+    # --- 3. If the processing slot is now empty, find and activate the next waiting session --- >
     session_to_activate_data = None
     next_session_id_to_process = None
+    buffered_transcripts_to_process = []
 
     if currently_processing_session_id is None:
         logging.debug("Processing slot is empty, checking waitlist...")
         while sessions_waiting_for_processing:
-            potential_next_id = sessions_waiting_for_processing.pop(0) # Get FIFO
+            potential_next_id = sessions_waiting_for_processing.pop(0)
             if potential_next_id in active_stt_sessions:
-                # Found a valid waiting session
                 next_session_id_to_process = potential_next_id
                 session_to_activate_data = active_stt_sessions[next_session_id_to_process]
-                currently_processing_session_id = next_session_id_to_process # Assign new processor
+                currently_processing_session_id = next_session_id_to_process
                 session_to_activate_data['is_processing_allowed'] = True
-                logging.info(f"Activating processing for next waiting session: {next_session_id_to_process}")
-                break # Exit loop once a valid session is found and assigned
+                # --- Get buffered transcripts --- >
+                buffered_transcripts = session_to_activate_data.get('buffered_transcripts', [])
+                if buffered_transcripts:
+                    logging.info(f"Activating processing for {next_session_id_to_process}. Preparing to process {len(buffered_transcripts)} buffered transcript(s)...")
+                    buffered_transcripts_to_process = list(buffered_transcripts)
+                    session_to_activate_data['buffered_transcripts'] = [] # Clear buffer
+                else:
+                     logging.info(f"Activating processing for next waiting session: {next_session_id_to_process} (no buffered transcripts).")
+                break # Exit loop once a valid session is found
             else:
                 logging.warning(f"Session {potential_next_id} from waitlist not found in active sessions. Skipping.")
         if not next_session_id_to_process:
              logging.info("No valid sessions waiting for processing.")
     else:
-        logging.debug(f"Processing slot is already occupied by {currently_processing_session_id}. No handoff activation needed now.")
+        logging.debug(f"Processing slot is still occupied by {currently_processing_session_id}. No handoff activation needed now.")
 
+    # --- Logic to release lock and process buffers remains the same ---
+    # The lock will be released by the calling 'async with' context
 
-    # --- Determine buffered transcripts *before* releasing lock ---
-    buffered_transcripts_to_process = []
-    if session_to_activate_data and next_session_id_to_process:
-         buffered_transcripts = session_to_activate_data.get('buffered_transcripts', [])
-         if buffered_transcripts:
-              logging.info(f"Preparing to process {len(buffered_transcripts)} buffered transcript(s) for session {next_session_id_to_process}...")
-              buffered_transcripts_to_process = list(buffered_transcripts)
-              session_to_activate_data['buffered_transcripts'] = [] # Clear buffer *within lock*
-
-
-    # 4. Release the lock *before* potentially long processing
-    logging.debug("Releasing session state lock in _handle_session_handoff")
-    # session_state_lock.release() # REMOVE: Let the calling 'async with' handle release
-
-    # 5. Process buffered transcripts (if any) for the newly activated session *outside* the lock
+    # Process buffered transcripts (if any) outside the lock
     if next_session_id_to_process and session_to_activate_data and buffered_transcripts_to_process:
-        processor_to_run = session_to_activate_data.get('processor')
-        if processor_to_run:
-            logging.debug(f"Started processing buffered transcripts for {next_session_id_to_process}...")
-            for buffered_data in buffered_transcripts_to_process:
-                try:
-                    # Pass the session data dict directly now
-                    # Also pass tooltip_enabled flag (assuming it's available in this scope - needs adjustment if not)
-                    # NOTE: tooltip_enabled is NOT currently available here. This needs fixing.
-                    # We need to get tooltip_enabled from config_manager within this function or pass it down.
-                    # Let's get it from config_manager for now.
-                    local_tooltip_enabled = config_manager.get("modules.tooltip_enabled", True)
-                    await _process_transcript_data(next_session_id_to_process, session_to_activate_data, buffered_data, local_tooltip_enabled)
-                except Exception as e:
-                    logging.error(f"Error processing buffered transcript for {next_session_id_to_process}: {e}", exc_info=True)
-            logging.debug(f"Finished processing buffered transcripts for {next_session_id_to_process}.")
-        else:
-            logging.error(f"Cannot process buffered transcripts for {next_session_id_to_process}: Missing processor in session data.")
+        # processor_to_run = session_to_activate_data.get('processor') # Already retrieved
+        # NOTE: Still need to handle getting tooltip_enabled flag correctly here
+        local_tooltip_enabled = config_manager.get("modules.tooltip_enabled", True)
+        logging.debug(f"Started processing buffered transcripts for {next_session_id_to_process} outside lock...")
+        for buffered_data in buffered_transcripts_to_process:
+            try:
+                await _process_transcript_data(next_session_id_to_process, session_to_activate_data, buffered_data, local_tooltip_enabled)
+            except Exception as e:
+                logging.error(f"Error processing buffered transcript for {next_session_id_to_process}: {e}", exc_info=True)
+        logging.debug(f"Finished processing buffered transcripts for {next_session_id_to_process}.")
 
-    logging.debug("Finished _handle_session_handoff logic.")
+    logging.debug("Finished simplified _handle_session_handoff logic.")
+
+# --- NEW: Helper to Send State to Monitor --- >
+async def send_state_to_monitor():
+    """Safely gathers session state and sends it to the monitor queue."""
+    global active_stt_sessions, currently_processing_session_id, sessions_waiting_for_processing, monitor_queue, session_state_lock
+    logging.debug("Attempting to gather state for monitor...")
+    async with session_state_lock:
+        try:
+            # Create deep copies to avoid sending references to mutable objects
+            # Be mindful of complex objects within session_data if they aren't serializable or needed
+            # For now, let's send a simplified snapshot
+            current_active_sessions_snapshot = {}
+            for act_id, data in active_stt_sessions.items():
+                current_active_sessions_snapshot[act_id] = {
+                    'is_processing_allowed': data.get('is_processing_allowed'),
+                    'stop_requested': data.get('stop_requested'),
+                    'buffered_transcripts_count': len(data.get('buffered_transcripts', [])), # Just send count
+                    'processing_complete': data.get('processing_complete'),
+                    'timeout_count': data.get('timeout_count', 0),
+                    'is_successful_stop': data.get('is_successful_stop', False),
+                    'final_transcript_received': data.get('final_transcript_received', False), # NEW
+                    # Add other relevant simple fields if needed
+                }
+
+            state_snapshot = {
+                'active_sessions': current_active_sessions_snapshot,
+                'processing_id': currently_processing_session_id,
+                'waiting_ids': list(sessions_waiting_for_processing), # Copy list
+                # --- NEW: Add Global Stats --- >
+                'total_successful_stops': total_successful_stops,
+                'min_stop_duration': min_stop_duration if min_stop_duration != float('inf') else None, # Send None if no stops yet
+                'max_stop_duration': max_stop_duration if total_successful_stops > 0 else None, # Send None if no stops yet
+                'total_stops_final_missed': total_stops_final_missed # NEW
+                # --- END NEW ---
+            }
+            monitor_queue.put_nowait(("update_state", state_snapshot))
+            logging.debug("Sent state update to monitor queue.")
+        except queue.Full:
+            logging.warning("Monitor queue full. Skipping state update.")
+        except Exception as e:
+            logging.error(f"Error gathering or sending state to monitor: {e}", exc_info=True)
+    logging.debug("Finished gathering state for monitor.")
+# --- END Monitor Helper ---
+
+# --- NEW: Wait and Cleanup Function ---
+async def _wait_and_cleanup(session_id: any, handler: STTConnectionHandler, processing_event: asyncio.Event):
+    """Waits for final processing event, disconnects, and cleans up the session."""
+    if not handler or not processing_event:
+        logging.error(f"_wait_and_cleanup[{session_id}]: Invalid handler or event provided.")
+        return
+
+    logging.info(f"_wait_and_cleanup[{session_id}]: Starting wait and cleanup sequence.")
+    wait_timeout_sec = 30.0 # Or get from config
+    event_received = False
+    try:
+        logging.debug(f"_wait_and_cleanup[{session_id}]: Waiting up to {wait_timeout_sec}s for final processing event...")
+        await asyncio.wait_for(processing_event.wait(), timeout=wait_timeout_sec)
+        event_received = True
+        logging.info(f"_wait_and_cleanup[{session_id}]: Final processing event received.")
+    except asyncio.TimeoutError:
+        logging.warning(f"_wait_and_cleanup[{session_id}]: Timeout waiting for final processing event after {wait_timeout_sec}s.")
+    except asyncio.CancelledError:
+        logging.warning(f"_wait_and_cleanup[{session_id}]: Wait task cancelled.")
+        # Decide if cleanup should still proceed if cancelled
+    except Exception as e:
+        logging.error(f"_wait_and_cleanup[{session_id}]: Error waiting for processing event: {e}", exc_info=True)
+
+    # --- Disconnect and Cleanup STT Handler --- >
+    logging.debug(f"_wait_and_cleanup[{session_id}]: Disconnecting handler...")
+    disconnect_task = asyncio.create_task(handler._disconnect(), name=f"CleanupDisconnect_{session_id}")
+    try:
+        await asyncio.wait_for(disconnect_task, timeout=5.0) # Give disconnect a few secs
+        logging.debug(f"_wait_and_cleanup[{session_id}]: Handler disconnect task completed.")
+    except asyncio.TimeoutError:
+        logging.warning(f"_wait_and_cleanup[{session_id}]: Timeout waiting for handler disconnect task.")
+    except Exception as e:
+        logging.error(f"_wait_and_cleanup[{session_id}]: Error during handler disconnect task: {e}", exc_info=True)
+
+    # --- Signal Handler State (Internal Flags) --- >
+    logging.debug(f"_wait_and_cleanup[{session_id}]: Signaling handler internal state to stop...")
+    stop_listen_task = asyncio.create_task(handler.stop_listening(), name=f"CleanupStopListen_{session_id}")
+    # Don't necessarily need to await this flag setting task
+
+    # --- Trigger Session Handoff --- >
+    logging.debug(f"_wait_and_cleanup[{session_id}]: Triggering session handoff...")
+    async with session_state_lock:
+        # Check if session still exists before handing off
+        if session_id in active_stt_sessions:
+            await _handle_session_handoff(session_id)
+        else:
+            logging.warning(f"_wait_and_cleanup[{session_id}]: Session was already removed before handoff could be triggered.")
+
+    # --- Send Monitor Update --- >
+    asyncio.create_task(send_state_to_monitor(), name=f"SendStateMonitor_Cleanup_{session_id}")
+
+    logging.info(f"_wait_and_cleanup[{session_id}]: Cleanup sequence finished (Event Received: {event_received}).")
+# --- END NEW FUNCTION ---
 
 # --- Main Application Logic ---
 async def main():
@@ -763,6 +894,8 @@ async def main():
     global ui_interaction_cancelled, initial_activation_pos, start_time # Keep start_time global
     # --- NEW: Add lock to globals potentially used in main context (though it's accessed directly) ---
     global session_state_lock
+    # --- NEW: Session Monitor instance ---
+    global session_monitor
 
     # --- Instantiate ConfigManager ---
     # Already done globally: config_manager = ConfigManager()
@@ -823,6 +956,12 @@ async def main():
         logging.info("Background Audio Recorder activé et démarré.")
     else:
         logging.info("Background Audio Recorder désactivé par la configuration.")
+
+    # --- NEW: Start Session Monitor --- >
+    session_monitor = SessionMonitor(monitor_queue, MAX_CONCURRENT_SESSIONS)
+    session_monitor.start()
+    logging.info("Session Monitor started.")
+    # --- END NEW ---
 
     # --- Initialize Keyboard Simulator --- >
     keyboard_sim = KeyboardSimulator()
@@ -898,6 +1037,15 @@ async def main():
                 stop_detected_this_cycle = True
                 active_mode_on_stop = current_session_mode # Use the mode from the current session for stop flow
                 stopping_activation_id = current_activation_id # <<< CAPTURE the ID being stopped
+                # --- NEW: Record stop signal time --- >
+                current_monotonic_time = time.monotonic()
+                async with session_state_lock:
+                    if stopping_activation_id in active_stt_sessions:
+                        active_stt_sessions[stopping_activation_id]['stop_signal_time'] = current_monotonic_time
+                        logging.debug(f"Recorded stop signal time {current_monotonic_time:.3f} for session {stopping_activation_id}")
+                    else:
+                        logging.warning(f"Could not record stop signal time: session {stopping_activation_id} not found.")
+                # --- END NEW ---
                 if not active_mode_on_stop:
                     logging.warning("Stop detected, but current_session_mode was not set! Falling back to config mode.")
                     active_mode_on_stop = config_manager.get("general.active_mode", MODE_DICTATION)
@@ -1008,7 +1156,19 @@ async def main():
                             'stop_requested': False,
                             'processing_complete': False,
                             'creation_time': creation_time,
-                            'final_command_text': "" # Add placeholder for command mode text
+                            'final_command_text': "", # Add placeholder for command mode text
+                            # --- NEW: Monitor Stats ---
+                            'timeout_count': 0,
+                            'stop_signal_time': None,
+                            'final_result_time': None,
+                            'is_successful_stop': False,
+                            'final_transcript_received': False, # NEW
+                            'processing_finished_event': asyncio.Event(), # NEW
+                            # --- NEW: State Flags ---
+                            'button_released': False,
+                            'final_processing_complete': False,
+                            # --- END NEW ---
+                            # --- END NEW ---
                         }
                         active_stt_sessions[received_activation_id] = session_data
 
@@ -1022,9 +1182,12 @@ async def main():
                             # Keep sorted by creation time
                             sessions_waiting_for_processing.sort(key=lambda act_id: active_stt_sessions.get(act_id, {}).get('creation_time', float('inf')))
 
-                    # --- Start the STT connection task *outside* the lock ---
+                    # --- Start the STT connection task *outside* the lock --- >
                     # Ensure handler was created before lock was released
                     if received_activation_id in active_stt_sessions:
+                        # --- NEW: Send state update AFTER adding session ---
+                        asyncio.create_task(send_state_to_monitor(), name=f"SendStateMonitor_{received_activation_id}")
+                        # --- END NEW ---
                         handler_to_start = active_stt_sessions[received_activation_id].get('handler')
                         if handler_to_start:
                             asyncio.create_task(handler_to_start.start_listening(), name=f"STTHandler_{received_activation_id}")
@@ -1095,6 +1258,9 @@ async def main():
                                     # The handoff function will handle removal and potentially activating the next session.
                                     # It will release the lock itself before processing buffers.
                                     await _handle_session_handoff(status_activation_id)
+                                    # --- NEW: Send state update AFTER handoff logic --- >
+                                    asyncio.create_task(send_state_to_monitor(), name=f"SendStateMonitor_Handoff_{status_activation_id}")
+                                    # --- END NEW ---
                                 else:
                                     logging.warning(f"Cannot mark session {status_activation_id} complete or handoff: not found in active_stt_sessions within lock.")
                                     # Lock is released here automatically by 'async with'
@@ -1136,6 +1302,22 @@ async def main():
                     else:
                         logging.error(f"Unknown selection type: {type}")
 
+                # --- NEW: Handle Connection Timeout Message --- >
+                elif action_command == "connection_timeout":
+                    timeout_activation_id = action_data.get("activation_id")
+                    if timeout_activation_id:
+                        async with session_state_lock:
+                            if timeout_activation_id in active_stt_sessions:
+                                active_stt_sessions[timeout_activation_id]['timeout_count'] = active_stt_sessions[timeout_activation_id].get('timeout_count', 0) + 1
+                                logging.info(f"Incremented timeout count for session {timeout_activation_id}. New count: {active_stt_sessions[timeout_activation_id]['timeout_count']}")
+                                # Trigger state update for monitor
+                                asyncio.create_task(send_state_to_monitor(), name=f"SendStateMonitor_Timeout_{timeout_activation_id}")
+                            else:
+                                logging.warning(f"Received connection_timeout for unknown/inactive session: {timeout_activation_id}")
+                    else:
+                         logging.warning("Received connection_timeout message without an activation_id.")
+                # --- END NEW ---
+
             except queue.Empty: pass
             except Exception as e: logging.error(f"Error processing UI action queue: {e}", exc_info=True)
 
@@ -1143,141 +1325,80 @@ async def main():
             # --- Process Stop Flow --- >
             if is_stopping:
                 logging.debug(f"Processing stop flow steps for {active_mode_on_stop}...")
-                action_executed_this_stop = False # Initialize here to ensure it always exists
 
-                # --- Stop the specific STT Listener for the session that ended ---
+                # --- Get handler and event --- >
                 handler_to_stop = None
                 session_exists_for_stop = False
-                async with session_state_lock: # Protect reading session data
+                processing_finished_event = None
+                async with session_state_lock:
                     if stopping_activation_id and stopping_activation_id in active_stt_sessions:
                         session_to_stop = active_stt_sessions[stopping_activation_id]
+                        # --- NEW: Set button_released flag --- >
+                        session_to_stop['button_released'] = True
+                        # --- END NEW ---
                         handler_to_stop = session_to_stop.get('handler')
-                        session_to_stop['stop_requested'] = True # Mark stop requested within lock
+                        processing_finished_event = session_to_stop.get('processing_finished_event')
+                        # session_to_stop['stop_requested'] = True # REMOVED - No longer needed here
                         session_exists_for_stop = True
                     elif stopping_activation_id:
                         logging.warning(f"Stop flow: Session {stopping_activation_id} not found in active_stt_sessions (inside lock).")
                     else:
                         logging.warning("Stop flow: stopping_activation_id was not set.")
 
-                # Call stop_listening outside the lock
-                if session_exists_for_stop and handler_to_stop:
-                    logging.info(f"Signaling STT Handler for session {stopping_activation_id} to stop listening...")
-                    stop_task = asyncio.create_task(handler_to_stop.stop_listening(), name=f"StopHandler_{stopping_activation_id}")
-                    logging.debug(f"Stop task created for handler {stopping_activation_id}.")
-                elif session_exists_for_stop:
-                     logging.warning(f"Stop flow: No handler found for active session {stopping_activation_id} to stop (handler_to_stop was None).")
+                # --- NEW Stop Sequence: Stop Mic, Send Close, Launch Cleanup Task --- >
+                if session_exists_for_stop and handler_to_stop and processing_finished_event:
+                    logging.info(f"Session {stopping_activation_id}: Initiating stop sequence (stop mic, send close, launch cleanup task)...")
 
-                # --- Hide Tooltip (if dictation mode) --- >
-                if tooltip_mgr and active_mode_on_stop == MODE_DICTATION:
+                    # 1. Stop microphone immediately and wait
+                    logging.debug(f"Session {stopping_activation_id}: Stopping microphone...")
+                    stop_mic_task = asyncio.create_task(handler_to_stop.stop_microphone(), name=f"StopMic_{stopping_activation_id}")
                     try:
-                        # Use the activation ID from the start of *this* stop cycle
-                        hide_id = current_activation_id if stopping_start_time == start_time else None
-                        tooltip_queue.put_nowait(("hide", hide_id))
-                        logging.debug(f"Sent hide command to tooltip queue during stop flow (ID: {hide_id}).")
-                    except queue.Full: logging.error("Tooltip queue full sending hide message during stop flow.")
-                    except Exception as e: logging.error(f"Error sending tooltip hide message during stop flow: {e}")
+                        await asyncio.wait_for(stop_mic_task, timeout=1.0)
+                        logging.debug(f"Session {stopping_activation_id}: Microphone stop task completed.")
+                    except asyncio.TimeoutError:
+                        logging.warning(f"Session {stopping_activation_id}: Timeout waiting for microphone stop task.")
+                    except Exception as e:
+                        logging.error(f"Session {stopping_activation_id}: Error waiting for microphone stop task: {e}", exc_info=True)
 
-                # --- Check Cancellation Flag --- >
-                perform_action = True
-                if ui_interaction_cancelled:
-                     perform_action = False
-                     ui_interaction_cancelled = False # Reset flag
-                     logging.info("UI interaction cancelled during stop flow.")
+                    # 2. Send CloseStream message (don't wait)
+                    logging.debug(f"Session {stopping_activation_id}: Sending CloseStream...")
+                    send_close_task = asyncio.create_task(handler_to_stop.send_close_stream(), name=f"SendClose_{stopping_activation_id}")
 
-                # --- Calculate Duration --- >
-                duration = stop_initiated_time - stopping_start_time if stopping_start_time else 0
-                min_duration = float(config_manager.get("general.min_duration_sec", 0.5))
+                    # 3. Launch the background cleanup task (don't wait)
+                    logging.debug(f"Session {stopping_activation_id}: Launching background wait-and-cleanup task...")
+                    asyncio.create_task(
+                        _wait_and_cleanup(stopping_activation_id, handler_to_stop, processing_finished_event),
+                        name=f"WaitCleanup_{stopping_activation_id}"
+                    )
 
-                # --- Post-process / Translate / Execute --- >
-                action_task = None
-                if perform_action:
-                    if duration >= min_duration:
-                        logging.debug(f"Performing action post-stop for {active_mode_on_stop} (duration: {duration:.2f}s)")
-                        # --- Check for Confirmed Action Execution --- >
-                        action_executed_this_stop = False
-                        if g_pending_action and g_action_confirmed:
-                            logging.info(f"Executing confirmed action from main loop: {g_pending_action}")
-                            # Logic moved to action_confirmed queue handler above
-                            action_executed_this_stop = True # Mark as executed
+                    # --- REMOVED Old Wait/Disconnect/StopListen Logic ---
+                    # --- REMOVED Tooltip Hide (Cleanup task can handle if needed) --- >
 
-                        # --- Normal Post-Processing (Only if no action was confirmed/executed) --- >
-                        if not action_executed_this_stop:
-                            if active_mode_on_stop == MODE_DICTATION:
-                                current_source_lang = config_manager.get("general.selected_language")
-                                current_target_lang = config_manager.get("general.target_language")
-                                translation_mod_enabled = config_manager.get("modules.translation_enabled")
-                                # Check if translation is needed and enabled
-                                if final_source_text and current_target_lang and current_target_lang != current_source_lang and translation_mod_enabled:
-                                    logging.info(f"Requesting translation post-stop for: '{final_source_text.strip()}'")
-                                    action_task = asyncio.create_task(translate_and_type(
-                                        final_source_text.strip(),
-                                        current_source_lang,
-                                        current_target_lang,
-                                        config_manager, # Pass manager
-                                        keyboard_sim,   # Pass simulator
-                                        openai_manager  # Pass manager
-                                    ))
-                                elif final_source_text:
-                                    logging.info("Dictation finished post-stop. No translation needed/enabled.")
-                                else:
-                                     logging.debug("Stop flow action check: No final_source_text for Dictation.")
-                            elif active_mode_on_stop == MODE_COMMAND:
-                                command_interp_mod_enabled = config_manager.get("modules.command_interpretation_enabled")
-                                final_command_text_session = None
-                                # Safely get final command text for the stopped session (NEEDS LOCK? Probably not critical here)
-                                async with session_state_lock:
-                                     if stopping_activation_id and stopping_activation_id in active_stt_sessions:
-                                         final_command_text_session = active_stt_sessions[stopping_activation_id].get('final_command_text')
+                elif session_exists_for_stop:
+                     if not handler_to_stop:
+                         logging.warning(f"Stop flow: Session {stopping_activation_id} exists but handler was not found.")
+                     if not processing_finished_event:
+                          logging.warning(f"Stop flow: Session {stopping_activation_id} exists but processing_finished_event was not found.")
+                # --- END NEW Stop Sequence --- >
 
-                                if command_processor and final_command_text_session and command_interp_mod_enabled:
-                                     logging.info(f"Processing command input post-stop via CommandProcessor: '{final_command_text_session}'")
-                                     # action_task = asyncio.create_task(command_processor.process_command(final_command_text_session))
-                                     logging.warning("Command processing task creation is currently commented out.") # Placeholder
-                                elif not command_processor: logging.error("CommandProcessor not initialized, cannot process command.")
-                                elif not command_interp_mod_enabled: logging.info("Command interpretation module disabled, skipping command processing.")
-                                else: logging.debug(f"Stop flow action check: No final_command_text found for Command mode session {stopping_activation_id}.")
-                    else:
-                         logging.info(f"Duration < min ({min_duration}s), discarding action post-stop for {active_mode_on_stop}.")
-
-                # --- Clear pending action state if not executed --- >
-                if g_pending_action and not action_executed_this_stop:
-                     logging.debug(f"Clearing unexecuted pending action state ({g_pending_action}, confirmed={g_action_confirmed}) after stop flow.")
-                     if action_confirm_mgr: # Hide UI if it was shown but action wasn't confirmed/executed
-                          try: action_confirm_queue.put_nowait(("hide", None))
-                          except queue.Full: pass
-                     g_pending_action = None
-                     g_action_confirmed = False
-                elif action_executed_this_stop:
-                      # Ensure state is clear even if executed via queue handler (belt and braces)
-                      g_pending_action = None
-                      g_action_confirmed = False
-
-
-                # --- Clear state relevant to the *just completed* action --- >
-                if active_mode_on_stop == MODE_DICTATION:
-                    # typed_word_history.clear(); final_source_text = "" # REMOVED - Now per session
-                    pass
-                elif active_mode_on_stop == MODE_COMMAND:
-                    # final_command_text = "" # REMOVED - Now per session
-                    pass
-                current_session_mode = None # Reset session mode after stop
-
-                # --- Reset global state AFTER processing stop flow --- >
-                logging.debug("Stop flow processing complete. Resetting flags.")
-                new_activation_occurred = (start_time != stopping_start_time)
-                if new_activation_occurred:
-                    logging.info(f"New activation detected during stop flow. Keeping current start_time.")
-                    # Don't reset start_time, the new activation is already using it
-                else:
-                    logging.debug(f"Resetting start_time.")
+                # --- Reset main loop stop flags immediately --- >
+                # The actual session cleanup happens in the background task.
+                logging.debug("Main loop stop flow flags reset.")
+                is_stopping = False
+                # --- NEW: Reset start_time/ID only if no new activation occurred --- >
+                if start_time == stopping_start_time: # Check if start_time hasn't changed
                     start_time = None
-                    initial_activation_pos = None # Clear position if no new activation
-                    current_activation_id = None # Clear activation ID
-
+                    current_activation_id = None
+                    # Clear other related state if necessary (e.g., initial_activation_pos?)
+                else:
+                    logging.info("New activation started during stop flow; not resetting start_time/current_id.")
+                # --- END NEW ---
+                # Clear context vars for the next cycle
                 active_mode_on_stop = None
                 stopping_start_time = None
-                stopping_activation_id = None # Clear the stopped ID
-                is_stopping = False # Mark stopping as complete
+                stopping_activation_id = None
+
+            # --- End Stop Flow --- <
 
             # --- Check Config Reload --- >
             if systray_ui.config_reload_event.is_set():
@@ -1432,7 +1553,41 @@ async def main():
         logging.info("Stopping Vibe App...")
         if not systray_ui.exit_app_event.is_set(): systray_ui.exit_app_event.set()
 
-        # --- NEW: Cancel Typing Task --- >
+        # --- NEW: Explicitly disconnect active handlers FIRST --- >
+        logging.info("Explicitly disconnecting any remaining STT handlers...")
+        disconnect_tasks = []
+        # Create a copy of values to avoid issues if dictionary changes during iteration
+        handlers_to_disconnect = []
+        try:
+            # No need for lock here if we just copy values quickly?
+            # Let's add lock for safety accessing the dict.
+            async with session_state_lock:
+                handlers_to_disconnect = list(active_stt_sessions.values()) # Get list of session_data dicts
+        except Exception as lock_err:
+            logging.error(f"Error acquiring session lock during final disconnect: {lock_err}")
+
+        active_handlers = [sd.get('handler') for sd in handlers_to_disconnect if sd.get('handler')]
+
+        if active_handlers:
+            logging.debug(f"Found {len(active_handlers)} handlers to disconnect explicitly.")
+            for handler in active_handlers:
+                if handler:
+                     # Use a relatively short timeout per handler for disconnect
+                     disconnect_tasks.append(asyncio.create_task(handler._disconnect(), name=f"FinalDisconnect_{handler.activation_id}"))
+            if disconnect_tasks:
+                try:
+                    await asyncio.wait(disconnect_tasks, timeout=5.0) # Overall timeout
+                    logging.info("Explicit handler disconnection attempts finished.")
+                except asyncio.TimeoutError:
+                     logging.warning("Timeout waiting for explicit handler disconnections.")
+                except Exception as e:
+                    logging.error(f"Error during explicit handler disconnection wait: {e}", exc_info=True)
+        else:
+             logging.debug("No active handlers found needing explicit disconnect.")
+        active_stt_sessions.clear() # Clear sessions after attempting disconnect
+         # --- END Explicit Disconnect --- >
+
+        # --- Cancel Typing Task --- >
         if 'typing_task' in locals() and typing_task and not typing_task.done():
             logging.info("Cancelling typing queue processor task...")
             typing_task.cancel()
@@ -1447,139 +1602,175 @@ async def main():
                  logging.error(f"Error stopping typing task: {e}")
         # --- END NEW ---
 
-        # --- MODIFIED: More Robust Stop Sequence ---
-        stt_stopped_cleanly = False # Flag to track STT shutdown
-        # 1. Stop Async Tasks First (like STT)
-        # --- NEW: Stop all active STT Handlers ---
-        logging.info("Stopping all active STT Handlers...")
-        stop_tasks = []
-        for session_id, session_data in list(active_stt_sessions.items()): # Use list copy for safe iteration
-            handler = session_data.get('handler')
-            if handler:
-                logging.debug(f"Requesting stop for handler {session_id}...")
-                # Use default timeout (3s) defined in handler's stop_listening
-                stop_tasks.append(asyncio.create_task(handler.stop_listening(), name=f"StopHandler_{session_id}"))
-            else:
-                logging.warning(f"No handler found for session {session_id} during shutdown.")
+        # --- NEW: Stop Session Monitor --- >
+        if 'session_monitor' in locals() and session_monitor:
+            logging.info("Stopping Session Monitor...")
+            session_monitor.stop()
+            # Wait briefly for its thread (optional, it's a daemon)
+            # session_monitor.thread.join(timeout=0.5)
+            # --- END NEW ---
 
-        if stop_tasks:
-            logging.info(f"Waiting for {len(stop_tasks)} STT handler(s) to stop...")
-            # Wait for all stop tasks to complete (no individual timeout here, handled in stop_listening)
-            done, pending = await asyncio.wait(stop_tasks, timeout=5.0) # Overall timeout for all handlers
-            if pending:
-                logging.warning(f"{len(pending)} STT handler stop tasks timed out after 5s.")
-                for task in pending:
-                    task.cancel() # Attempt to cancel timed out tasks
-            logging.info("Finished waiting for STT handler stop tasks.")
-        else:
-            logging.info("No active STT handlers to stop.")
-        active_stt_sessions.clear() # Clear sessions after attempting stop
-        # --- END NEW ---
+            # --- Stop Input Listeners EARLY --- >
+            listeners_to_stop = []
+            if 'mouse_listener' in locals() and mouse_listener.is_alive(): listeners_to_stop.append(mouse_listener)
+            if 'keyboard_listener' in locals() and keyboard_listener.is_alive(): listeners_to_stop.append(keyboard_listener)
 
-        # 2. Stop Thread-Based Managers (Signal them first)
-        managers_to_stop = []
-        if config_manager.get("modules.audio_buffer_enabled") and 'buffered_audio_input' in locals() and buffered_audio_input: managers_to_stop.append(buffered_audio_input)
-        if config_manager.get("modules.tooltip_enabled") and 'tooltip_mgr' in locals() and tooltip_mgr: managers_to_stop.append(tooltip_mgr)
-        if config_manager.get("modules.status_indicator_enabled") and 'status_mgr' in locals() and status_mgr: managers_to_stop.append(status_mgr)
-        if config_manager.get("modules.action_confirm_enabled") and 'action_confirm_mgr' in locals() and action_confirm_mgr: managers_to_stop.append(action_confirm_mgr)
+            logging.info("Signaling input listeners to stop early...")
+            listener_stop_start_time = time.monotonic() # Track listener stop time
+            for listener in listeners_to_stop:
+                try:
+                    # Use stop() for pynput listeners
+                    listener.stop()
+                except Exception as e:
+                    logging.error(f"Error signaling stop for listener {listener}: {e}")
+            # --- END EARLY STOP ---
 
-        logging.info("Signaling component managers to stop...")
-        for manager in managers_to_stop:
-            try:
-                manager.stop()
-            except Exception as e:
-                logging.error(f"Error signaling stop for {type(manager).__name__}: {e}")
-
-        # 3. Stop Input Listeners
-        listeners_to_stop = []
-        if 'mouse_listener' in locals() and mouse_listener.is_alive(): listeners_to_stop.append(mouse_listener)
-        if 'keyboard_listener' in locals() and keyboard_listener.is_alive(): listeners_to_stop.append(keyboard_listener)
-
-        logging.info("Signaling input listeners to stop...")
-        listener_stop_start_time = time.monotonic() # Track listener stop time
-        for listener in listeners_to_stop:
-            try:
-                listener.stop()
-            except Exception as e:
-                logging.error(f"Error signaling stop for listener {listener}: {e}")
-
-        # 4. Explicitly Cancel Remaining Asyncio Tasks (Replaces Stop/Close)
-        # Moved BEFORE waiting for threads/listeners to potentially free up loop
-        logging.info("Cancelling any remaining asyncio tasks...")
-        tasks_cancelled_cleanly = False
-        try:
-            loop = asyncio.get_running_loop()
-            if loop.is_running():
-                tasks = asyncio.all_tasks(loop)
-                current_task = asyncio.current_task(loop)
-                tasks_to_cancel = [task for task in tasks if task is not current_task and not task.done()]
-
-                if tasks_to_cancel:
-                    logging.debug(f"Found {len(tasks_to_cancel)} tasks to cancel: {[t.get_name() for t in tasks_to_cancel]}")
-                    for task in tasks_to_cancel:
-                        task.cancel()
-
-                    # Give cancelled tasks a chance to run, with a timeout
-                    # Gather results to see exceptions during cancellation
-                    results = await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-                    logging.debug(f"Gathered cancelled tasks results (Exceptions indicate issues): {results}")
-                    # Check if all results are either None (clean cancel) or CancelledError
-                    tasks_cancelled_cleanly = all(res is None or isinstance(res, asyncio.CancelledError) for res in results)
-                    if not tasks_cancelled_cleanly:
-                        logging.warning("Some asyncio tasks did not cancel cleanly.")
+            # --- MODIFIED: More Robust Stop Sequence ---
+            stt_stopped_cleanly = False # Flag to track STT shutdown
+            # 1. Stop Async Tasks First (like STT)
+            # --- NEW: Stop all active STT Handlers ---
+            logging.info("Stopping all active STT Handlers...")
+            stop_tasks = []
+            # Make sure active_stt_sessions is accessed correctly if it's a global or passed variable
+            # Assuming active_stt_sessions is accessible here
+            for session_id, session_data in list(active_stt_sessions.items()): # Use list copy for safe iteration
+                handler = session_data.get('handler')
+                if handler:
+                    logging.debug(f"Requesting stop for handler {session_id}...")
+                    # Use default timeout (3s) defined in handler's stop_listening
+                    stop_tasks.append(asyncio.create_task(handler.stop_listening(), name=f"StopHandler_{session_id}"))
                 else:
-                    logging.debug("No remaining tasks needed cancellation.")
-                    tasks_cancelled_cleanly = True
-            else:
-                logging.debug("Asyncio event loop was not running during task cancellation check.")
-                tasks_cancelled_cleanly = True # Consider it clean if loop wasn't running
+                    logging.warning(f"No handler found for session {session_id} during shutdown.")
 
-        except RuntimeError as e:
-            if "no current event loop" in str(e).lower():
-                 logging.debug("No running asyncio event loop found to cancel tasks.")
+            if stop_tasks:
+                logging.info(f"Waiting for {len(stop_tasks)} STT handler(s) to stop...")
+                # Wait for all stop tasks to complete (no individual timeout here, handled in stop_listening)
+                done, pending = await asyncio.wait(stop_tasks, timeout=5.0) # Overall timeout for all handlers
+                if pending:
+                    logging.warning(f"{len(pending)} STT handler stop tasks timed out after 5s.")
+                    for task in pending:
+                        task.cancel() # Attempt to cancel timed out tasks
+                logging.info("Finished waiting for STT handler stop tasks.")
             else:
-                 logging.error(f"RuntimeError during task cancellation: {e}", exc_info=True)
-        except Exception as e:
-            logging.error(f"Unexpected error during task cancellation: {e}", exc_info=True)
-        logging.info(f"Asyncio task cancellation finished (Cleanly: {tasks_cancelled_cleanly}).")
+                logging.info("No active STT handlers to stop.")
+            active_stt_sessions.clear() # Clear sessions after attempting stop
+            # --- END NEW ---
 
-        # 5. Wait for Manager Threads
-        logging.info("Waiting for component manager threads to join...")
-        for manager in managers_to_stop:
+            # 2. Stop Thread-Based Managers (Signal them first)
+            managers_to_stop = []
+            if config_manager.get("modules.audio_buffer_enabled") and 'buffered_audio_input' in locals() and buffered_audio_input: managers_to_stop.append(buffered_audio_input)
+            if config_manager.get("modules.tooltip_enabled") and 'tooltip_mgr' in locals() and tooltip_mgr: managers_to_stop.append(tooltip_mgr)
+            if config_manager.get("modules.status_indicator_enabled") and 'status_mgr' in locals() and status_mgr: managers_to_stop.append(status_mgr)
+            if config_manager.get("modules.action_confirm_enabled") and 'action_confirm_mgr' in locals() and action_confirm_mgr: managers_to_stop.append(action_confirm_mgr)
+
+            logging.info("Signaling component managers to stop...")
+            for manager in managers_to_stop:
+                try:
+                    manager.stop()
+                except Exception as e:
+                    logging.error(f"Error signaling stop for {type(manager).__name__}: {e}")
+
+            # 3. Stop Input Listeners (Redundant with EARLY stop? Keep for now, ensure idempotency or remove EARLY)
+            # listeners_to_stop = [] # Defined in EARLY block
+            # if 'mouse_listener' in locals() and mouse_listener.is_alive(): listeners_to_stop.append(mouse_listener)
+            # if 'keyboard_listener' in locals() and keyboard_listener.is_alive(): listeners_to_stop.append(keyboard_listener)
+
+            # logging.info("Signaling input listeners to stop (second time?)...") # Adjust log message if needed
+            # listener_stop_start_time = time.monotonic() # Track listener stop time
+            # for listener in listeners_to_stop:
+            #     try:
+            #         listener.stop()
+            #     except Exception as e:
+            #         logging.error(f"Error signaling stop for listener {listener}: {e}")
+
+            # 4. Explicitly Cancel Remaining Asyncio Tasks (Replaces Stop/Close)
+            # Moved BEFORE waiting for threads/listeners to potentially free up loop
+            logging.info("Cancelling any remaining asyncio tasks...")
+            tasks_cancelled_cleanly = False
             try:
-                if hasattr(manager, 'thread') and manager.thread and manager.thread.is_alive():
-                    manager.thread.join(timeout=1.0)
-                    if manager.thread.is_alive():
-                        logging.warning(f"{type(manager).__name__} thread did not join cleanly.")
+                loop = asyncio.get_running_loop()
+                if loop.is_running():
+                    tasks = asyncio.all_tasks(loop)
+                    current_task = asyncio.current_task(loop)
+                    tasks_to_cancel = [task for task in tasks if task is not current_task and not task.done()]
+
+                    if tasks_to_cancel:
+                        logging.debug(f"Found {len(tasks_to_cancel)} tasks to cancel: {[t.get_name() for t in tasks_to_cancel]}")
+                        for task in tasks_to_cancel:
+                            task.cancel()
+
+                            # Give cancelled tasks a chance to run, with a timeout
+                            # Gather results to see exceptions during cancellation
+                            results = await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                            logging.debug(f"Gathered cancelled tasks results (Exceptions indicate issues): {results}")
+                            # Check if all results are either None (clean cancel) or CancelledError
+                            tasks_cancelled_cleanly = all(res is None or isinstance(res, asyncio.CancelledError) for res in results)
+                            if not tasks_cancelled_cleanly:
+                                logging.warning("Some asyncio tasks did not cancel cleanly.")
+                        else:
+                            logging.debug("No remaining tasks needed cancellation.")
+                            tasks_cancelled_cleanly = True
+                    else:
+                        logging.debug("No remaining tasks needed cancellation.")
+                        tasks_cancelled_cleanly = True
+                else:
+                    logging.debug("Asyncio event loop was not running during task cancellation check.")
+                    tasks_cancelled_cleanly = True # Consider it clean if loop wasn't running
+
+            except RuntimeError as e:
+                if "no current event loop" in str(e).lower():
+                    logging.debug("No running asyncio event loop found to cancel tasks.")
+                else:
+                    logging.error(f"RuntimeError during task cancellation: {e}", exc_info=True)
             except Exception as e:
-                logging.error(f"Error joining thread for {type(manager).__name__}: {e}")
-        logging.info("Component manager threads joined.")
+                logging.error(f"Unexpected error during task cancellation: {e}", exc_info=True)
+            logging.info(f"Asyncio task cancellation finished (Cleanly: {tasks_cancelled_cleanly}).")
 
-        # 6. Wait for Input Listeners
-        logging.info("Waiting for input listeners to join...")
-        for listener in listeners_to_stop:
-             try:
-                 listener.join(timeout=1.0)
-                 if listener.is_alive():
-                      logging.warning(f"Listener {listener} did not join cleanly.")
-             except Exception as e:
-                  logging.error(f"Error joining listener {listener}: {e}")
-        logging.info("Input listeners joined.")
+            # 5. Wait for Manager Threads
+            logging.info("Waiting for component manager threads to join...")
+            for manager in managers_to_stop:
+                try:
+                    if hasattr(manager, 'thread') and manager.thread and manager.thread.is_alive():
+                        manager.thread.join(timeout=1.0)
+                        if manager.thread.is_alive():
+                            logging.warning(f"{type(manager).__name__} thread did not join cleanly.")
+                except Exception as e:
+                    logging.error(f"Error joining thread for {type(manager).__name__}: {e}")
+            logging.info("Component manager threads joined.")
 
-        listener_stop_duration = time.monotonic() - listener_stop_start_time
-        logging.info(f"Listener stop & join took: {listener_stop_duration:.3f}s")
+            # 6. Wait for Input Listeners (Join only, stop was signaled earlier)
+            logging.info("Waiting for input listener threads to join...")
+            for listener in listeners_to_stop:
+                try:
+                    # Use join() to wait for the listener *thread* to finish
+                    # Ensure listener stop time covers the whole period
+                    # We have listener_stop_start_time from the EARLY block
+                    listener.join(timeout=1.0)
+                    if listener.is_alive():
+                        logging.warning(f"Listener {listener} thread did not join cleanly.")
+                except Exception as e:
+                    logging.error(f"Error joining listener thread {listener}: {e}")
+            logging.info("Input listener threads joined.")
+            # Ensure listener_stop_start_time exists before calculating duration
+            if 'listener_stop_start_time' in locals():
+                listener_stop_duration = time.monotonic() - listener_stop_start_time # Measure full duration
+                logging.info(f"Listener stop signal & join took: {listener_stop_duration:.3f}s")
+            else:
+                logging.warning("Could not measure listener stop duration (start time missing).")
 
-        # 7. Wait for Systray Thread
-        if 'systray_thread' in locals() and systray_thread.is_alive():
-            logging.info("Waiting for systray thread to exit...")
-            systray_thread.join(timeout=2.0) # Increased timeout slightly
-            if systray_thread.is_alive(): logging.warning("Systray thread did not exit cleanly.")
-            else: logging.info("Systray thread finished.")
 
-        logging.info("Vibe App finished.")
+            # 7. Wait for Systray Thread
+            if 'systray_thread' in locals() and systray_thread.is_alive():
+                logging.info("Waiting for systray thread to exit...")
+                systray_thread.join(timeout=2.0) # Increased timeout slightly
+                if systray_thread.is_alive(): logging.warning("Systray thread did not exit cleanly.")
+                else: logging.info("Systray thread finished.")
+
+            logging.info("Vibe App finished.")
 
 # --- Add Exit Event for Systray Communication ---
 systray_ui.exit_app_event = threading.Event() # Create event in main module
+# Ensure correct global indentation for this line and below
 
 # --- Ensure global ConfigManager is available if needed outside main ---
 # (Though ideally it should be passed around)
@@ -1597,6 +1788,11 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Application interrupted by user (Ctrl+C).")
+        # --- Ensure exit event is set on KeyboardInterrupt --- >
+        if 'systray_ui' in globals() and hasattr(systray_ui, 'exit_app_event') and not systray_ui.exit_app_event.is_set():
+            logging.debug("Setting exit_app_event due to KeyboardInterrupt.")
+            systray_ui.exit_app_event.set()
+        # --- End Ensure --- >
     except pyautogui.FailSafeException:
          logging.critical("PyAutoGUI FAILSAFE triggered! Exiting.")
     except Exception as e:

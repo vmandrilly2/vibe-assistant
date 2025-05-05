@@ -26,6 +26,7 @@ class KeyboardSimulator:
         logger.debug(f"Simulating typing: '{text}' with interval {interval}s")
         try:
             for char in text:
+                # logger.debug(f"KeyboardSimulator: Typing character '{char}'") # Maybe too verbose?
                 self.controller.press(char)
                 await asyncio.sleep(interval / 2) # Short pause after press
                 self.controller.release(char)

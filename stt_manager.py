@@ -221,19 +221,17 @@ class STTManager:
         if self._dg_connection:
             logger.debug(f"Disconnecting Deepgram connection (Session: {self._session_id}, Graceful: {graceful_finish})...")
             try:
-                # Removed call to non-existent method
-                # self._dg_connection.remove_all_listeners() \
-                if graceful_finish:
-                    await self._dg_connection.finish()
-                else:
-                    # Force close if not graceful (may be needed on immediate error)
-                    await self._dg_connection.finish(force=True)
-                logger.info(f"Deepgram connection finished (Session: {self._session_id}).")
+                logger.debug("Attempting to finish Deepgram connection...")
+                # This signals to Deepgram that we're done sending audio.
+                # Replace finish(force=True) with finish() if force causes issues or is deprecated
+                # await self._dg_connection.finish(force=True) 
+                await self._dg_connection.finish() 
+                logger.debug("Deepgram finish() called.")
             except Exception as e:
-                # Log errors but continue cleanup
-                logger.error(f"Error finishing Deepgram connection (Session: {self._session_id}): {e}", exc_info=True)
+                logger.error(f"Error finishing Deepgram connection: {e}", exc_info=True)
             finally:
-                self._dg_connection = None # Clear reference
+                self._dg_connection = None
+                logger.info("Deepgram connection set to None.")
 
         # Update GVM status if it wasn't already set to error/disconnected
         if self._session_id:
@@ -298,10 +296,19 @@ class STTManager:
         await self._disconnect_from_deepgram(graceful_finish=False) # Trigger cleanup
 
     async def _on_close(self, sender, close, **kwargs):
-        """Handles the connection close event."""
+        """Handles the close event from Deepgram."""
         logger.info(f"Deepgram connection closed event (Session: {self._session_id}): {close}")
-        # Connection is closed; ensure state reflects this and cleanup happens
-        await self._disconnect_from_deepgram(graceful_finish=False) # Call disconnect ensures state update
+        if self._session_id:
+            current_status = await self.gvm.get(f"stt.session.{self._session_id}.status", None)
+            if current_status not in ["disconnected", "error"]:
+                 logger.info(f"Updating session {self._session_id} status to disconnected due to OnClose event.")
+                 await self.gvm.set(f"stt.session.{self._session_id}.status", "disconnected")
+            else:
+                 logger.debug(f"OnClose received for session {self._session_id}, but status already terminal ({current_status}). Ignoring.")
+        else:
+            logger.warning("OnClose received but no active session ID set in STTManager.")
+        self._dg_connection = None
+
     # < --- End Deepgram Event Handlers --- 
 
     async def _process_session(self):

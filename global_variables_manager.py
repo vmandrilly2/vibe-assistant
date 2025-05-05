@@ -70,41 +70,53 @@ class GlobalVariablesManager:
 
     async def set(self, key: str, value: Any) -> None:
         """Sets a value in the shared state and notifies listeners."""
+        listeners_to_notify = []
+        value_listeners_to_notify = []
+        satisfied_value_listeners_for_removal = set()
+
         async with self._lock:
             old_value = self._state.get(key)
             if old_value != value:
+                # Update state first
                 self._state[key] = value
                 logger.debug(f"GVM State SET: {key} = {value}")
-                await self._notify_listeners(key)
-                await self._check_value_listeners(key, value)
 
-    async def _notify_listeners(self, key: str) -> None:
-        """Notifies all listeners waiting for changes to the specific key."""
-        # Needs lock acquired before calling
-        if key in self._listeners:
-            events_to_notify = list(self._listeners[key]) # Copy to avoid modification during iteration
-            self._listeners[key].clear() # Events are one-shot
-            for event in events_to_notify:
-                event.set()
-            logger.debug(f"Notified {len(events_to_notify)} listeners for key '{key}' change.")
+                # Collect listeners to notify *under lock*
+                if key in self._listeners:
+                    listeners_to_notify = list(self._listeners[key])
+                    self._listeners[key].clear() # Clear under lock
 
-    async def _check_value_listeners(self, key: str, value: Any) -> None:
-        """Checks and notifies listeners waiting for a specific value."""
-        # Needs lock acquired before calling
-        if key in self._value_listeners:
-            satisfied_listeners = set()
-            listeners_for_key = list(self._value_listeners[key]) # Copy for safe iteration
-            for target_value, event in listeners_for_key:
-                if value == target_value:
+                if key in self._value_listeners:
+                    listeners_for_key = list(self._value_listeners[key]) # Copy for safe iteration below
+                    for target_value, event in listeners_for_key:
+                        if value == target_value:
+                            value_listeners_to_notify.append(event) # Collect event to notify
+                            satisfied_value_listeners_for_removal.add((target_value, event)) # Mark for removal
+
+                    # Remove satisfied listeners from the main dict *under lock*
+                    if satisfied_value_listeners_for_removal:
+                        self._value_listeners[key].difference_update(satisfied_value_listeners_for_removal)
+                        if not self._value_listeners[key]:
+                            del self._value_listeners[key] # Clean up empty set
+
+        # --- Notify listeners *outside* the lock ---
+        if listeners_to_notify:
+            logger.debug(f"GVM: Notifying {len(listeners_to_notify)} change listeners for key '{key}' (outside lock).")
+            for event in listeners_to_notify:
+                try:
                     event.set()
-                    satisfied_listeners.add((target_value, event))
-                    logger.debug(f"Notified listener waiting for key '{key}' == {target_value}")
+                except Exception as e: # Catch potential errors during set()
+                    logger.error(f"Error setting change event for key {key}: {e}")
+            logger.debug(f"GVM: Finished notifying change listeners for key '{key}' (outside lock).")
 
-            # Remove satisfied listeners
-            if satisfied_listeners:
-                self._value_listeners[key].difference_update(satisfied_listeners)
-                if not self._value_listeners[key]:
-                    del self._value_listeners[key] # Clean up empty set
+        if value_listeners_to_notify:
+            logger.debug(f"GVM: Notifying {len(value_listeners_to_notify)} value listeners for key '{key}' (outside lock).")
+            for event in value_listeners_to_notify:
+                try:
+                    event.set()
+                except Exception as e: # Catch potential errors during set()
+                    logger.error(f"Error setting value event for key {key}: {e}")
+            logger.debug(f"GVM: Finished notifying value listeners for key '{key}' (outside lock).")
 
     async def wait_for_change(self, key: str) -> None:
         """Waits until the specified key changes value."""

@@ -140,10 +140,14 @@ class DictationTextManager:
         if text_to_type:
             # Queue the remaining text for typing
             typing_queue_key = STATE_OUTPUT_TYPING_QUEUE
-            current_typing_queue = await self.gvm.get(typing_queue_key, [])
-            current_typing_queue.append(text_to_type + " ") 
-            await self.gvm.set(typing_queue_key, current_typing_queue)
-            logger.debug(f"Added text '{text_to_type} ' to GVM state '{typing_queue_key}'")
+            current_queue = await self.gvm.get(typing_queue_key, [])
+            current_queue.append(text_to_type + " ") # Modify the fetched list
+            
+            # Log BEFORE setting
+            logger.debug(f"Added text '{text_to_type} ' to GVM state '{typing_queue_key}'") 
+            
+            # Set the MODIFIED list back - MAKE A COPY to trigger change detection
+            await self.gvm.set(typing_queue_key, current_queue.copy()) # <--- Use .copy()
             
             # Optional: Update session history for deletion logic
             history_key = STATE_SESSION_HISTORY_TEMPLATE.format(session_id=session_id)
@@ -173,60 +177,216 @@ class DictationTextManager:
                 if not current_session_id:
                     # Wait for a session to become active (key pressed)
                     logger.debug("DTM waiting for dictation key press...")
-                    await self.gvm.wait_for_value(STATE_INPUT_DICTATION_KEY_PRESSED, True)
-                    logger.debug("DTM detected key press. Getting session ID...")
-                    current_session_id = await self.gvm.get("app.current_stt_session_id")
+                    # Wait until the dictation key is pressed
+                    await self.gvm.wait_for_value("input.dictation_key_pressed", True)
+                    if self._stop_event.is_set(): break # Exit if stopped while waiting
+
+                    logger.debug("DTM detected key press. Waiting for session ID...")
+
+                    # Wait for the STT manager to set the session ID for this activation
+                    session_id = None
+                    session_id_key = "app.current_stt_session_id"
+                    
+                    # Get initial value AFTER key press confirmed
+                    current_session_id = await self.gvm.get(session_id_key, None) 
+                    
+                    # Wait for a change OR for it to become non-None if it was None initially
                     if not current_session_id:
-                        logger.warning("Dictation key pressed, but no active session ID found yet. Retrying wait...")
-                        await asyncio.sleep(0.1) # Brief pause before re-checking
-                        continue # Restart outer loop to wait for key/session again
-                    
-                    logger.info(f"DTM now monitoring session: {current_session_id}")
-                    last_segment_processed = None # Reset for new session
-                    # Clear last processed segment history for this ID if it exists from a previous run
-                    if current_session_id in self._last_processed_segment: del self._last_processed_segment[current_session_id]
-                
-                # --- Inner loop: Monitor active session --- >
-                final_segment_key = STATE_SESSION_FINAL_TRANSCRIPT_SEGMENT_TEMPLATE.format(session_id=current_session_id)
-                
-                # Create tasks to wait for segment change OR key release
-                segment_change_task = asyncio.create_task(self.gvm.wait_for_change(final_segment_key))
-                key_release_task = asyncio.create_task(self.gvm.wait_for_value(STATE_INPUT_DICTATION_KEY_PRESSED, False))
-                
-                # Wait for either event to happen
-                done, pending = await asyncio.wait(
-                    [segment_change_task, key_release_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                # Cancel the pending task to avoid resource leaks
-                for task in pending:
-                    task.cancel()
-                    try: await task # Await cancellation
-                    except asyncio.CancelledError: pass
-
-                if key_release_task in done:
-                    logger.info(f"DTM detected key release. Stopping monitoring for session: {current_session_id}")
-                    # Session ended normally
-                    current_session_id = None # Go back to waiting for key press
-                    continue # Go to top of outer loop
-
-                if segment_change_task in done:
-                    # Check for exceptions in the completed task
-                    try: await segment_change_task
-                    except Exception as e: logger.error(f"Error waiting for segment change: {e}"); continue
-                    
-                    # New segment detected
-                    logger.debug(f"DTM detected new final segment for session {current_session_id}")
-                    current_segment = await self.gvm.get(final_segment_key)
-                    if current_segment != last_segment_processed:
-                         await self._process_final_segment(current_session_id, current_segment)
-                         last_segment_processed = current_segment
+                        logger.debug(f"Current session ID is None, waiting for it to be set on key '{session_id_key}'...")
+                        # Wait for the *change* event.
+                        await self.gvm.wait_for_change(session_id_key) # Just wait for the event
+                        session_id = await self.gvm.get(session_id_key, None) # Explicitly get the value AFTER change
+                        logger.debug(f"Detected session ID set after wait: {session_id}") # Add log
                     else:
-                         logger.debug("Segment change detected, but value is same as last processed. Ignoring.")
-                    # Loop back to wait for the *next* segment change or key release
-                    continue
+                         # If already set, we MIGHT have caught the state just after STTManager set it.
+                         # However, it could also be a *stale* ID from a previous run if GVM wasn't cleared.
+                         # To be safer, let's wait for the *next* change to ensure we get the ID for *this* activation.
+                         # This assumes STTManager reliably sets it *after* InputManager sets the key press state.
+                         logger.debug(f"Session ID already set to '{current_session_id}', waiting for potential change indicating new session...")
+                         
+                         # Wait for either a change in session ID or key release
+                         wait_session_change = asyncio.create_task(self.gvm.wait_for_change(session_id_key))
+                         wait_key_release = asyncio.create_task(self.gvm.wait_for_value("input.dictation_key_pressed", False))
+                         
+                         done, pending = await asyncio.wait(
+                             [wait_session_change, wait_key_release], 
+                             return_when=asyncio.FIRST_COMPLETED
+                         )
+
+                         # Cancel the pending task
+                         for task in pending:
+                             task.cancel()
+                             try: await task # Allow cancellation
+                             except asyncio.CancelledError: pass
+
+                         if wait_key_release in done:
+                             logger.warning("Key released while waiting for new session ID. Aborting monitoring for this press.")
+                             continue # Go back to waiting for key press
+
+                         # If session change task completed:
+                         session_id = await self.gvm.get(session_id_key) # Get the newly set value
+                         logger.debug(f"Detected session ID change, new ID: {session_id}")
+                         if not session_id: # Should not happen if wait_for_change returned a value
+                              logger.error("Session ID changed but new value is None/empty. Aborting.")
+                              continue
+
+
+                if not session_id:
+                     logger.error("Failed to get a valid session ID after key press. Skipping monitoring.")
+                     # Wait for key release before trying again to avoid tight loop if something is wrong
+                     await self.gvm.wait_for_value("input.dictation_key_pressed", False)
+                     continue
+
+                logger.info(f"DTM now monitoring session: {session_id}")
                 
+                # Define the specific keys to monitor for this session
+                final_segment_key = STATE_SESSION_FINAL_TRANSCRIPT_SEGMENT_TEMPLATE.format(session_id=session_id)
+                key_release_key = "input.dictation_key_pressed"
+                session_status_key = f"stt.session.{session_id}.status"
+
+                # Ensure initial state for segment is known (likely empty string)
+                await self.gvm.set(final_segment_key, await self.gvm.get(final_segment_key, ""))
+                
+                # Monitor for changes
+                wait_segment = asyncio.create_task(self.gvm.wait_for_change(final_segment_key))
+                wait_key_release = asyncio.create_task(self.gvm.wait_for_value(key_release_key, False))
+                # We can't directly wait for multiple values, so we wait for change on status
+                wait_session_status_change = asyncio.create_task(self.gvm.wait_for_change(session_status_key))
+
+                # Loop while monitoring the current session
+                monitoring_session = True
+                key_released = False # Track if key has been released
+                
+                while monitoring_session and not self._stop_event.is_set():
+                    
+                    # Determine which tasks to wait for
+                    tasks_to_wait = [wait_segment]
+                    if not key_released:
+                        tasks_to_wait.append(wait_key_release)
+                    # Always wait for session status change, check value upon completion
+                    if wait_session_status_change and not wait_session_status_change.done():
+                         tasks_to_wait.append(wait_session_status_change)
+
+                    # Check if any tasks remain
+                    if not tasks_to_wait:
+                         logger.warning(f"[{session_id}] No valid tasks left to wait for, ending monitoring.")
+                         break
+
+                    # --- <<< MODIFICATION START: Added timeout >>> ---
+                    done, pending = await asyncio.wait(
+                        tasks_to_wait,
+                        return_when=asyncio.FIRST_COMPLETED,
+                        timeout=15.0 # Add a generous timeout to prevent getting stuck indefinitely
+                    )
+                    # --- <<< MODIFICATION END >>> ---
+
+                    # --- Process completed tasks ---
+                    session_ended = False
+                    exit_monitoring_loop_immediately = False
+
+                    if not done:
+                        # --- <<< MODIFICATION START: Handle timeout >>> ---
+                        if key_released or session_end_status in ["disconnected", "error"]:
+                             # Timeout occurred *after* a potential end condition was met.
+                             # This means the final segment didn't arrive within the grace period.
+                             logger.debug(f"[{session_id}] Grace period timeout after key release/session end. Exiting monitoring.")
+                             exit_monitoring_loop_immediately = True 
+                        else:
+                             # General timeout without key release or session end status - less expected
+                             logger.warning(f"[{session_id}] Monitoring wait timed out unexpectedly after 15s. Ending monitoring.")
+                             exit_monitoring_loop_immediately = True 
+                        # --- <<< MODIFICATION END >>> ---
+                        
+                    if wait_key_release in done:
+                         logger.info(f"[{session_id}] DTM detected key release.")
+                         key_released = True
+                         wait_key_release = None # Task fulfilled
+                         # Don't exit yet - start grace period check below
+
+                    if wait_segment in done:
+                        final_text = await self.gvm.get(final_segment_key)
+                        logger.debug(f"[{session_id}] Detected final segment change: '{final_text}'")
+                        await self._process_final_segment(session_id, final_text)
+                        # Re-arm the wait for the *next* segment change (or maybe not?)
+                        # If the session is already considered ended, we might not need to re-arm.
+                        # Let's keep it simple for now and always re-arm.
+                        wait_segment = asyncio.create_task(self.gvm.wait_for_change(final_segment_key))
+
+                    if wait_session_status_change in done:
+                        try:
+                            current_status = await self.gvm.get(session_status_key)
+                            logger.debug(f"[{session_id}] Session status changed to: {current_status}")
+                            if current_status in ["disconnected", "error"]:
+                                 logger.info(f"[{session_id}] DTM detected session end via status '{current_status}'.")
+                                 session_ended = True
+                                 wait_session_status_change = None # Terminal state, stop waiting for status
+                                 # Don't exit yet - start grace period check below
+                            else:
+                                 logger.debug(f"[{session_id}] Session status changed to non-terminal state '{current_status}', re-arming wait.")
+                                 wait_session_status_change = asyncio.create_task(self.gvm.wait_for_change(session_status_key))
+                        except Exception as e:
+                             logger.error(f"[{session_id}] Error checking session status after change: {e}")
+                             exit_monitoring_loop_immediately = True
+
+                    # --- Exit Condition Check ---
+                    # Exit immediately if stop event is set or a timeout/error occurred unexpectedly
+                    if self._stop_event.is_set() or exit_monitoring_loop_immediately:
+                         logger.debug(f"[{session_id}] Exiting monitoring loop immediately (stop={self._stop_event.is_set()}, immediate_exit={exit_monitoring_loop_immediately})")
+                         monitoring_session = False
+                    
+                    # If key released or session ended, start/continue grace period for final segment
+                    elif key_released or session_ended:
+                         logger.debug(f"[{session_id}] Key released or session ended. Entering/continuing 2s grace period for final segment...")
+                         grace_tasks = [wait_segment] if wait_segment and not wait_segment.done() else []
+                         if not grace_tasks:
+                              logger.debug(f"[{session_id}] No final segment task to wait for during grace period. Exiting.")
+                              monitoring_session = False
+                         else:
+                              done_grace, pending_grace = await asyncio.wait(
+                                   grace_tasks, 
+                                   timeout=2.0, # Short grace period
+                                   return_when=asyncio.FIRST_COMPLETED
+                              )
+                              if wait_segment in done_grace:
+                                   final_text = await self.gvm.get(final_segment_key)
+                                   logger.info(f"[{session_id}] Final segment received during grace period: '{final_text}'")
+                                   await self._process_final_segment(session_id, final_text)
+                                   # No need to re-arm segment wait here
+                              else:
+                                   logger.debug(f"[{session_id}] Grace period ended. No further final segment received.")
+                                   # Cancel potentially pending wait_segment from grace period
+                                   for task in pending_grace: task.cancel()
+                              
+                              monitoring_session = False # Exit after grace period regardless of outcome
+                              
+                    # --- Cancel remaining pending tasks if loop is exiting --- 
+                    if not monitoring_session:
+                        logger.debug(f"[{session_id}] Cleaning up monitoring tasks before exiting inner loop (monitoring={monitoring_session}).")
+                        # Combine original pending tasks and any still-active tasks
+                        all_pending_tasks = list(pending) 
+                        if wait_segment and not wait_segment.done(): all_pending_tasks.append(wait_segment)
+                        if wait_key_release and not wait_key_release.done(): all_pending_tasks.append(wait_key_release)
+                        if wait_session_status_change and not wait_session_status_change.done(): all_pending_tasks.append(wait_session_status_change)
+                        
+                        cancelled_tasks = []
+                        for task in all_pending_tasks:
+                             if task and not task.done():
+                                  task.cancel()
+                                  cancelled_tasks.append(task)
+                        if cancelled_tasks:
+                             logger.debug(f"[{session_id}] Awaiting cancellation of {len(cancelled_tasks)} tasks...")
+                             try: 
+                                  await asyncio.gather(*cancelled_tasks, return_exceptions=True)
+                             except asyncio.CancelledError: 
+                                  pass # Expected
+                             logger.debug(f"[{session_id}] Task cancellation complete.")
+                        break # Ensure exit from while loop
+
+                # After exiting the inner monitoring loop
+                logger.info(f"DTM finished monitoring session: {session_id}")
+                session_id = None # Reset session ID so the outer loop waits for next press
+                self._last_processed_segment.pop(session_id, None) # Clean up last segment cache
+
             except asyncio.CancelledError:
                 logger.info("DictationTextManager run_loop cancelled.")
                 break

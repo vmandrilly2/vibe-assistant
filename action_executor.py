@@ -194,12 +194,36 @@ class ActionExecutor:
                 typing_queue = await self.gvm.get(typing_queue_key, [])
                 action_queue = await self.gvm.get(action_queue_key, [])
 
+                # Log retrieved queue contents
+                logger.debug(f"Retrieved typing_queue: {typing_queue}")
+                logger.debug(f"Retrieved action_queue: {action_queue}")
+
                 processed_item = False
                 if typing_queue:
-                    text_to_type = typing_queue.pop(0)
+                    # Check type before popping
+                    if not isinstance(typing_queue, list):
+                        logger.error(f"Typing queue is not a list: {typing_queue}. Resetting.")
+                        await self.gvm.set(typing_queue_key, [])
+                        continue # Skip processing this iteration
+
+                    if len(typing_queue) == 0:
+                         logger.warning("Typing queue check passed but list is empty. Skipping pop.") # Should not happen if `if typing_queue:` works
+                         continue 
+
+                    try:
+                        text_to_type = typing_queue.pop(0)
+                    except IndexError:
+                         logger.error(f"IndexError popping from typing_queue (length {len(typing_queue)}). Queue: {typing_queue}")
+                         # Update GVM state to reflect the potentially corrupted queue
+                         await self.gvm.set(typing_queue_key, typing_queue)
+                         continue
+
                     logger.debug(f"Dequeued text for typing: '{text_to_type}'")
                     if text_to_type and isinstance(text_to_type, str):
+                         logger.debug(f"Attempting to type text: '{text_to_type}'") # Log before calling simulator
                          await self.keyboard_simulator.type_text(text_to_type)
+                    else:
+                         logger.warning(f"Dequeued item is not a valid string: {text_to_type}")
                     await self.gvm.set(typing_queue_key, typing_queue) # Update GVM
                     processed_item = True # Indicate we processed something
 
@@ -220,24 +244,53 @@ class ActionExecutor:
                     continue 
 
                 # If queues were empty, wait for changes
-                typing_queue_task = asyncio.create_task(self.gvm.wait_for_change(typing_queue_key))
-                action_queue_task = asyncio.create_task(self.gvm.wait_for_change(action_queue_key))
+                logger.debug(f"ActionExecutor top of loop. Waiting on keys: {typing_queue_key}, {action_queue_key}")
                 
+                # Create wait tasks for GVM changes
+                wait_typing_queue = asyncio.create_task(self.gvm.wait_for_change(typing_queue_key))
+                wait_action_queue = asyncio.create_task(self.gvm.wait_for_change(action_queue_key))
+                tasks = {wait_typing_queue, wait_action_queue}
+
+                # --- Log before wait ---
+                logger.debug(f"ActionExecutor: About to wait for changes. Tasks: {tasks}")
+
                 done, pending = await asyncio.wait(
-                    [task for task in [typing_queue_task, action_queue_task] if task],
+                    tasks,
                     return_when=asyncio.FIRST_COMPLETED
                 )
-                
-                # Cancel pending tasks
-                for task in pending:
-                    if task: task.cancel(); await asyncio.sleep(0) # Allow cancellation
 
-                # Check completed tasks for errors (optional but good practice)
+                # --- Log after wait ---
+                logger.debug(f"ActionExecutor: Wait completed. Done tasks: {done}, Pending tasks: {pending}")
+
+                # Cancel pending tasks to avoid resource leaks
+                for task in pending:
+                    if task: 
+                        logger.debug(f"ActionExecutor: Cancelling pending task {task}")
+                        task.cancel()
+                        try:
+                            await task # Allow cancellation to propagate
+                        except asyncio.CancelledError:
+                            logger.debug(f"ActionExecutor: Pending task {task} successfully cancelled.")
+                        except Exception as e:
+                            logger.error(f"ActionExecutor: Error awaiting cancelled task {task}: {e}", exc_info=True)
+
+                # Check completed tasks for errors
                 for task in done:
                     if task and task.exception():
                          logger.error(f"Error in ActionExecutor wait task: {task.exception()}", exc_info=task.exception())
-                
-                # Loop will now re-check queues based on which wait_for_change completed
+
+                # --- Process Queues ---
+                # Always attempt to process both queues after any change
+                typing_queue_key = STATE_OUTPUT_TYPING_QUEUE
+                action_queue_key = STATE_OUTPUT_ACTION_QUEUE
+
+                # Get current state of queues *after* wait returns
+                typing_queue = await self.gvm.get(typing_queue_key, [])
+                action_queue = await self.gvm.get(action_queue_key, [])
+
+                # Log retrieved queue contents
+                logger.debug(f"Retrieved typing_queue: {typing_queue}")
+                logger.debug(f"Retrieved action_queue: {action_queue}")
 
             except asyncio.CancelledError:
                 logger.info("ActionExecutor run_loop cancelled.")

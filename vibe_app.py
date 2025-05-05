@@ -581,7 +581,7 @@ async def process_typing_queue():
             logging.debug("Typing job complete.")
 
         except asyncio.CancelledError:
-            logging.info("Typing queue processor cancelled.")
+            # logging.info("Typing queue processor cancelled.")
             break
         except Exception as e:
             logging.error(f"Error in typing queue processor: {e}", exc_info=True)
@@ -881,6 +881,12 @@ async def _wait_and_cleanup(session_id: any, handler: STTConnectionHandler, proc
         # Decide if cleanup should still proceed if cancelled
     except Exception as e:
         logging.error(f"_wait_and_cleanup[{session_id}]: Error waiting for processing event: {e}", exc_info=True)
+
+    # --- NEW: Ensure event is set if wait timed out or was cancelled --- >
+    if not event_received and processing_event and not processing_event.is_set():
+        logging.debug(f"_wait_and_cleanup[{session_id}]: Manually setting processing_finished_event as it wasn't received.")
+        processing_event.set()
+    # --- END NEW ---
 
     # --- NEW: Wait for Typing Queue --- >
     if event_received: # Only wait for typing if the final transcript event was actually received
@@ -1358,6 +1364,12 @@ async def main():
                                 session_data = active_stt_sessions.get(status_activation_id)
                                 if session_data:
                                     session_data['processing_complete'] = True
+                                    # --- NEW: Set processing event on error/disconnect --- >
+                                    finish_event = session_data.get('processing_finished_event')
+                                    if finish_event and not finish_event.is_set():
+                                        finish_event.set()
+                                        logging.debug(f"Set processing_finished_event for {status_activation_id} due to {new_status} status.")
+                                    # --- END NEW ---
                                     # Call handoff logic, passing the ID of the session that just completed.
                                     # The handoff function will handle removal and potentially activating the next session.
                                     # It will release the lock itself before processing buffers.
@@ -1614,13 +1626,13 @@ async def main():
                         try:
                             exc = task.exception()
                             if exc:
-                                logging.error(f"STT Handler task for session {session_id} ended with exception: {exc}", exc_info=exc)
+                                # logging.error(f"STT Handler task for session {session_id} ended with exception: {exc}", exc_info=exc)
                                 completed_by_error.append(session_id)
                             elif handler.is_listening:
-                                logging.warning(f"STT Handler task for session {session_id} finished unexpectedly.")
+                                # logging.warning(f"STT Handler task for session {session_id} finished unexpectedly.")
                                 completed_by_error.append(session_id) # Treat as error/completion
                         except asyncio.CancelledError:
-                            logging.info(f"STT Handler task for session {session_id} was cancelled (detected in health check). Session might be stopping normally.")
+                            # logging.info(f"STT Handler task for session {session_id} was cancelled (detected in health check). Session might be stopping normally.")
                             # If it wasn't marked complete yet, treat it as completed now
                             async with session_state_lock:
                                 if session_id in active_stt_sessions and not active_stt_sessions[session_id].get('processing_complete'):

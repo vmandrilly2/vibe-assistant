@@ -318,108 +318,101 @@ class STTConnectionHandler:
              logging.debug(f"STTHandler[{self.activation_id}]: Cannot send CloseStream, connection not active.")
 
     async def _connection_loop(self):
-        """Manages the connection attempts for this specific instance."""
+        """Handles the connection lifecycle, including retries."""
         attempts = 0
-        connect_start_time = time.monotonic() # Track start for overall timeout? Maybe not needed if per-attempt works
-
-        while self.is_listening:
-            if attempts >= self.MAX_CONNECT_ATTEMPTS:
-                logging.error(f"STTHandler[{self.activation_id}]: Maximum connection attempts ({self.MAX_CONNECT_ATTEMPTS}) reached.")
-                self._send_status("error")
-                self.is_listening = False # Stop trying
-                break
-
+        logging.debug(f"STTHandler[{self.activation_id}]: Starting connection loop.")
+        while self.is_listening and attempts < self.MAX_CONNECT_ATTEMPTS:
             attempts += 1
-            current_attempt_timeout = ATTEMPT_TIMEOUTS_SEC[attempts - 1]
-
-            logging.info(f"STTHandler[{self.activation_id}]: Attempting connection (Attempt {attempts}/{self.MAX_CONNECT_ATTEMPTS}, Timeout: {current_attempt_timeout}s)...")
-            self._send_status("connecting")
             self._connection_established_event.clear()
+            self.connection_closed_cleanly = False # Reset flag for new attempt
 
-            try:
-                connection_successful = await asyncio.wait_for(
-                    self._connect_and_stream(),
-                    timeout=current_attempt_timeout
-                )
+            logging.debug(f"STTHandler[{self.activation_id}]: Attempting connection {attempts}/{self.MAX_CONNECT_ATTEMPTS}...")
+            connected = await self._connect_and_stream()
 
-                if connection_successful:
-                    logging.info(f"STTHandler[{self.activation_id}]: Connection successful. Monitoring.")
-                    attempts = 0 # Reset attempts on success
+            logging.debug(f"STTHandler[{self.activation_id}]: _connect_and_stream finished for attempt {attempts}. Success: {connected}")
 
-                    # Monitor loop
-                    while self.is_listening and self.dg_connection and await self.dg_connection.is_connected():
-                         await asyncio.sleep(0.2) # Check connection periodically
+            if connected:
+                # --- Connection Successful: Wait for it to end --- >
+                logging.info(f"STTHandler[{self.activation_id}]: Connection established (Attempt {attempts}). Waiting for stream end or stop signal.")
+                while self.is_listening:
+                    # Check if the underlying connection object still exists and is connected
+                    is_connected_flag = False
+                    if self.dg_connection:
+                        try:
+                            # Use the is_connected method if available (check SDK docs)
+                            # Assuming a method like this exists, replace if necessary
+                            if hasattr(self.dg_connection, 'is_connected'):
+                                is_connected_flag = await self.dg_connection.is_connected()
+                            else: # Fallback if no specific method
+                                # Check if websocket object exists and is open (might need adjustment based on SDK internals)
+                                is_connected_flag = self.dg_connection.websocket and not self.dg_connection.websocket.closed
+                        except Exception as conn_check_err:
+                            logging.warning(f"STTHandler[{self.activation_id}]: Error checking connection status: {conn_check_err}")
+                            is_connected_flag = False # Assume disconnected on error
 
-                    # --- NEW: Check if loop exited due to intentional stop --- >
-                    if not self.is_listening:
-                        logging.info(f"STTHandler[{self.activation_id}]: Intentional stop detected after monitoring loop exit. Bypassing retry.")
-                        await self._disconnect() # Ensure clean disconnect
-                        break # Exit the main while loop
-                    # --- END NEW --- >
+                    if not is_connected_flag:
+                        logging.warning(f"STTHandler[{self.activation_id}]: Detected connection closed while waiting.")
+                        break # Exit inner wait loop, proceed to potential retry
 
-                    # --- Connection Lost Handling --- >
-                    # Original check remains, but the NEW check above should catch most intentional stops
-                    if self.is_listening: # If loop exited but we weren't told to stop explicitly
-                         logging.warning(f"STTHandler[{self.activation_id}]: Connection lost. Cleaning up and will retry if attempts remain.")
-                         await self._disconnect() # Clean up before retry
-                         # Delay is applied at the end of the outer loop before next attempt
-                    # else: # is_listening became False - handled by the NEW check above
-                    #     logging.info(f"STTHandler[{self.activation_id}]: Stop requested while connected. Exiting loop.")
-                    #     await self._disconnect() # Ensure clean disconnect
-                    #     break # Exit loop cleanly
+                    await asyncio.sleep(0.1) # Poll connection status periodically
 
-                else: # _connect_and_stream returned False (internal error)
-                    logging.warning(f"STTHandler[{self.activation_id}]: Connection attempt {attempts} failed internally.")
-                    # _disconnect() should have been called within _connect_and_stream
-                    # Apply delay before next attempt if applicable
+                # --- Exited inner wait loop --- >
+                if not self.is_listening:
+                    logging.info(f"STTHandler[{self.activation_id}]: Stop signal received while connection was active. Exiting outer loop.")
+                    break # Exit the main connection loop cleanly
+                else:
+                    logging.warning(f"STTHandler[{self.activation_id}]: Connection closed unexpectedly. Will retry if attempts remain.")
+                    # Proceed to retry logic outside this 'if connected:' block
+                    # Ensure disconnect is called before retry
+                    await self._disconnect()
+                # --- End Connection Wait Logic ---
+            else:
+                 logging.warning(f"STTHandler[{self.activation_id}]: Connection attempt {attempts} failed internally.")
+                 # Fall through to retry logic
 
+            # --- Retry Logic --- >
+            # Check if we should wait before retrying (only if not connected yet AND still listening AND attempts remain)
+            if not connected and self.is_listening and attempts < self.MAX_CONNECT_ATTEMPTS:
+                # --- Corrected Retry Delay --- >
+                retry_delay = RETRY_DELAYS_SEC[attempts - 1] # Use the predefined delay for this attempt
+                logging.info(f"STTHandler[{self.activation_id}]: Waiting {retry_delay}s before next connection attempt.")
+                # --- END Corrected Delay ---
 
-            except asyncio.TimeoutError:
-                logging.warning(f"STTHandler[{self.activation_id}]: Connection attempt {attempts} timed out after {current_attempt_timeout}s.")
-                # await self._disconnect() # Ensure cleanup on timeout -- REMOVE THIS
-                # Allow loop to continue to retry logic
-                # --- NEW: Report timeout ---
+                # --- NEW: Send timeout update to main loop --- >
                 try:
-                    self.ui_action_queue.put_nowait(("connection_timeout", {"activation_id": self.activation_id}))
+                    timeout_data = {"activation_id": self.activation_id}
+                    self.ui_action_queue.put_nowait(("connection_timeout", timeout_data))
                 except queue.Full:
-                    logging.warning(f"STTHandler[{self.activation_id}]: UI Action queue full reporting connection timeout.")
+                     logging.warning(f"STTHandler[{self.activation_id}]: UI action queue full sending connection_timeout update.")
                 # --- END NEW ---
 
-            except asyncio.CancelledError:
-                 logging.info(f"STTHandler[{self.activation_id}]: Connection loop cancelled.")
-                 await self._disconnect() # Still cleanup if cancelled explicitly
-                 break # Exit loop
+                try:
+                    await asyncio.sleep(retry_delay) # Use the correct delay variable
+                except asyncio.CancelledError:
+                    logging.info(f"STTHandler[{self.activation_id}]: Connection loop cancelled during retry wait.")
+                    self.is_listening = False # Ensure loop condition breaks
+                    break
 
-            except Exception as e:
-                logging.error(f"STTHandler[{self.activation_id}]: Unexpected error in connection loop (Attempt {attempts}): {e}", exc_info=True)
-                # await self._disconnect() # Ensure cleanup -- REMOVE THIS
-                self._send_status("error") # Send error status on unexpected exception
-                # Allow loop to continue to retry logic
+        # --- After Loop --- >
+        if not self.is_listening:
+             logging.info(f"STTHandler[{self.activation_id}]: Connection loop finished due to stop signal (is_listening=False).")
+             # --- NEW: Ensure final status is sent if cancelled before full connection/error ---
+             if attempts < self.MAX_CONNECT_ATTEMPTS and not self.connection_closed_cleanly:
+                 # If we stopped early and didn't get a clean close or max attempts error, send disconnected.
+                 logging.debug(f"STTHandler[{self.activation_id}]: Sending final 'disconnected' status after early stop.")
+                 self._send_status("disconnected")
+             # --- END NEW ---
+        elif attempts >= self.MAX_CONNECT_ATTEMPTS:
+            logging.error(f"STTHandler[{self.activation_id}]: Maximum connection attempts ({self.MAX_CONNECT_ATTEMPTS}) reached.")
+            self._send_status("error")
 
-            # --- Apply Retry Delay ---
-            if self.is_listening and attempts < self.MAX_CONNECT_ATTEMPTS:
-                 retry_delay_index = min(attempts - 1, len(RETRY_DELAYS_SEC) - 1)
-                 delay = RETRY_DELAYS_SEC[retry_delay_index]
-                 logging.info(f"STTHandler[{self.activation_id}]: Waiting {delay}s before retry.")
-                 await asyncio.sleep(delay)
+        # --- Final Cleanup --- >
+        await self._disconnect() # Ensure resources are released
 
-        # --- Loop End ---
-        # --- NEW: Final Status Check --- >
-        if self.is_listening:
-             # If the loop finished but we were supposedly still listening, something went wrong.
-             logging.error(f"STTHandler[{self.activation_id}]: Connection loop finished unexpectedly while is_listening was True!")
-             self._send_status("error") # Send error if loop ended abnormally
-             self.is_listening = False # Ensure state is correct
-        else:
-             logging.info(f"STTHandler[{self.activation_id}]: Connection loop finished normally (is_listening=False).")
-            # Optional: Send disconnected status here if not already sent by _on_close?
-            # It might be redundant if _on_close always fires.
-        # --- END NEW ---
-        await self._disconnect() # Final cleanup attempt
-
+        logging.debug(f"STTHandler[{self.activation_id}]: Connection loop fully exited.")
 
     async def _connect_and_stream(self) -> bool:
-        """Attempts a single connection, sends buffer, starts microphone for this instance."""
+        """Establishes a single connection and handles the streaming. Returns True if closed cleanly/explicitly, False on connection error."""
         start_connect_monotonic = time.monotonic()
         connection_established_monotonic = None
         try:

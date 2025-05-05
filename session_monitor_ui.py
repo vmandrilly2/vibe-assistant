@@ -298,7 +298,7 @@ class SessionMonitor:
                         return f"{running_duration:.1f}s..."
 
                 def format_latency(start_time, end_time):
-                    if start_time is None: return "Connecting..." # Indicate attempt in progress
+                    if start_time is None: return "-" # Not started yet
                     # If start_time is set, but end_time is not, it's still connecting
                     if end_time is None:
                         return "Connecting..."

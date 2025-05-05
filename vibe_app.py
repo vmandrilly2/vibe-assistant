@@ -214,7 +214,7 @@ initial_activation_pos = None # Position where activation started
 start_time = None # Timestamp when activation started
 
 # --- NEW: State for Concurrent STT Sessions ---
-MAX_CONCURRENT_SESSIONS = 40
+MAX_CONCURRENT_SESSIONS = 10
 active_stt_sessions = {} # Stores session data keyed by activation_id
 # Session Data Structure: { 'handler': STTConnectionHandler, 'processor': DictationProcessor, 'buffered_transcripts': [], 'is_processing_allowed': bool, 'stop_requested': bool, 'processing_complete': bool, 'creation_time': float }
 currently_processing_session_id = None # ID of the session currently allowed to process/type
@@ -823,9 +823,6 @@ async def send_state_to_monitor():
                     'dg_conn_start_attempt_time': data.get('dg_conn_start_attempt_time'),
                     'dg_conn_established_time': data.get('dg_conn_established_time'),
                     'dg_conn_closed_time': data.get('dg_conn_closed_time'),
-                    'buffer_duration_ms': data.get('buffer_duration_ms'),
-                    'wait_start_time': data.get('wait_start_time'),
-                    'wait_end_time': data.get('wait_end_time'),
                     'session_end_time': data.get('session_end_time'),
                     # --- END NEW Timing --- >
                     # Add other relevant simple fields if needed
@@ -1184,8 +1181,11 @@ async def main():
 
                     # --- Acquire lock before checking/modifying shared state --- #
                     async with session_state_lock:
-                        # --- Check if we can start a new session ---
-                        if len(active_stt_sessions) >= MAX_CONCURRENT_SESSIONS:
+                        # --- Check if we can start a new session --- 
+                        # Count only non-completed sessions
+                        active_non_completed_count = sum(1 for session in active_stt_sessions.values() if not session.get('processing_complete'))
+
+                        if active_non_completed_count >= MAX_CONCURRENT_SESSIONS:
                             logging.warning(f"Max concurrent sessions ({MAX_CONCURRENT_SESSIONS}) reached. Ignoring new activation {received_activation_id}.")
                             # Optional: Send some feedback to UI?
                             # Mark transcription_active_event based on received ID matching current?
@@ -1265,9 +1265,6 @@ async def main():
                             'dg_conn_start_attempt_time': None,
                             'dg_conn_established_time': None,
                             'dg_conn_closed_time': None,
-                            'buffer_duration_ms': None,
-                            'wait_start_time': wait_start_time_val,
-                            'wait_end_time': None,
                             'session_end_time': None,
                             # --- END NEW Timing --- >
                         }

@@ -257,7 +257,11 @@ class SessionMonitor:
                 # --- Determine State Text (Prioritize Complete) ---
                 state_text = "Active" # Default state
                 if session_data.get('processing_complete'):
-                    state_text = "Complete"
+                    # If complete, check if it was aborted before connection
+                    if session_data.get('connection_never_established'):
+                        state_text = "Aborted"
+                    else:
+                        state_text = "Complete"
                 elif session_id_for_slot == processing_id:
                     state_text = "Processing"
                 elif session_id_for_slot in waiting_ids:
@@ -298,7 +302,9 @@ class SessionMonitor:
                         return f"{running_duration:.1f}s..."
 
                 def format_latency(start_time, end_time):
-                    if start_time is None: return "-" # Not started yet
+                    # If start is None, or if it completed but connection never established
+                    if start_time is None or (session_data.get('processing_complete') and session_data.get('connection_never_established')):
+                        return "-"
                     # If start_time is set, but end_time is not, it's still connecting
                     if end_time is None:
                         return "Connecting..."

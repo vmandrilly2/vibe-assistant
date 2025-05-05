@@ -1363,8 +1363,15 @@ async def main():
                                 logging.info(f"Detected disconnect/error for session {status_activation_id}. Marking as complete and triggering handoff check.")
                                 session_data = active_stt_sessions.get(status_activation_id)
                                 if session_data:
-                                    session_data['processing_complete'] = True
-                                    # --- NEW: Set processing event on error/disconnect --- >
+                                    session_data['processing_complete'] = True # Mark as complete even on error/disconnect
+
+                                    # --- NEW: Flag if connection never happened --- >
+                                    if session_data.get('dg_conn_established_time') is None:
+                                        session_data['connection_never_established'] = True
+                                        logging.debug(f"Marked connection_never_established=True for session {status_activation_id}")
+                                    # --- END NEW ---
+
+                                    # --- Set processing event on error/disconnect --- >
                                     finish_event = session_data.get('processing_finished_event')
                                     if finish_event and not finish_event.is_set():
                                         finish_event.set()

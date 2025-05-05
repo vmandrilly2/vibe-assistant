@@ -810,6 +810,7 @@ async def send_state_to_monitor():
                     'is_successful_stop': data.get('is_successful_stop', False),
                     'final_transcript_received': data.get('final_transcript_received', False),
                     # --- NEW Monitor Flags ---
+                    'connection_never_established': data.get('connection_never_established'), # <<< ADD THIS
                     'is_active_processor': act_id == currently_processing_session_id,
                     'is_microphone_active': data.get('handler').is_microphone_active if data.get('handler') else False,
                     'button_released': data.get('button_released', False), # <-- ADD THIS

@@ -10,110 +10,81 @@ from openai import AsyncOpenAI, OpenAIError # Use Async client
 logger = logging.getLogger(__name__)
 
 class OpenAIManager:
-    """Handles asynchronous interactions with the OpenAI API."""
+    """Manages interactions with the OpenAI API."""
+    def __init__(self, openai_client: AsyncOpenAI):
+        """Initializes the manager with an existing AsyncOpenAI client."""
+        # self.gvm = gvm # No longer needs GVM directly if client is passed
+        # self.api_key = None # Key is managed by the client
+        if not openai_client:
+            raise ValueError("AsyncOpenAI client is required for OpenAIManager.")
+        self.client = openai_client
+        logger.info("OpenAIManager initialized.")
 
-    def __init__(self, gvm):
-        self.gvm = gvm # GlobalVariablesManager instance
-        self.client: Optional[AsyncOpenAI] = None
-        # TODO: Consider initializing the client more dynamically based on GVM state/config
-        # self.init_client()
+    async def init(self):
+        """(Re)Load config or keys if needed (currently not required)."""
+        # Removed key loading logic as client is pre-configured
+        # self.api_key = await self.gvm.get("config.openai.api_key")
+        # if not self.api_key or self.api_key == "YOUR_OPENAI_API_KEY":
+        #     logger.error("OpenAI API key not found in GVM configuration (config.openai.api_key).")
+        #     self.api_key = None
+        #     # Fail init or allow operation without key?
+        #     return False
+        # self.client = AsyncOpenAI(api_key=self.api_key)
+        logger.info("OpenAIManager initialized (no specific init actions needed).")
+        return True
 
-    async def init_client(self):
-        """Initializes the AsyncOpenAI client using API key from GVM/config."""
-        api_key = await self.gvm.get("config.openai.api_key")
-        if not api_key:
-            logger.error("OpenAI API key not found in configuration.")
-            self.client = None
-            return
-
-        try:
-            # Consider adding proxy support if needed, reading proxy URL from GVM/config
-            # http_client = httpx.AsyncClient(proxies=...) # if using httpx directly or configuring client
-            self.client = AsyncOpenAI(api_key=api_key)
-            # Test connection (optional, simple call)
-            # await self.client.models.list() # Example call
-            logger.info("AsyncOpenAI client initialized successfully.")
-        except OpenAIError as e:
-            logger.error(f"Failed to initialize OpenAI client: {e}", exc_info=True)
-            self.client = None
-        except Exception as e:
-            logger.error(f"An unexpected error occurred during OpenAI client initialization: {e}", exc_info=True)
-            self.client = None
-
-    async def get_translation(self, text: str, source_lang: str, target_lang: str, model: str) -> Optional[str]:
-        """Gets translation for the given text."""
+    async def get_translation(self, text: str, target_language: str, source_language: str = "English") -> Optional[str]:
+        """Gets a translation from OpenAI."""
         if not self.client:
-            logger.warning("OpenAI client not initialized. Attempting to initialize...")
-            await self.init_client()
-            if not self.client:
-                 logger.error("OpenAI client failed to initialize. Cannot get translation.")
-                 return None
+            logger.error("OpenAI client not available.")
+            return None
+        # model = await self.gvm.get("config.translation.model", "gpt-4o-mini") # Get model from GVM
+        model = "gpt-4o-mini" # Hardcode for now, or make configurable without GVM
 
-        logger.info(f"Requesting translation from '{source_lang}' to '{target_lang}' for: '{text[:50]}...' using model '{model}'")
-        system_prompt = "You are an expert translation engine."
-        user_prompt = f"Translate the following text accurately from {source_lang} to {target_lang}. Output only the translated text:\n\n{text}"
+        messages = [
+            {"role": "system", "content": f"You are a translation engine. Translate the following text accurately from {source_language} to {target_language}. Output only the translated text, without any introductory phrases, explanations, or quotation marks."},
+            {"role": "user", "content": text}
+        ]
 
         try:
-            # Use keyword arguments as per openai v1.0+ guidelines
-            completion = await self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.2, # Keep temperature low for accuracy
-                max_tokens=int(len(text) * 1.5) + 50 # Estimate based on input length
+                messages=messages,
+                temperature=0.2,
+                max_tokens=int(len(text) * 2.5) + 50 # Estimate max tokens needed
             )
-
-            translated_text = completion.choices[0].message.content.strip()
-            logger.info(f"Translation received: '{translated_text[:50]}...'")
-            return translated_text
-
-        except OpenAIError as e:
-            logger.error(f"OpenAI API error during translation: {e}", exc_info=True)
-            await self.gvm.set(STATE_ERROR_MESSAGE, f"OpenAI Error: {e}") # Update GVM state
-            return None
+            translated_text = response.choices[0].message.content
+            logger.debug(f"OpenAI Translation raw response: {translated_text!r}")
+            return translated_text.strip() if translated_text else None
         except Exception as e:
-            logger.error(f"Unexpected error during translation request: {e}", exc_info=True)
-            await self.gvm.set(STATE_ERROR_MESSAGE, f"Translation Error: {e}")
+            logging.error(f"Error during OpenAI translation: {e}", exc_info=True)
             return None
 
-    async def get_ai_query_response(self, query: str, model: str) -> Optional[str]:
-        """Gets a response to a general AI query."""
+    async def get_ai_query_response(self, prompt: str) -> Optional[str]:
+        """Gets a general query response from OpenAI."""
         if not self.client:
-            logger.warning("OpenAI client not initialized. Attempting to initialize...")
-            await self.init_client()
-            if not self.client:
-                 logger.error("OpenAI client failed to initialize. Cannot get AI query response.")
-                 return None
+            logger.error("OpenAI client not available.")
+            return None
+        # model = await self.gvm.get("config.general.openai_model", "gpt-4o-mini") # Get model from GVM
+        model = "gpt-4o-mini" # Hardcode for now
 
-        logger.info(f"Requesting AI query response for: '{query[:50]}...' using model '{model}'")
-        # Define appropriate prompts for general queries
-        system_prompt = "You are a helpful AI assistant."
-        user_prompt = query
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt}
+        ]
 
         try:
-            completion = await self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.7, # Allow more creativity for general queries
-                max_tokens=200 # Adjust as needed
+                messages=messages,
+                temperature=0.7,
+                max_tokens=150 # Adjust as needed
             )
-
-            response_text = completion.choices[0].message.content.strip()
-            logger.info(f"AI Query response received: '{response_text[:50]}...'")
-            return response_text
-
-        except OpenAIError as e:
-            logger.error(f"OpenAI API error during AI query: {e}", exc_info=True)
-            await self.gvm.set(STATE_ERROR_MESSAGE, f"OpenAI Error: {e}")
-            return None
+            ai_response = response.choices[0].message.content
+            logger.debug(f"OpenAI Query raw response: {ai_response!r}")
+            return ai_response.strip() if ai_response else None
         except Exception as e:
-            logger.error(f"Unexpected error during AI query request: {e}", exc_info=True)
-            await self.gvm.set(STATE_ERROR_MESSAGE, f"AI Query Error: {e}")
+            logging.error(f"Error during OpenAI query: {e}", exc_info=True)
             return None
 
     async def cleanup(self):

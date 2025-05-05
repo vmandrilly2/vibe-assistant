@@ -2,6 +2,11 @@ import asyncio
 import time
 import logging
 import signal
+import platform
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # --- Logging Setup ---
 log_file = "vibe_app.log"

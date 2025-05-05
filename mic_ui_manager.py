@@ -98,13 +98,9 @@ class MicUIManager:
         """Periodically called within Tk thread to request state check from main loop."""
         if not self.root: return # Stop if root is gone
         # Schedule the async state check in the main asyncio loop
-        if hasattr(self.gvm, 'get_main_loop'):
-            main_loop = self.gvm.get_main_loop()
-            if main_loop and main_loop.is_running():
-                 asyncio.run_coroutine_threadsafe(self._async_update_state(), main_loop)
-            # else: logger.warning("MicUI: Main loop not running for state update.")
-        else:
-             logger.error("MicUI: GVM has no get_main_loop method.")
+        if self.main_loop and self.main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._async_update_state(), self.main_loop)
+        # else: logger.warning("MicUI: Main loop not running for state update.")
              
         # Reschedule the check
         self.root.after(int(self._update_interval * 1000), self._check_and_update_ui)

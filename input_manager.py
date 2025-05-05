@@ -20,9 +20,10 @@ PYNPUT_BUTTON_MAP = {
 class InputManager:
     """Listens for keyboard and mouse events and updates GVM state."""
 
-    def __init__(self, gvm):
+    def __init__(self, gvm, main_loop):
         logger.debug("--- InputManager.__init__ called ---")
         self.gvm = gvm
+        self.main_loop = main_loop
         self.mouse_listener = None
         self.keyboard_listener = None
         self._stop_event = asyncio.Event() # Use asyncio event for signaling stop
@@ -48,51 +49,59 @@ class InputManager:
 
     def _run_listeners_sync(self):
         """Synchronous method to run pynput listeners in a separate thread."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Removed custom event loop creation for this thread
+
+        def on_click_callback(x, y, button, pressed):
+            """Callback directly executed by pynput thread."""
+            if button == self._target_button:
+                # Directly schedule the async handler onto the main loop
+                asyncio.run_coroutine_threadsafe(
+                    self._handle_click_async(x, y, pressed), 
+                    self.main_loop
+                )
+            # Log other clicks if needed for debugging
+            # else: 
+            #     logger.debug(f"Ignoring click: Button={button}, Pressed={pressed}")
 
         try:
-            # Initialize listeners within the new thread's event loop context
-            logger.debug("Initializing pynput listeners in listener thread...")
-            self.mouse_listener = mouse.Listener(
-                on_click=lambda x, y, button, pressed: loop.call_soon_threadsafe(self._on_click_sync, x, y, button, pressed)
-            )
-            # Add Keyboard listener if needed for modifiers or other keys
-            # self.keyboard_listener = KeyboardListener(...) 
-            logger.debug("Listeners initialized. Starting mouse listener...")
+            logger.debug("Initializing pynput mouse listener in listener thread...")
+            self.mouse_listener = mouse.Listener(on_click=on_click_callback)
+            
+            logger.debug("Starting mouse listener...")
             self.mouse_listener.start()
             logger.info("Mouse listener started in dedicated thread.")
-            # Keep thread alive while stop event is not set
-            while not self._stop_event.is_set():
-                 time.sleep(0.1)
-                 
+            
+            # Keep the thread alive by waiting on the listener itself
+            # or using the stop event if preferred for cleaner shutdown signal
+            self.mouse_listener.join() 
+            # Alternatively: self._stop_event.wait() # Wait for external stop signal
+
         except Exception as e:
             logger.error(f"Error in listener thread: {e}", exc_info=True)
         finally:
-            if self.mouse_listener:
+            if self.mouse_listener and self.mouse_listener.is_alive():
                 self.mouse_listener.stop()
                 logger.info("Mouse listener stopped.")
-            # Stop keyboard listener if started
-            loop.close() # Clean up the event loop for this thread
+            # No loop to close here anymore
             logger.info("Input listener thread finished.")
 
-    def _on_click_sync(self, x, y, button, pressed):
-        """Callback executed by pynput listener thread, schedules async handler."""
-        # This method is called by pynput, which might be in a different thread.
-        # We need to schedule the async operation in the main event loop.
-        if button == self._target_button:
-            asyncio.run_coroutine_threadsafe(self._handle_click_async(pressed), self.gvm.get_main_loop()) # Assuming GVM provides access to the main loop
-
-    async def _handle_click_async(self, pressed: bool):
-        """Asynchronous handler for target button clicks."""
+    async def _handle_click_async(self, x: int, y: int, pressed: bool):
+        """Asynchronous handler for target button clicks. Stores initial position."""
+        # Add a log here *first* to confirm it's being reached
+        logger.debug(f"_handle_click_async called: Pressed={pressed}, Position=({x},{y})")
+        
         if pressed and not self._is_pressed:
             self._is_pressed = True
-            logger.debug(f"Trigger button pressed.")
+            logger.debug(f"Trigger button pressed at ({x}, {y}).")
+            # Set state for key press AND store position
             await self.gvm.set("input.dictation_key_pressed", True)
+            await self.gvm.set("input.initial_activation_pos", (x, y))
         elif not pressed and self._is_pressed:
             self._is_pressed = False
             logger.debug(f"Trigger button released.")
+            # Set state for key release and clear position
             await self.gvm.set("input.dictation_key_pressed", False)
+            await self.gvm.set("input.initial_activation_pos", None)
 
     async def run_loop(self):
         """Starts the listener thread and waits for stop signal."""

@@ -79,12 +79,12 @@ class SessionMonitorUI:
     def _check_and_update_ui(self):
         """Periodically called within Tk thread to request state check from main loop."""
         if not self.root: return 
-        if hasattr(self.gvm, 'get_main_loop'):
-            main_loop = self.gvm.get_main_loop()
-            if main_loop and main_loop.is_running():
-                 asyncio.run_coroutine_threadsafe(self._async_update_sessions(), main_loop)
-        else:
-             logger.error("SessionMonitorUI: GVM has no get_main_loop method.")
+        # if hasattr(self.gvm, 'get_main_loop'):
+        #     main_loop = self.gvm.get_main_loop()
+        if self.main_loop and self.main_loop.is_running(): # Use stored loop
+            asyncio.run_coroutine_threadsafe(self._async_update_sessions(), self.main_loop)
+        # else:
+        #      logger.error("SessionMonitorUI: GVM has no get_main_loop method.")
              
         self.root.after(int(self._update_interval * 1000), self._check_and_update_ui)
 

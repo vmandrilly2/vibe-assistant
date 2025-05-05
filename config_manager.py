@@ -98,7 +98,11 @@ class ConfigManager:
                 "tooltip_fg": "black"
                 # Add other UI-specific settings
             }
-            # Add other sections as needed (e.g., Deepgram keys, OpenAI keys)
+            # "api_keys": { # REMOVED - Loaded from env vars
+            #     "deepgram": "YOUR_DEEPGRAM_API_KEY",
+            #     "openai": "YOUR_OPENAI_API_KEY"
+            # }
+            # Add other sections as needed
         }
         logger.debug("Default config structure generated.") # Log end
         return config

@@ -12,7 +12,7 @@ from deepgram import (
 
 # Import necessary components - assuming they are in the same directory or install path
 # These might need adjustment based on your project structure
-# from background_audio_recorder import BackgroundAudioRecorder
+from background_audio_recorder import BackgroundAudioRecorder
 # from global_variables_manager import GlobalVariablesManager
 from constants import (
     STATE_STT_SESSION_STATUS_TEMPLATE,
@@ -36,10 +36,20 @@ logger = logging.getLogger(__name__)
 class STTManager:
     """Manages Speech-to-Text connections and processing using Deepgram."""
 
-    def __init__(self, gvm: Any, audio_recorder: Any): # Use Any temporarily if classes not fully defined/imported
-        self.gvm = gvm
+    def __init__(self, dg_client: DeepgramClient, audio_recorder: BackgroundAudioRecorder, gvm: Any):
+        """Initializes the STTManager.
+
+        Args:
+            dg_client: An initialized DeepgramClient.
+            audio_recorder: The BackgroundAudioRecorder instance.
+            gvm: The GlobalVariablesManager instance for state access.
+        """
+        self.dg_client = dg_client
         self.audio_recorder = audio_recorder
-        self.deepgram_client: Optional[DeepgramClient] = None
+        self.gvm = gvm
+        self.sessions: Dict[str, Any] = {} # activation_id -> STTConnectionHandler instance (or similar)
+        self._lock = asyncio.Lock()
+        self._session_counter = 0
         self._dg_connection = None # The active Deepgram LiveTranscription connection
         self._connection_task: Optional[asyncio.Task] = None
         self._session_id: Optional[str] = None
@@ -50,29 +60,14 @@ class STTManager:
         self._retry_count = 0
         self._max_retries = 3
 
-    async def init(self) -> bool:
-        """Initializes the Deepgram client based on GVM configuration."""
-        config = DeepgramClientOptions(verbose=logging.DEBUG)
-        api_key = await self.gvm.get("config.deepgram.api_key") # Prefer config key over constant
-
-        if not api_key:
-            logger.error("Deepgram API key not found in GVM configuration (config.deepgram.api_key).")
-            return False
-
-        try:
-            self.deepgram_client = DeepgramClient(api_key, config)
-            # Simple test call to verify API key/connectivity during init (optional)
-            # models = await self.deepgram_client.manage.v("1").projects.list()
-            # logger.debug(f"Deepgram models available: {models}")
-            logger.info("Deepgram client initialized successfully.")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to initialize Deepgram client: {e}", exc_info=True)
-            return False
+    async def init(self):
+        """(Re)Initializes the STTManager, potentially loading config."""
+        logger.info("STTManager initialized.")
+        return True
 
     async def _connect_to_deepgram(self) -> bool:
         """Establishes connection to Deepgram Live Transcription for the current session."""
-        if not self.deepgram_client:
+        if not self.dg_client:
             logger.error("Deepgram client not initialized. Cannot connect.")
             if self._session_id:
                 await self.gvm.set(STATE_STT_SESSION_STATUS_TEMPLATE.format(session_id=self._session_id), "error_no_client")
@@ -106,7 +101,7 @@ class STTManager:
             logger.info(f"Attempting Deepgram connection (Session: {self._session_id}, Lang: {self._language}, Model: {self._current_model})...")
 
             self._connection_open.clear() # Ensure event is clear before connecting
-            self._dg_connection = self.deepgram_client.listen.asynclive.v("1")
+            self._dg_connection = self.dg_client.listen.asynclive.v("1")
 
             self._dg_connection.on(LiveTranscriptionEvents.Open, self._on_open)
             self._dg_connection.on(LiveTranscriptionEvents.Transcript, self._on_message)
@@ -174,33 +169,35 @@ class STTManager:
                 logger.info(f"Sending {len(buffered_chunks)} buffered audio chunks ({initial_buffer_duration}s) to Deepgram (Session: {self._session_id}).")
                 for chunk in buffered_chunks:
                     if not self._connection_open.is_set() or self._stop_processing.is_set(): break
+                    # Log before sending buffered chunk
+                    logger.debug(f"Sending buffered audio chunk (size: {len(chunk)}) to Deepgram for session {self._session_id}")
                     await self._dg_connection.send(chunk)
                     await asyncio.sleep(0.005) # Small yield
 
             logger.debug(f"Finished sending buffer. Starting live stream poll (Session: {self._session_id}).")
-            last_polled_timestamp = time.time() - initial_buffer_duration # Start polling from buffer end
+            # Start polling from the time the buffer sending finished
+            last_polled_timestamp = time.monotonic() 
 
             while self._connection_open.is_set() and not self._stop_processing.is_set():
-                # --- Simplified Polling Logic --- >
-                # This still relies on polling the buffer, which isn't ideal.
-                # A better approach involves the recorder pushing chunks to a GVM queue/list
-                # and this task awaiting new items on that list.
-                current_buffer = list(self.audio_recorder.audio_buffer) # Snapshot
-                new_chunks = [(ts, chunk) for ts, chunk in current_buffer if ts > last_polled_timestamp]
+                # Get new chunks since the last poll time using the dedicated method
+                new_chunks_with_ts = self.audio_recorder.get_live_chunks_since(last_polled_timestamp)
                 
-                if new_chunks:
-                    new_chunks.sort(key=lambda x: x[0]) # Ensure chronological order
-                    timestamp_to_log = new_chunks[-1][0] # Get timestamp of last chunk in batch
-                    # logger.debug(f"Found {len(new_chunks)} new chunks up to ts {timestamp_to_log:.2f}. Sending...")
-                    for ts, chunk in new_chunks:
+                if new_chunks_with_ts:
+                    # new_chunks_with_ts is already sorted by timestamp because deque is ordered
+                    timestamp_to_log = new_chunks_with_ts[-1][0] # Get timestamp of last chunk
+                    logger.debug(f"Retrieved {len(new_chunks_with_ts)} new live chunks up to ts {timestamp_to_log:.2f} from recorder. Sending...")
+                    
+                    for ts, chunk_bytes in new_chunks_with_ts:
                         if not self._connection_open.is_set() or self._stop_processing.is_set(): break
-                        await self._dg_connection.send(chunk)
-                        last_polled_timestamp = ts
-                        # await asyncio.sleep(0.001) # Minimal yield after each send
-                    # Brief sleep after sending a batch
-                    await asyncio.sleep(0.02)
+                        logger.debug(f"Sending live audio chunk (ts: {ts:.2f}, size: {len(chunk_bytes)}) to Deepgram for session {self._session_id}")
+                        await self._dg_connection.send(chunk_bytes)
+                        last_polled_timestamp = ts # Update last polled time
+                        # Minimal yield might still be good practice after send
+                        await asyncio.sleep(0.001) 
+                    # Small sleep after processing a batch
+                    await asyncio.sleep(0.01)
                 else:
-                    # Wait longer if no new chunks found
+                    # Wait a bit longer if no new chunks were found
                     await asyncio.sleep(0.05)
                 # < --- End Polling Logic --- 
 
@@ -224,14 +221,13 @@ class STTManager:
         if self._dg_connection:
             logger.debug(f"Disconnecting Deepgram connection (Session: {self._session_id}, Graceful: {graceful_finish})...")
             try:
-                # Ensure event handlers are removed *before* calling finish
-                # to prevent potential race conditions or errors during shutdown.
-                self._dg_connection.remove_all_listeners()
+                # Removed call to non-existent method
+                # self._dg_connection.remove_all_listeners() \
                 if graceful_finish:
                     await self._dg_connection.finish()
                 else:
                     # Force close if not graceful (may be needed on immediate error)
-                    await self._dg_connection.finish(force=True) 
+                    await self._dg_connection.finish(force=True)
                 logger.info(f"Deepgram connection finished (Session: {self._session_id}).")
             except Exception as e:
                 # Log errors but continue cleanup
@@ -248,11 +244,13 @@ class STTManager:
         # Do not clear session_id here, wait for _process_session to finish
 
     # --- Deepgram Event Handlers --- >
-    async def _on_open(self, open, **kwargs):
+    async def _on_open(self, sender, open, **kwargs):
+        """Handles the connection open event."""
         logger.info(f"Deepgram connection opened (Session: {self._session_id}): {open}")
         self._connection_open.set()
 
-    async def _on_message(self, result, **kwargs):
+    async def _on_message(self, sender, result, **kwargs):
+        """Handles transcript messages (both interim and final)."""
         if not self._session_id:
              logger.warning("Received DG message but session_id is not set.")
              return
@@ -275,19 +273,23 @@ class STTManager:
         except Exception as e:
              logger.error(f"Error processing transcript message (Session: {self._session_id}): {e}", exc_info=True)
 
-    async def _on_metadata(self, metadata, **kwargs):
+    async def _on_metadata(self, sender, metadata, **kwargs):
+        """Handles metadata messages."""
         logger.debug(f"Deepgram metadata received (Session: {self._session_id}): {metadata}")
         # Optional: Store metadata in GVM state if needed
 
-    async def _on_speech_started(self, speech_started, **kwargs):
+    async def _on_speech_started(self, sender, speech_started, **kwargs):
+        """Handles speech started events."""
         logger.debug(f"Speech started event (Session: {self._session_id}): {speech_started}")
         # Optional: Update GVM state e.g., sessions.{id}.speech_active = True
 
-    async def _on_utterance_end(self, utterance_end, **kwargs):
+    async def _on_utterance_end(self, sender, utterance_end, **kwargs):
+        """Handles utterance end events."""
         logger.debug(f"Utterance end event (Session: {self._session_id}): {utterance_end}")
         # Optional: Update GVM state e.g., sessions.{id}.speech_active = False
 
-    async def _on_error(self, error, **kwargs):
+    async def _on_error(self, sender, error, **kwargs):
+        """Handles error events from the connection."""
         logger.error(f"Deepgram connection error event (Session: {self._session_id}): {error}")
         session_status_key = STATE_STT_SESSION_STATUS_TEMPLATE.format(session_id=self._session_id)
         await self.gvm.set(session_status_key, "error_dg")
@@ -295,7 +297,8 @@ class STTManager:
         # Error event implies connection is likely closed or closing
         await self._disconnect_from_deepgram(graceful_finish=False) # Trigger cleanup
 
-    async def _on_close(self, close, **kwargs):
+    async def _on_close(self, sender, close, **kwargs):
+        """Handles the connection close event."""
         logger.info(f"Deepgram connection closed event (Session: {self._session_id}): {close}")
         # Connection is closed; ensure state reflects this and cleanup happens
         await self._disconnect_from_deepgram(graceful_finish=False) # Call disconnect ensures state update
@@ -304,6 +307,9 @@ class STTManager:
     async def _process_session(self):
         """Handles a single STT session from connect to disconnect."""
         self._session_id = str(uuid.uuid4())
+        # Set the global current session ID
+        await self.gvm.set("app.current_stt_session_id", self._session_id)
+        
         session_status_key = STATE_STT_SESSION_STATUS_TEMPLATE.format(session_id=self._session_id)
         logger.info(f"Starting new STT session: {self._session_id}")
         await self.gvm.set(session_status_key, "starting")
@@ -414,8 +420,8 @@ class STTManager:
         logger.info("STTManager cleaning up...")
         # The cancellation of run_loop should handle cancelling active session tasks.
         # We just need to ensure the Deepgram client is handled if needed.
-        if self.deepgram_client:
+        if self.dg_client:
             # The SDK might handle internal client closure, or you might need:
-            # await self.deepgram_client.close() # Check SDK documentation
+            # await self.dg_client.close() # Check SDK documentation
             pass 
         logger.info("STTManager cleanup finished.") 

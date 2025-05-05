@@ -12,7 +12,9 @@ from constants import (
     STATE_SESSION_RECOGNIZED_ACTIONS_TEMPLATE,
     STATE_OUTPUT_TYPING_QUEUE,
     STATE_SESSION_HISTORY_TEMPLATE, # Needed for context?
-    CONFIG_MODULES_PREFIX
+    CONFIG_MODULES_PREFIX,
+    STATE_INPUT_DICTATION_KEY_PRESSED,
+    STATE_OUTPUT_ACTION_QUEUE
 )
 
 logger = logging.getLogger(__name__)
@@ -120,7 +122,7 @@ class DictationTextManager:
         self._last_processed_segment[session_id] = segment
         
         text_to_type = segment
-        detected_actions = []
+        detected_actions = [] # List of action strings
 
         # Check if action detection is enabled in config
         action_detection_enabled = await self.gvm.get(f"{CONFIG_MODULES_PREFIX}.action_detection_enabled", True)
@@ -138,10 +140,9 @@ class DictationTextManager:
         if text_to_type:
             # Queue the remaining text for typing
             typing_queue_key = STATE_OUTPUT_TYPING_QUEUE
-            current_queue = await self.gvm.get(typing_queue_key, [])
-            # Add space if needed, assuming ActionExecutor handles final spacing
-            current_queue.append(text_to_type + " ") 
-            await self.gvm.set(typing_queue_key, current_queue)
+            current_typing_queue = await self.gvm.get(typing_queue_key, [])
+            current_typing_queue.append(text_to_type + " ") 
+            await self.gvm.set(typing_queue_key, current_typing_queue)
             logger.debug(f"Added text '{text_to_type} ' to GVM state '{typing_queue_key}'")
             
             # Optional: Update session history for deletion logic
@@ -150,53 +151,90 @@ class DictationTextManager:
             current_history.append(text_to_type) # Store word/segment typed
             await self.gvm.set(history_key, current_history)
 
-        # Note: Detected actions are already in GVM state via ActionDetector.
-        # The ActionExecutor will monitor that state.
+        if detected_actions:
+            # Queue the detected actions with session context
+            action_queue_key = STATE_OUTPUT_ACTION_QUEUE
+            current_action_queue = await self.gvm.get(action_queue_key, [])
+            for action_str in detected_actions:
+                 action_tuple = (session_id, action_str)
+                 current_action_queue.append(action_tuple)
+                 logger.debug(f"Added action {action_tuple} to GVM state '{action_queue_key}'")
+            await self.gvm.set(action_queue_key, current_action_queue)
 
     async def run_loop(self):
-        """Monitors GVM state for new final transcript segments and processes them."""
+        """Monitors the active session for new final transcript segments and processes them."""
         logger.info("DictationTextManager run_loop starting.")
         self._stop_event.clear()
-        # TODO: How to efficiently watch for changes across *all* sessions?
-        # Watching individual session segment keys is inefficient if many sessions exist.
-        # Option 1: GVM emits a general "new_final_segment" event with session_id/data.
-        # Option 2: Periodically scan session states (less ideal).
-        # Option 3: Use a dedicated queue in GVM state pushed to by STTManager.
-        
-        # --- Using Polling (Less Ideal) --- >
-        last_check_sessions = {} # Store last seen segment for each session
+        current_session_id = None
+        last_segment_processed = None
+
         while not self._stop_event.is_set():
             try:
-                # Get all session data (potentially large!)
-                all_sessions_data = await self.gvm.get("sessions", {})
-                active_sessions = list(all_sessions_data.keys())
+                if not current_session_id:
+                    # Wait for a session to become active (key pressed)
+                    logger.debug("DTM waiting for dictation key press...")
+                    await self.gvm.wait_for_value(STATE_INPUT_DICTATION_KEY_PRESSED, True)
+                    logger.debug("DTM detected key press. Getting session ID...")
+                    current_session_id = await self.gvm.get("app.current_stt_session_id")
+                    if not current_session_id:
+                        logger.warning("Dictation key pressed, but no active session ID found yet. Retrying wait...")
+                        await asyncio.sleep(0.1) # Brief pause before re-checking
+                        continue # Restart outer loop to wait for key/session again
+                    
+                    logger.info(f"DTM now monitoring session: {current_session_id}")
+                    last_segment_processed = None # Reset for new session
+                    # Clear last processed segment history for this ID if it exists from a previous run
+                    if current_session_id in self._last_processed_segment: del self._last_processed_segment[current_session_id]
                 
-                for session_id in active_sessions:
-                     final_segment_key = STATE_SESSION_FINAL_TRANSCRIPT_SEGMENT_TEMPLATE.format(session_id=session_id)
-                     current_segment = await self.gvm.get(final_segment_key)
-                     last_seen_segment = last_check_sessions.get(session_id)
-                     
-                     if current_segment and current_segment != last_seen_segment:
-                          logger.debug(f"Detected new final segment for session {session_id}")
-                          await self._process_final_segment(session_id, current_segment)
-                          last_check_sessions[session_id] = current_segment # Update last seen
-                          
-                # Clean up old sessions from check dict
-                current_check_keys = list(last_check_sessions.keys())
-                for checked_id in current_check_keys:
-                     if checked_id not in active_sessions:
-                          del last_check_sessions[checked_id]
-                          # Clear last processed segment history too
-                          if checked_id in self._last_processed_segment: del self._last_processed_segment[checked_id]
-                          
-                await asyncio.sleep(0.1) # Poll interval
+                # --- Inner loop: Monitor active session --- >
+                final_segment_key = STATE_SESSION_FINAL_TRANSCRIPT_SEGMENT_TEMPLATE.format(session_id=current_session_id)
+                
+                # Create tasks to wait for segment change OR key release
+                segment_change_task = asyncio.create_task(self.gvm.wait_for_change(final_segment_key))
+                key_release_task = asyncio.create_task(self.gvm.wait_for_value(STATE_INPUT_DICTATION_KEY_PRESSED, False))
+                
+                # Wait for either event to happen
+                done, pending = await asyncio.wait(
+                    [segment_change_task, key_release_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # Cancel the pending task to avoid resource leaks
+                for task in pending:
+                    task.cancel()
+                    try: await task # Await cancellation
+                    except asyncio.CancelledError: pass
+
+                if key_release_task in done:
+                    logger.info(f"DTM detected key release. Stopping monitoring for session: {current_session_id}")
+                    # Session ended normally
+                    current_session_id = None # Go back to waiting for key press
+                    continue # Go to top of outer loop
+
+                if segment_change_task in done:
+                    # Check for exceptions in the completed task
+                    try: await segment_change_task
+                    except Exception as e: logger.error(f"Error waiting for segment change: {e}"); continue
+                    
+                    # New segment detected
+                    logger.debug(f"DTM detected new final segment for session {current_session_id}")
+                    current_segment = await self.gvm.get(final_segment_key)
+                    if current_segment != last_segment_processed:
+                         await self._process_final_segment(current_session_id, current_segment)
+                         last_segment_processed = current_segment
+                    else:
+                         logger.debug("Segment change detected, but value is same as last processed. Ignoring.")
+                    # Loop back to wait for the *next* segment change or key release
+                    continue
+                
             except asyncio.CancelledError:
                 logger.info("DictationTextManager run_loop cancelled.")
                 break
             except Exception as e:
                  logger.error(f"Error in DictationTextManager run_loop: {e}", exc_info=True)
+                 current_session_id = None # Reset session on error
                  await asyncio.sleep(1) # Wait longer on error
-        # < --- End Polling --- 
+        
         logger.info("DictationTextManager run_loop finished.")
 
     async def cleanup(self):

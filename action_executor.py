@@ -72,19 +72,39 @@ class ActionExecutor:
                  else:
                       logger.warning(f"Mapped key for action '{action}' is not a valid Key/KeyCode/Char: {key_obj}")
 
-        # 2. Deletion ("backspace", potentially "delete word", "delete all")
-        elif action_lower == "backspace": # Simple backspace for now
+        # 2. Deletion ("backspace", "delete_word")
+        elif action_lower == "backspace":
             logger.debug(f"Action '{action}' identified as backspace.")
             await self.keyboard_simulator.press_release_key(keyboard.Key.backspace)
-            # TODO: Implement word/segment deletion based on session history from GVM
-            # history_key = STATE_SESSION_HISTORY_TEMPLATE.format(session_id=session_id)
-            # history = await self.gvm.get(history_key, [])
-            # if history:
-            #     last_typed = history.pop()
-            #     num_backspaces = len(last_typed)
-            #     logger.debug(f"Deleting last typed '{last_typed}' ({num_backspaces} backspaces)")
-            #     for _ in range(num_backspaces): await self.keyboard_simulator.press_release_key(keyboard.Key.backspace)
-            #     await self.gvm.set(history_key, history)
+        elif action_lower == "delete_word":
+            logger.debug(f"Action '{action}' identified as delete word.")
+            # Get history for the relevant session
+            history_key = STATE_SESSION_HISTORY_TEMPLATE.format(session_id=session_id)
+            history = await self.gvm.get(history_key, [])
+            if history:
+                # Simple approach: delete characters back to the last space
+                last_typed_segment = history[-1] # Get the last typed segment
+                if last_typed_segment:
+                     # Find the last space, or the beginning if no space
+                     last_space_index = last_typed_segment.rfind(' ')
+                     chars_to_delete = len(last_typed_segment) - (last_space_index + 1)
+                     if chars_to_delete > 0:
+                          logger.debug(f"Deleting last word ('{last_typed_segment[last_space_index+1:]}') - {chars_to_delete} backspaces")
+                          for _ in range(chars_to_delete):
+                               await self.keyboard_simulator.press_release_key(keyboard.Key.backspace)
+                               await asyncio.sleep(0.01) # Small delay between keys
+                          # Update history (remove deleted part)
+                          history[-1] = last_typed_segment[:last_space_index+1].rstrip() # Keep space before word
+                          await self.gvm.set(history_key, history) 
+                     else:
+                          logger.debug("Last segment ended with space or was empty, only performing single backspace.")
+                          await self.keyboard_simulator.press_release_key(keyboard.Key.backspace) 
+                else:
+                    # History entry was empty, just backspace once
+                    await self.keyboard_simulator.press_release_key(keyboard.Key.backspace)
+            else:
+                 logger.warning(f"Cannot delete word for session {session_id}, history is empty.")
+                 await self.keyboard_simulator.press_release_key(keyboard.Key.backspace) # Fallback?
 
         # 3. AI Translation (Example trigger: "translate to [language]")
         elif action_lower.startswith("translate to "):
@@ -155,57 +175,80 @@ class ActionExecutor:
             logger.warning(f"Unknown action requested: '{action}' for session {session_id}")
 
     async def run_loop(self):
-        """Monitors the action source in GVM and executes actions."""
-        logger.info(f"ActionExecutor run_loop starting. Watching GVM key: '{self._action_source_key}'")
+        """Monitors typing and action queues in GVM and executes tasks."""
+        typing_queue_key = STATE_OUTPUT_TYPING_QUEUE
+        action_queue_key = STATE_OUTPUT_ACTION_QUEUE # Assuming this is the unified queue now
+        
+        logger.info(f"ActionExecutor run_loop starting. Watching keys: '{typing_queue_key}', '{action_queue_key}'")
         self._stop_event.clear()
-        last_processed_actions = []
+
+        # Ensure queues exist in GVM state
+        await self.gvm.set(typing_queue_key, await self.gvm.get(typing_queue_key, []))
+        await self.gvm.set(action_queue_key, await self.gvm.get(action_queue_key, []))
 
         while not self._stop_event.is_set():
+            typing_queue_task = None
+            action_queue_task = None
             try:
-                # Wait for the action list/queue state to change
-                await self.gvm.wait_for_change(self._action_source_key)
-                
-                # Get the current list of actions
-                # Use pop(0) like a queue if it's STATE_OUTPUT_ACTION_QUEUE?
-                # If it's STATE_UI_CONFIRMATION_CONFIRMED_ACTIONS, it might just contain the single confirmed action.
-                # Let's assume it contains a list of actions to be processed.
-                current_actions_list = await self.gvm.get(self._action_source_key, [])
-                
-                if current_actions_list: # Check if list is not empty
-                    # Process only new actions compared to last time? Or process all?
-                    # Simple approach: process the first item and remove it.
-                    action_to_process = current_actions_list.pop(0) # Treat as FIFO queue
-                    
-                    # --- Need Session Context --- >
-                    # How do we know which session this action belongs to?
-                    # The action source state needs to include the session_id.
-                    # Example modification: STATE_UI_CONFIRMATION_CONFIRMED_ACTIONS becomes
-                    # a list of tuples: [(session_id, action), ...]
-                    # Let's assume for now the action source provides a tuple:
-                    if isinstance(action_to_process, tuple) and len(action_to_process) == 2:
-                        session_id, action_str = action_to_process
+                # Check queues *before* waiting to process any backlog
+                typing_queue = await self.gvm.get(typing_queue_key, [])
+                action_queue = await self.gvm.get(action_queue_key, [])
+
+                processed_item = False
+                if typing_queue:
+                    text_to_type = typing_queue.pop(0)
+                    logger.debug(f"Dequeued text for typing: '{text_to_type}'")
+                    if text_to_type and isinstance(text_to_type, str):
+                         await self.keyboard_simulator.type_text(text_to_type)
+                    await self.gvm.set(typing_queue_key, typing_queue) # Update GVM
+                    processed_item = True # Indicate we processed something
+
+                if action_queue:
+                    action_tuple = action_queue.pop(0)
+                    if isinstance(action_tuple, tuple) and len(action_tuple) == 2:
+                        session_id, action_str = action_tuple
                         logger.debug(f"Dequeued action: '{action_str}' for session '{session_id}'")
                         await self._execute_action(session_id, action_str)
                     else:
-                         # Fallback if format is unexpected (e.g., just the action string)
-                         logger.warning(f"Processing action '{action_to_process}' without session context. Execution might be limited.")
-                         # Attempt execution without session ID (some actions might work)
-                         await self._execute_action("unknown_session", str(action_to_process))
+                         logger.warning(f"Dequeued invalid item from action queue: {action_tuple}")
+                    await self.gvm.set(action_queue_key, action_queue) # Update GVM
+                    processed_item = True # Indicate we processed something
 
-                    # Update the GVM state with the remaining actions
-                    await self.gvm.set(self._action_source_key, current_actions_list)
-                    # < --- End Session Context Handling --- 
-                else:
-                     # List is empty, wait again
-                     pass 
+                # If we processed an item, loop back immediately to check queues again
+                if processed_item:
+                    await asyncio.sleep(0.01) # Small yield to prevent overly tight loop
+                    continue 
+
+                # If queues were empty, wait for changes
+                typing_queue_task = asyncio.create_task(self.gvm.wait_for_change(typing_queue_key))
+                action_queue_task = asyncio.create_task(self.gvm.wait_for_change(action_queue_key))
+                
+                done, pending = await asyncio.wait(
+                    [task for task in [typing_queue_task, action_queue_task] if task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # Cancel pending tasks
+                for task in pending:
+                    if task: task.cancel(); await asyncio.sleep(0) # Allow cancellation
+
+                # Check completed tasks for errors (optional but good practice)
+                for task in done:
+                    if task and task.exception():
+                         logger.error(f"Error in ActionExecutor wait task: {task.exception()}", exc_info=task.exception())
+                
+                # Loop will now re-check queues based on which wait_for_change completed
 
             except asyncio.CancelledError:
                 logger.info("ActionExecutor run_loop cancelled.")
                 break
             except Exception as e:
                 logger.error(f"Error in ActionExecutor run_loop: {e}", exc_info=True)
-                # Avoid tight loop on error
                 await asyncio.sleep(1)
+            finally:
+                 # Ensure tasks are cancelled if loop exits unexpectedly
+                 if typing_queue_task and not typing_queue_task.done(): typing_queue_task.cancel()
+                 if action_queue_task and not action_queue_task.done(): action_queue_task.cancel()
 
         logger.info("ActionExecutor run_loop finished.")
 

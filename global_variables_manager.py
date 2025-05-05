@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from typing import Any, Dict, Set, Callable, Coroutine
+import os # Import os
 
 # --- Pre-import Modules ---
 from input_manager import InputManager
@@ -16,6 +17,9 @@ from interim_text_ui_manager import InterimTextUIManager
 from mic_ui_manager import MicUIManager
 from session_monitor_ui import SessionMonitorUI
 from systray_ui import SystrayUIManager
+# API Clients
+from deepgram import DeepgramClient, DeepgramClientOptions # Import Deepgram client
+from openai import AsyncOpenAI # Import OpenAI client
 # -------------------------
 
 logger = logging.getLogger(__name__)
@@ -36,6 +40,7 @@ class GlobalVariablesManager:
         self._config_manager = config_manager
         self._modules: Dict[str, Any] = {} # Stores module instances
         self._module_tasks: Dict[str, asyncio.Task] = {} # Stores running module tasks
+        self._modules_running: Dict[str, bool] = {} # Stores running status from lifecycle perspective
         self._shutdown_event = asyncio.Event()
         # TODO: Add GVM.UI sub-module instance if needed
         logger.debug("GlobalVariablesManager initialization complete.") # Log end
@@ -142,46 +147,48 @@ class GlobalVariablesManager:
         logger.debug("GVM ModuleLifecycleManager task started.") # Log task start
         # This loop will run as part of the main GVM run loop
         # Example logic (needs refinement based on actual config keys):
-        loop_count = 0
+        self._lifecycle_iteration = 0
         while not self._shutdown_event.is_set():
-            logger.debug(f"Lifecycle loop iteration {loop_count} starting...")
+            # logger.debug(f"Lifecycle loop iteration {self._lifecycle_iteration} starting...") # Commented out repetitive log
             modules_to_start = []
             modules_to_stop = []
             try:
                 # --- Section 1: Read state under lock --- 
-                logger.debug("Lifecycle acquiring lock...")
+                # logger.debug("Lifecycle acquiring lock...") # Commented out
                 async with self._lock:
-                    logger.debug("Lifecycle lock acquired. Getting config.modules...")
+                    # logger.debug("Lifecycle lock acquired. Getting config.modules...") # Commented out
                     all_module_configs = self._state.get("config.modules", {}) 
-                    logger.debug(f"Got config.modules directly: {list(all_module_configs.keys())}")
+                    # logger.debug(f"Got config.modules directly: {list(all_module_configs.keys())}") # Commented out
 
                     for module_name_key, is_enabled in all_module_configs.items():
                         if not module_name_key.endswith("_enabled"): continue
                         
                         module_base_name = module_name_key.replace("_enabled", "")
-                        task = self._module_tasks.get(module_base_name)
-                        is_running = task and not task.done()
-                        logger.debug(f"Module '{module_base_name}': Enabled={is_enabled}, IsRunning={is_running}")
+                        task = self._module_tasks.get(f"module_{module_base_name}") # Use the key format used in _start_module
+                        # Check both task status and the explicit running flag
+                        task_running = task and not task.done()
+                        explicitly_running = self._modules_running.get(module_base_name, False)
+                        is_running = task_running or explicitly_running 
 
                         if is_enabled and not is_running:
                             modules_to_start.append(module_base_name)
                         elif not is_enabled and is_running:
                             modules_to_stop.append(module_base_name)
                 
-                logger.debug("Lifecycle lock released.")
+                # logger.debug("Lifecycle lock released.") # Commented out
                 # --- Section 2: Perform actions without lock --- 
                 if modules_to_stop:
-                     logger.debug(f"Stopping modules: {modules_to_stop}")
+                     logger.debug(f"Stopping modules: {modules_to_stop}") # Keep logs for actual actions
                      for module_name in modules_to_stop:
                           await self._stop_module(module_name) # Stop actions outside lock
                 
                 if modules_to_start:
-                     logger.debug(f"Starting modules: {modules_to_start}")
+                     logger.debug(f"Starting modules: {modules_to_start}") # Keep logs for actual actions
                      for module_name in modules_to_start:
                           await self._start_module(module_name) # Start actions outside lock
 
                 # --- Section 3: Wait --- 
-                logger.debug("Lifecycle actions complete. Waiting for next iteration...")
+                # logger.debug("Lifecycle actions complete. Waiting for next iteration...") # Commented out
                 await asyncio.sleep(1) 
 
             except asyncio.CancelledError:
@@ -190,43 +197,90 @@ class GlobalVariablesManager:
             except Exception as e:
                 logger.error(f"Error in module lifecycle manager: {e}", exc_info=True)
                 await asyncio.sleep(5) # Avoid tight loop on error
-            loop_count += 1
+            self._lifecycle_iteration += 1
         logger.debug("GVM ModuleLifecycleManager task finished.")
         # --- End original code ---
         # return # Just return immediately for this test - REMOVED
 
     async def _instantiate_module(self, module_name: str) -> Any:
-        """Instantiates a module from pre-imported classes."""
+        """Instantiates a module, creating API clients as needed."""
         logger.info(f"Attempting to instantiate module: {module_name}")
-        main_loop = self.get_main_loop() # Get loop once
+        main_loop = self.get_main_loop() 
         
         if module_name == "input_manager":
-            return InputManager(self)
+            # Pass main_loop to InputManager constructor
+            return InputManager(self, main_loop)
         elif module_name == "background_audio_recorder":
-             return BackgroundAudioRecorder(self)
+             # Pass main_loop to BackgroundAudioRecorder constructor
+             return BackgroundAudioRecorder(self, main_loop)
         elif module_name == "stt_manager":
+             # Create Deepgram client here
+             api_key = os.getenv("DEEPGRAM_API_KEY")
+             if not api_key:
+                  logger.error("DEEPGRAM_API_KEY not found in environment variables.")
+                  return None # Cannot instantiate without key
+             try:
+                  dg_client_config: DeepgramClientOptions = DeepgramClientOptions(
+                       verbose=logging.DEBUG # Adjust verbosity as needed
+                  )
+                  dg_client = DeepgramClient(api_key, dg_client_config)
+                  logger.info("Deepgram client created.")
+             except Exception as e:
+                  logger.error(f"Failed to create Deepgram client: {e}", exc_info=True)
+                  return None
+             
              audio_recorder = self._modules.get("background_audio_recorder") 
              if not audio_recorder:
                   logger.warning(f"Cannot instantiate STTManager: BackgroundAudioRecorder module is not loaded or disabled.")
+                  # Clean up dg_client? Not strictly necessary here as it's local.
                   return None
-             return STTManager(self, audio_recorder)
+             # Pass the CLIENT instance, not GVM
+             return STTManager(dg_client, audio_recorder, self) # Pass GVM separately if needed for state
         elif module_name == "dictation_text_manager":
              return DictationTextManager(self)
         elif module_name == "action_executor":
+             # Ensure dependencies are loaded/instantiated first
              keyboard_sim = self._modules.get("keyboard_simulator")
+             if not keyboard_sim:
+                  logger.info("Instantiating dependency: keyboard_simulator for action_executor")
+                  keyboard_sim = await self._instantiate_module("keyboard_simulator")
+                  if keyboard_sim: self._modules["keyboard_simulator"] = keyboard_sim
+                  else: logger.error("Failed to instantiate dependency: keyboard_simulator"); return None
+             
              openai_man = self._modules.get("openai_manager")
-             if not keyboard_sim or not openai_man:
-                  logger.error("Cannot instantiate ActionExecutor: KeyboardSimulator or OpenAIManager not found.")
-                  return None
+             if not openai_man:
+                  logger.info("Instantiating dependency: openai_manager for action_executor")
+                  openai_man = await self._instantiate_module("openai_manager")
+                  if openai_man: self._modules["openai_manager"] = openai_man
+                  else: logger.error("Failed to instantiate dependency: openai_manager"); return None
+
+             # Now dependencies should exist in self._modules
+             # keyboard_sim = self._modules.get("keyboard_simulator")
+             # openai_man = self._modules.get("openai_manager")
+             # if not keyboard_sim or not openai_man: # This check should ideally not be needed now
+             #      logger.error("Cannot instantiate ActionExecutor: KeyboardSimulator or OpenAIManager not found after attempting instantiation.")
+             #      return None
              return ActionExecutor(self, keyboard_sim, openai_man)
         elif module_name == "action_ui_manager":
-             return ActionUIManager(self, main_loop)
+             return ActionUIManager(self, main_loop) 
         elif module_name == "keyboard_simulator":
              return KeyboardSimulator() 
         elif module_name == "openai_manager":
-             return OpenAIManager(self)
+             # Create OpenAI client here
+             api_key = os.getenv("OPENAI_API_KEY")
+             if not api_key:
+                  logger.error("OPENAI_API_KEY not found in environment variables.")
+                  return None # Cannot instantiate without key
+             try:
+                  openai_client = AsyncOpenAI(api_key=api_key)
+                  logger.info("OpenAI client created.")
+             except Exception as e:
+                  logger.error(f"Failed to create OpenAI client: {e}", exc_info=True)
+                  return None
+             # Pass the CLIENT instance, not GVM
+             return OpenAIManager(openai_client) # Pass client
         elif module_name == "interim_text_ui_manager":
-             return InterimTextUIManager(self, main_loop)
+             return InterimTextUIManager(self, main_loop) 
         elif module_name == "mic_ui_manager":
              return MicUIManager(self, main_loop)
         elif module_name == "session_monitor_ui":
@@ -253,20 +307,24 @@ class GlobalVariablesManager:
                  if not module_instance:
                      logger.error(f"Failed to instantiate module: {module_name}")
                      return
-                 self._modules[module_name] = module_instance
+                 self._modules[module_name] = module_instance # Store instance regardless of run_loop
 
             # Call module's init
             if hasattr(module_instance, "init") and asyncio.iscoroutinefunction(module_instance.init):
                 await module_instance.init()
 
-            # Start run_loop task
-            if hasattr(module_instance, "run_loop") and asyncio.iscoroutinefunction(module_instance.run_loop):
-                task = asyncio.create_task(module_instance.run_loop(), name=f"{module_name}_run_loop")
-                self._module_tasks[module_name] = task
-                task.add_done_callback(lambda t: self._module_task_done_callback(module_name, t))
-                logger.info(f"Module '{module_name}' run_loop task started.")
+            # Check if the module has an async run_loop method
+            run_loop_method = getattr(module_instance, "run_loop", None)
+            if asyncio.iscoroutinefunction(run_loop_method):
+                logging.info(f"Module '{module_name}' run_loop task started.")
+                self._modules_running[module_name] = True # Mark as running
+                self._module_tasks[f"module_{module_name}"] = asyncio.create_task(
+                    run_loop_method(), name=f"Module_{module_name}_run_loop"
+                )
             else:
-                 logger.warning(f"Module '{module_name}' does not have an async run_loop method.")
+                logger.warning(f"Module '{module_name}' does not have an async run_loop method.")
+                # Mark passive/utility modules as 'running' so lifecycle doesn't restart them
+                self._modules_running[module_name] = True
 
         except Exception as e:
             logger.error(f"Error starting module {module_name}: {e}", exc_info=True)

@@ -62,12 +62,12 @@ class SessionMonitor:
             self.headers = [
                 "Slot", "ID", "State", "StopReq", "Buffered", # Core Info
                 "SessionTime", "ButtonTime", "MicTime", "DGConnTime", # Durations
-                "ConnLatency", "Timeouts", "Buffer(ms)", "WaitProcTime" # Specific Metrics
+                "ConnLatency", "Timeouts" # Specific Metrics
             ]
             column_widths = {
                 "ID": 12, "State": 10, "StopReq": 4, "Buffered": 4,
                 "SessionTime": 9, "ButtonTime": 9, "MicTime": 9, "DGConnTime": 9,
-                "ConnLatency": 9, "Timeouts": 4, "Buffer(ms)": 7, "WaitProcTime": 9
+                "ConnLatency": 9, "Timeouts": 4
             }
             self.labels = {}
             for col, header in enumerate(self.headers):
@@ -197,19 +197,14 @@ class SessionMonitor:
 
         # Create a mapping of activation_id to slot for easier lookup (can be optimized)
         # --- MODIFIED: Use a list of active/waiting IDs in display order --- >
-        # Get active sessions sorted by creation time (approximated by dict order for now)
-        sorted_active_ids = sorted(active_sessions.keys(), key=lambda x: active_sessions[x].get('creation_time', 0))
-        # Get waiting IDs (already sorted by creation time in backend)
-        waiting_ids_list = list(waiting_ids) # Use the list directly
-        # Combine, ensuring no duplicates, maintaining order
-        display_order_ids = []
-        seen_ids = set()
-        for sid in sorted_active_ids + waiting_ids_list:
-            if sid not in seen_ids:
-                display_order_ids.append(sid)
-                seen_ids.add(sid)
+        # Sort ALL sessions by creation time
+        all_session_ids = sorted(active_sessions.keys(), key=lambda x: active_sessions[x].get('creation_time', 0))
 
-        id_to_slot = {sid: i + 1 for i, sid in enumerate(display_order_ids[:self.max_sessions])}
+        # Get the last `self.max_sessions` IDs for display
+        ids_for_display = all_session_ids[-self.max_sessions:]
+
+        # Assign slots: Slot 1 = oldest of the last 10, Slot max = newest
+        id_to_slot = {sid: i + 1 for i, sid in enumerate(ids_for_display)}
         # --- END MODIFIED --- >
 
         # Update labels for each slot
@@ -286,7 +281,6 @@ class SessionMonitor:
                 mic_time_text = "-"
                 dg_conn_time_text = "-"
                 conn_latency_text = "-"
-                wait_proc_time_text = "-"
                 # --- End Placeholder --- >
 
                 # --- NEW: Calculate and Format Timings --- >
@@ -326,10 +320,6 @@ class SessionMonitor:
                 # Connection Latency
                 conn_latency_text = format_latency(session_data.get('dg_conn_start_attempt_time'), session_data.get('dg_conn_established_time'))
 
-                # Wait Processing Time
-                wait_proc_time_text = format_duration(session_data.get('wait_start_time'), session_data.get('wait_end_time'), current_monotonic_time)
-                # --- END Timing Calculation --- >
-
                 # Update using the helper function (defined outside loop)
                 update_label_if_changed(slot_num, "id", id_text)
                 update_label_if_changed(slot_num, "state", state_text)
@@ -341,8 +331,6 @@ class SessionMonitor:
                 update_label_if_changed(slot_num, "mictime", mic_time_text)
                 update_label_if_changed(slot_num, "dgconntime", dg_conn_time_text)
                 update_label_if_changed(slot_num, "connlatency", conn_latency_text)
-                update_label_if_changed(slot_num, "buffer(ms)", buffer_ms_text)
-                update_label_if_changed(slot_num, "waitproctime", wait_proc_time_text)
 
             elif session_id_for_slot: # ID exists (likely waiting) but no full data yet
                 # Clear labels for empty slots if they haven't been cleared before

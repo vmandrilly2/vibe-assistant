@@ -89,6 +89,7 @@ class STTConnectionHandler:
         self.retry_count = 0 # Track connection retries
         self.is_microphone_active = False # NEW: Track mic state
         self._accept_mic_data = False # NEW: Control sending in callback
+        self.connection_closed_cleanly = False # Reset flag on new open
 
         logging.info(f"STTConnectionHandler initialized for ID: {self.activation_id}")
 
@@ -119,8 +120,19 @@ class STTConnectionHandler:
     async def _on_open(self, sender, open, **kwargs):
         logging.debug(f"STTHandler[{self.activation_id}] _on_open received: {open}")
         logging.info(f"STT connection opened for ID: {self.activation_id}.")
+
+        # --- NEW: Send established time --- >
+        established_time = time.monotonic()
+        try:
+            timing_data = {"activation_id": self.activation_id, "type": "established", "timestamp": established_time}
+            self.ui_action_queue.put_nowait(("connection_timing_update", timing_data))
+        except queue.Full:
+             logging.warning(f"STTHandler[{self.activation_id}]: UI action queue full sending established timing update.")
+        # --- END NEW ---
+
         self._send_status("connected")
         self._connection_established_event.set()
+        self.connection_closed_cleanly = False # Reset flag on new open
 
     async def _on_message(self, sender, result, **kwargs):
         logging.debug(f"STTHandler[{self.activation_id}] _on_message received.")
@@ -170,9 +182,20 @@ class STTConnectionHandler:
             logging.info(f"STT connection closed cleanly for ID: {self.activation_id}.")
 
         self._send_status("disconnected")
+
+        # --- NEW: Send closed time --- >
+        closed_time = time.monotonic()
+        try:
+             timing_data = {"activation_id": self.activation_id, "type": "closed", "timestamp": closed_time}
+             self.ui_action_queue.put_nowait(("connection_timing_update", timing_data))
+        except queue.Full:
+             logging.warning(f"STTHandler[{self.activation_id}]: UI action queue full sending closed timing update from _on_close.")
+        # --- END NEW ---
+
         # Clear the established event in case of unexpected closure
         self._connection_established_event.clear()
         # Don't set is_listening=False here, the connection_loop handles retry logic
+        self.connection_closed_cleanly = True
 
     async def _on_unhandled(self, unhandled, **kwargs):
         logging.warning(f"STT Unhandled Websocket Message for ID {self.activation_id}: {unhandled}")

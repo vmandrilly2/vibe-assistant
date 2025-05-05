@@ -77,6 +77,9 @@ last_interim_transcript = "" # Store the most recent interim result
 # Instantiate ConfigManager early
 config_manager = ConfigManager()
 
+# --- Define audio buffer setting globally BEFORE function definitions ---
+audio_buffer_enabled = config_manager.get("modules.audio_buffer_enabled", True)
+
 # Load environment variables (still needed for API keys)
 load_dotenv()
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
@@ -356,6 +359,7 @@ def on_click(x, y, button, pressed):
     global initial_activation_pos, status_mgr # Need status_mgr for hover checks
     global g_pending_action, g_action_confirmed, action_confirm_queue
     global last_interim_transcript, current_activation_id # Need current_activation_id
+    global config_manager, buffered_audio_input # Need access to these globals
 
     # --- Get current mode and trigger buttons from ConfigManager --- >
     active_mode = config_manager.get("general.active_mode", MODE_DICTATION)
@@ -392,6 +396,15 @@ def on_click(x, y, button, pressed):
         # --- Set the *actual* active mode based on which trigger was pressed --- >
         # Always use Dictation mode since Command mode is disabled
         current_session_mode = MODE_DICTATION
+
+        # --- Get audio buffer setting --- >
+        audio_buffer_enabled = config_manager.get("modules.audio_buffer_enabled", True)
+
+        # --- Start Background Recorder Immediately --- >
+        if buffered_audio_input and audio_buffer_enabled:
+            logging.debug("on_click: Starting background audio recorder.")
+            buffered_audio_input.start()
+        # --- End Start Recorder ---
 
         ui_interaction_cancelled = False # Reset flag on new press
         if not transcription_active_event.is_set():
@@ -740,6 +753,11 @@ async def _handle_session_handoff(completed_session_id: any):
                     session_to_activate_data['buffered_transcripts'] = [] # Clear buffer
                 else:
                      logging.info(f"Activating processing for next waiting session: {next_session_id_to_process} (no buffered transcripts).")
+                # --- NEW: Record wait_end_time --- >
+                if session_to_activate_data.get('wait_start_time') is not None and session_to_activate_data.get('wait_end_time') is None:
+                    session_to_activate_data['wait_end_time'] = time.monotonic()
+                    logging.debug(f"Recorded wait_end_time for session {next_session_id_to_process}")
+                # --- END NEW ---
                 break # Exit loop once a valid session is found
             else:
                 logging.warning(f"Session {potential_next_id} from waitlist not found in active sessions. Skipping.")
@@ -840,6 +858,10 @@ async def send_state_to_monitor():
 # --- NEW: Wait and Cleanup Function ---
 async def _wait_and_cleanup(session_id: any, handler: STTConnectionHandler, processing_event: asyncio.Event, completion_event: asyncio.Event):
     """Waits for final processing event, disconnects, and cleans up the session."""
+    global active_stt_sessions, currently_processing_session_id, sessions_waiting_for_processing
+    global session_state_lock, session_completion_events
+    global buffered_audio_input, audio_buffer_enabled
+
     if not handler or not processing_event:
         logging.error(f"_wait_and_cleanup[{session_id}]: Invalid handler or event provided.")
         return
@@ -884,6 +906,21 @@ async def _wait_and_cleanup(session_id: any, handler: STTConnectionHandler, proc
     except Exception as e:
         logging.error(f"_wait_and_cleanup[{session_id}]: Error during handler disconnect task: {e}", exc_info=True)
 
+    # --- NEW: Record session_end_time --- >
+    session_end_time_val = time.monotonic()
+    logging.debug(f"_wait_and_cleanup[{session_id}]: Recording session end time: {session_end_time_val:.3f}")
+    # Update session_data within the lock
+    async with session_state_lock:
+        if session_id in active_stt_sessions:
+            active_stt_sessions[session_id]['session_end_time'] = session_end_time_val
+            # Also mark processing complete here definitively
+            if not active_stt_sessions[session_id].get('processing_complete'):
+                active_stt_sessions[session_id]['processing_complete'] = True
+                logging.debug(f"_wait_and_cleanup[{session_id}]: Marked processing_complete=True.")
+        else:
+            logging.warning(f"_wait_and_cleanup[{session_id}]: Session not found when trying to record end time.")
+    # --- END NEW ---
+
     # --- Trigger Session Handoff --- >
     logging.debug(f"_wait_and_cleanup[{session_id}]: Triggering session handoff...")
     async with session_state_lock:
@@ -893,10 +930,26 @@ async def _wait_and_cleanup(session_id: any, handler: STTConnectionHandler, proc
         else:
             logging.warning(f"_wait_and_cleanup[{session_id}]: Session was already removed before handoff could be triggered.")
 
+    # --- NEW: Signal completion --- >
+    if completion_event and not completion_event.is_set():
+        completion_event.set()
+        logging.debug(f"_wait_and_cleanup[{session_id}]: Signaled main completion event.")
+    # --- END NEW ---
+
     # --- Send Monitor Update --- >
     asyncio.create_task(send_state_to_monitor(), name=f"SendStateMonitor_Cleanup_{session_id}")
 
     logging.info(f"_wait_and_cleanup[{session_id}]: Cleanup sequence finished (Event Received: {event_received}).")
+
+    # --- NEW: Stop Background Recorder --- >
+    if buffered_audio_input and audio_buffer_enabled:
+        # Check if any *other* sessions are potentially active before stopping?
+        # For now, let's stop it when *any* session cleans up. If another session
+        # starts immediately, it will restart it.
+        logging.debug(f"_wait_and_cleanup[{session_id}]: Stopping background audio recorder.")
+        buffered_audio_input.stop()
+    # --- END Stop Recorder ---
+
 # --- END NEW FUNCTION ---
 
 # --- Main Application Logic ---
@@ -972,8 +1025,9 @@ async def main():
     buffered_audio_input = None
     if audio_buffer_enabled:
         buffered_audio_input = BackgroundAudioRecorder(status_queue)
-        buffered_audio_input.start()
-        logging.info("Background Audio Recorder activé et démarré.")
+        # --- REMOVED: Recorder will be started on demand by button press ---
+        # buffered_audio_input.start()
+        logging.info("Background Audio Recorder initialized (will start on demand).")
     else:
         logging.info("Background Audio Recorder désactivé par la configuration.")
 
@@ -1474,6 +1528,12 @@ async def main():
                     except Exception as e:
                         logging.error(f"Session {stopping_activation_id}: Error waiting for microphone stop task: {e}", exc_info=True)
 
+                    # --- NEW: Stop Background Recorder Here --- >
+                    if buffered_audio_input and audio_buffer_enabled:
+                        logging.debug(f"Main loop stop flow: Stopping background audio recorder.")
+                        buffered_audio_input.stop()
+                    # --- END NEW ---
+
                     # 2. Send CloseStream (Fire and forget)
                     logging.debug(f"Session {stopping_activation_id}: Sending CloseStream...")
                     asyncio.create_task(handler_to_stop.send_close_stream(), name=f"SendCloseStream_{stopping_activation_id}")
@@ -1524,22 +1584,10 @@ async def main():
                 systray_ui.config_reload_event.clear() # Clear the event
 
             # --- Thread Health Checks --- >
-            if tooltip_enabled and tooltip_mgr and not tooltip_mgr.thread.is_alive() and not tooltip_mgr._stop_event.is_set(): logging.error("Tooltip thread died."); break
-            if status_indicator_enabled and status_mgr and not status_mgr.thread.is_alive() and not status_mgr._stop_event.is_set(): logging.error("Status Indicator thread died."); break
-            if action_confirm_enabled and action_confirm_mgr and not action_confirm_mgr.thread.is_alive() and not action_confirm_mgr._stop_event.is_set(): logging.error("Action Confirmation thread died."); break
-            if audio_buffer_enabled and buffered_audio_input and not buffered_audio_input.thread.is_alive() and not buffered_audio_input.running.is_set(): logging.error("Background Audio Recorder thread died."); break
-            # --- MODIFIED: Check stt_mgr Task Health --- >
-            # --- REMOVED: Old STT Manager Task Health Check ---
-            # if stt_mgr and stt_mgr._connection_task and stt_mgr._connection_task.done():
-            #     try:
-            #         exc = stt_mgr._connection_task.exception()
-            #         if exc: logging.error(f"STTManager task ended with exception: {exc}", exc_info=exc); break # Exit on STT task error
-            #         elif stt_mgr.is_listening: logging.warning("STTManager task finished unexpectedly."); # Consider restart?
-            #     except asyncio.CancelledError: logging.info("STTManager task was cancelled.")
-            #     except Exception as e: logging.error(f"Error checking STTManager task state: {e}")
-            # --- NEW: Check individual handler tasks? ---
-            # TODO: Need logic to iterate through active_stt_sessions and check health of each handler's _connection_task
-            # --- End Placeholder ---
+            # Check manager threads only if they exist and their stop event isn't set
+            if tooltip_enabled and tooltip_mgr and not tooltip_mgr._stop_event.is_set() and not tooltip_mgr.thread.is_alive(): logging.error("Tooltip thread died unexpectedly."); break
+            if status_indicator_enabled and status_mgr and not status_mgr._stop_event.is_set() and not status_mgr.thread.is_alive(): logging.error("Status Indicator thread died unexpectedly."); break
+            if action_confirm_enabled and action_confirm_mgr and not action_confirm_mgr._stop_event.is_set() and not action_confirm_mgr.thread.is_alive(): logging.error("Action Confirmation thread died unexpectedly."); break
 
             # --- NEW: Check individual handler tasks? ---
             # Check health of individual STT handlers
@@ -1651,7 +1699,7 @@ async def main():
                 except Exception as e: logging.error(f"Error processing transcript queue: {e}", exc_info=True)
 
             flush_modifier_log(force=True) # Flush modifier log buffer
-            await asyncio.sleep(0) # Yield control
+            await asyncio.sleep(0.01) # Yield control slightly longer
 
     except (asyncio.CancelledError, KeyboardInterrupt): logging.info("Main task cancelled/interrupted.")
     finally:

@@ -25,6 +25,7 @@ class SessionMonitor:
         self._stop_event = threading.Event()
         self._tk_ready = threading.Event()
         self.last_state = {} # Store last received state to update UI efficiently
+        self.last_displayed_values = {} # Store last text set for each label {slot_num: {label_key: text}}
         self.headers = [] # Added to store headers
 
         logging.info("SessionMonitor initialized.")
@@ -165,7 +166,19 @@ class SessionMonitor:
 
         # Reschedule
         if self.root and not self._stop_event.is_set():
-            self.root.after(100, self._check_queue) # Update display fairly frequently
+            # --- ALWAYS call _update_display after queue check to refresh timers --- >
+            if self.last_state: # Only update if we have some state
+                try:
+                    self._update_display()
+                except tk.TclError as e:
+                    if "application has been destroyed" not in str(e):
+                        logging.warning(f"SessionMonitor Tkinter error during periodic update: {e}.")
+                    self._stop_event.set() # Stop if TK error
+                except Exception as e:
+                    logging.error(f"Error during periodic SessionMonitor update: {e}", exc_info=True)
+                    self._stop_event.set() # Stop on other errors too
+
+            self.root.after(500, self._check_queue) # Reschedule queue check (Reduced frequency further)
 
     def _update_display(self):
         """Updates the labels based on the last received state."""
@@ -201,6 +214,30 @@ class SessionMonitor:
 
         # Update labels for each slot
         current_monotonic_time = time.monotonic()
+
+        # --- Helper function for efficient label updates --- >
+        def update_label_if_changed(slot, label_key, new_text):
+            # Ensure the slot exists in the tracking dictionaries
+            if slot not in self.labels: self.labels[slot] = {}
+            if slot not in self.last_displayed_values: self.last_displayed_values[slot] = {}
+
+            last_text = self.last_displayed_values[slot].get(label_key)
+            if new_text != last_text:
+                try:
+                    self.labels[slot][label_key].config(text=new_text)
+                    self.last_displayed_values[slot][label_key] = new_text
+                except KeyError:
+                    # logging.debug(f"SessionMonitor: Label key '{label_key}' not found for slot {slot}.")
+                    pass # Ignore if label doesn't exist (e.g., during setup)
+                except tk.TclError as e:
+                    if "invalid command name" not in str(e):
+                        logging.warning(f"SessionMonitor: TclError updating label {slot}-{label_key}: {e}")
+                    # Handle cases where the label widget might be destroyed
+                    pass
+                except Exception as e:
+                    logging.error(f"SessionMonitor: Error updating label {slot}-{label_key}: {e}", exc_info=True)
+        # --- END Helper Function --- >
+
         for slot_num in range(1, self.max_sessions + 1):
             session_id_for_slot = None
             session_data = None
@@ -254,7 +291,7 @@ class SessionMonitor:
                     # If end_time is set, calculate fixed duration
                     if end_time is not None:
                         duration = end_time - start_time
-                        return f"{duration:.3f}s"
+                        return f"{duration:.1f}s"
                     # If start_time is set but end_time is not, calculate running time
                     else:
                         running_duration = current_time - start_time
@@ -262,9 +299,11 @@ class SessionMonitor:
 
                 def format_latency(start_time, end_time):
                     if start_time is None: return "Connecting..." # Indicate attempt in progress
-                    if end_time is None: return "Connecting..." # Still in progress
+                    # If start_time is set, but end_time is not, it's still connecting
+                    if end_time is None:
+                        return "Connecting..."
                     duration = end_time - start_time
-                    return f"{duration:.3f}s"
+                    return f"{duration:.1f}s"
 
                 # Session Time
                 session_time_text = format_duration(creation_time, session_data.get('session_end_time'), current_monotonic_time)
@@ -285,56 +324,64 @@ class SessionMonitor:
                 wait_proc_time_text = format_duration(session_data.get('wait_start_time'), session_data.get('wait_end_time'), current_monotonic_time)
                 # --- END Timing Calculation --- >
 
-                # Simplified Logging
-                # logging.debug(f"_update_display: Slot {slot_num} (ID: {id_text}), State: {state_text}")
-
-                # Update Core Labels
-                self.labels[slot_num]["id"].config(text=id_text)
-                self.labels[slot_num]["state"].config(text=state_text)
-                self.labels[slot_num]["stopreq"].config(text=stop_req_text)
-                self.labels[slot_num]["buffered"].config(text=buffered_text)
-                self.labels[slot_num]["timeouts"].config(text=timeout_text)
-
-                # Update New/Modified Labels (Placeholders for now)
-                self.labels[slot_num]["sessiontime"].config(text=session_time_text)
-                self.labels[slot_num]["buttontime"].config(text=button_time_text)
-                self.labels[slot_num]["mictime"].config(text=mic_time_text)
-                self.labels[slot_num]["dgconntime"].config(text=dg_conn_time_text)
-                self.labels[slot_num]["connlatency"].config(text=conn_latency_text)
-                self.labels[slot_num]["bufferms"].config(text=buffer_ms_text)
-                self.labels[slot_num]["waitproctime"].config(text=wait_proc_time_text)
+                # Update using the helper function (defined outside loop)
+                update_label_if_changed(slot_num, "id", id_text)
+                update_label_if_changed(slot_num, "state", state_text)
+                update_label_if_changed(slot_num, "stopreq", stop_req_text)
+                update_label_if_changed(slot_num, "buffered", buffered_text)
+                update_label_if_changed(slot_num, "timeouts", timeout_text)
+                update_label_if_changed(slot_num, "sessiontime", session_time_text)
+                update_label_if_changed(slot_num, "buttontime", button_time_text)
+                update_label_if_changed(slot_num, "mictime", mic_time_text)
+                update_label_if_changed(slot_num, "dgconntime", dg_conn_time_text)
+                update_label_if_changed(slot_num, "connlatency", conn_latency_text)
+                update_label_if_changed(slot_num, "buffer(ms)", buffer_ms_text)
+                update_label_if_changed(slot_num, "waitproctime", wait_proc_time_text)
 
             elif session_id_for_slot: # ID exists (likely waiting) but no full data yet
-                # Simplified display for waiting slots before full data arrives
-                self.labels[slot_num]["id"].config(text=f"{session_id_for_slot:.1f}")
-                self.labels[slot_num]["state"].config(text="Waiting(Init)")
-                # Clear other fields for waiting slots
-                for col_header in self.headers[2:]: # Skip Slot and ID
-                    label_key = col_header.lower().replace("(", "").replace(")", "")
-                    if label_key in self.labels[slot_num]:
-                        self.labels[slot_num][label_key].config(text="-")
-            else:
-                # Slot is empty / Idle
-                for col_header in self.headers[1:]: # Skip Slot
-                    label_key = col_header.lower().replace("(", "").replace(")", "")
-                    if label_key in self.labels[slot_num]:
-                         # Set State explicitly to Idle, others to -
-                         text_val = "Idle" if label_key == "state" else "-"
-                         self.labels[slot_num][label_key].config(text=text_val)
+                # Clear labels for empty slots if they haven't been cleared before
+                empty_text = '-' # Use '-' for empty slots
+                if slot_num not in self.last_displayed_values: self.last_displayed_values[slot_num] = {} # Ensure dict exists
+                # Check if already cleared to avoid redundant config calls
+                if self.last_displayed_values[slot_num].get("id") != empty_text:
+                    for header in self.headers:
+                        if header != "Slot": # Don't clear the slot number itself
+                            try:
+                                label_key = header.lower().replace(" ", "") # Assuming simple mapping
+                                update_label_if_changed(slot_num, label_key, empty_text)
+                            except KeyError:
+                                pass # Label might not exist
+                            except Exception as e:
+                                logging.warning(f"Error clearing label {slot_num}-{header}: {e}")
 
         # --- NEW: Update global stats --- >
+        # Initialize global dict if needed
+        if 'global' not in self.last_displayed_values: self.last_displayed_values['global'] = {}
+
+        def update_global_label_if_changed(label_key, new_text):
+            last_text = self.last_displayed_values['global'].get(label_key)
+            if new_text != last_text:
+                try:
+                    self.labels['global'][label_key].config(text=new_text)
+                    self.last_displayed_values['global'][label_key] = new_text
+                except KeyError:
+                    logging.warning(f"Monitor UI: Global label key '{label_key}' not found.")
+                except tk.TclError as e:
+                    if "application has been destroyed" not in str(e):
+                        logging.warning(f"Monitor UI: TclError updating global {label_key}: {e}")
+
         # Successful Stops
-        self.labels['global']['successful_stops'].config(text=str(total_stops))
+        update_global_label_if_changed('successful_stops', str(total_stops))
         # Min Duration
         min_dur_text = "N/A"
         if min_duration is not None:
             min_dur_text = f"{min_duration * 1000:.1f} ms"
-        self.labels['global']['min_stop_duration'].config(text=min_dur_text)
+        update_global_label_if_changed('min_stop_duration', min_dur_text)
         # Max Duration
-        max_duration_text = f"{max_duration:.3f}s" if max_duration is not None else "N/A"
-        self.labels['global']['max_stop_duration'].config(text=max_duration_text)
+        max_duration_text = f"{max_duration:.1f}s" if max_duration is not None else "N/A"
+        update_global_label_if_changed('max_stop_duration', max_duration_text)
         # Final Missed
-        self.labels['global']['final_missed'].config(text=str(final_missed_count))
+        update_global_label_if_changed('final_missed', str(final_missed_count))
         # --- END NEW ---
 
     def _cleanup_tk(self):

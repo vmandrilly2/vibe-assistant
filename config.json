@@ -1,0 +1,32 @@
+{
+    "general": {
+        "source_language": "en-US",
+        "trigger_key": "middle",
+        "initial_mode": "Dictation"
+    },
+    "modules": {
+        "global_variables_ui_enabled": false,
+        "input_manager_enabled": true,
+        "background_audio_recorder_enabled": true,
+        "stt_manager_enabled": true,
+        "dictation_text_manager_enabled": true,
+        "action_confirm_enabled": false,
+        "action_executor_enabled": true,
+        "keyboard_simulator_enabled": true, 
+        "openai_manager_enabled": true, 
+        "interim_text_ui_manager_enabled": true,
+        "mic_ui_manager_enabled": true,
+        "session_monitor_ui_enabled": true,
+        "systray_ui_enabled": true
+    },
+    "translation": {
+        "enabled": false,
+        "target_language": "en",
+        "model": "gpt-3.5-turbo"
+    },
+    "ui": {
+        "tooltip_alpha": 0.85,
+        "tooltip_bg": "lightyellow",
+        "tooltip_fg": "black"
+    }
+} 

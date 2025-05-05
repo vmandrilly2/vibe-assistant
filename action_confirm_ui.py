@@ -162,6 +162,13 @@ class ActionConfirmManager:
         is_hovering = False
         last_confirmation_state = self.confirmation_sent
         if self.current_state == "visible" and self.pending_action and self.root and self.canvas:
+            # --- ADD DETAILED LOGGING --- >
+            try:
+                widget_x = self.canvas.winfo_rootx(); widget_y = self.canvas.winfo_rooty()
+                widget_w = self.canvas.winfo_width(); widget_h = self.canvas.winfo_height()
+                logging.debug(f"Hover Check: Mouse=({mx},{my}), Canvas Bounds=({widget_x},{widget_y}) to ({widget_x+widget_w},{widget_y+widget_h})")
+            except tk.TclError: pass # Ignore if widget destroyed
+            # --- END LOGGING --- >
             is_hovering = self._is_point_over_widget(mx, my, self.canvas)
             if is_hovering and not self.confirmation_sent:
                 try:

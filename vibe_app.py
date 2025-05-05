@@ -598,6 +598,7 @@ async def _process_transcript_data(session_id: any, session_data: dict, transcri
        Assumes lock is NOT held when called. Accesses session_data directly.
     """
     # Removed redundant check for session_id existence as it's checked before calling
+    global g_pending_action, g_action_confirmed # <<< ADD GLOBAL DECLARATION
 
     processor = session_data.get('processor')
     history = session_data.get('history') # Operate on history within session_data

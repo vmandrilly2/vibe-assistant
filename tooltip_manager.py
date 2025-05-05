@@ -148,28 +148,27 @@ class TooltipManager:
                 command, data = self.queue.get_nowait()
                 if command == "update":
                     text, x, y, activation_id = data
-                    self.last_known_pos = (x, y) # Store the received position
+                    self.last_known_pos = (x, y)
                     # Only update if the ID matches the currently active tooltip
                     if activation_id == self.active_tooltip_id:
+                        # If this is the first update for this ID and window is hidden, show it.
+                        if self.root.state() == 'withdrawn':
+                            self.root.deiconify()
                         self.label.config(text=text)
                         needs_update = True # Mark for geometry update
                     # If a new activation starts while tooltip is shown from previous,
                     # ignore updates for the old one.
                 elif command == "show":
                     activation_id = data
-                    # If already showing for this ID, do nothing extra
-                    # If showing for a *different* ID, or hidden, update ID and show
-                    if activation_id != self.active_tooltip_id or self.root.state() == 'withdrawn':
-                        logging.debug(f"Tooltip show request for ID: {activation_id}. Current: {self.active_tooltip_id}")
-                        # We need the initial position here. Assume it comes with 'show' or was set by a prior 'update'.
-                        # If 'show' comes first, position might be default until first 'update'.
-                        # To fix this, the initial position should ideally be sent with the 'show' command.
-                        # For now, we'll rely on last_known_pos being set by an update.
+                    # Store the ID, hide if currently showing a different one, reset text.
+                    # Do NOT show the window here. Wait for the first update.
+                    if activation_id != self.active_tooltip_id:
+                        logging.debug(f"Tooltip activation ID set to: {activation_id}. Current: {self.active_tooltip_id}")
                         self.active_tooltip_id = activation_id
-                        # Reset text if showing for a new activation
-                        self.label.config(text="...") # Initial text placeholder
-                        self.root.deiconify()
-                        needs_update = True # Mark for geometry update
+                        self.label.config(text="") # Clear text for new activation
+                        if self.root.state() == 'normal': # If visible from previous ID
+                            self.root.withdraw()
+                            needs_update = False # No geometry update needed if hiding
                 elif command == "hide":
                     activation_id = data
                     # Only hide if the request matches the currently active tooltip ID,

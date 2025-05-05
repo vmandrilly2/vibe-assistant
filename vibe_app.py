@@ -1357,6 +1357,14 @@ async def main():
                     # --- Handle session completion on disconnect/error --- >
                     if new_status in ["disconnected", "error"]:
                         logging.debug(f"Handling disconnect/error for session {status_activation_id}...")
+                        # --- NEW: Explicitly hide tooltip for errored/disconnected session ---
+                        if tooltip_mgr and status_activation_id:
+                            try:
+                                tooltip_queue.put_nowait(("hide", status_activation_id))
+                                logging.debug(f"Sent explicit hide command to tooltip for disconnected/errored session {status_activation_id}")
+                            except queue.Full:
+                                logging.warning(f"Tooltip queue full sending hide for disconnected/errored session {status_activation_id}.")
+                        # --- END NEW ---
                         async with session_state_lock:
                             if status_activation_id and status_activation_id in active_stt_sessions:
                                 logging.info(f"Detected disconnect/error for session {status_activation_id}. Marking as complete and triggering handoff check.")

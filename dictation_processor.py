@@ -6,23 +6,35 @@ from pynput.keyboard import Key # For action execution check later
 
 # Assuming KeyboardSimulator is imported where needed or passed in
 # from keyboard_simulator import KeyboardSimulator
+# --- NEW: Import ConfigManager type hint (optional but good practice) ---
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from config_manager import ConfigManager
+# --- END NEW ---
 from i18n import _, get_current_language, ALL_DICTATION_REPLACEMENTS
 
 class DictationProcessor:
     """Handles the processing of final dictation results, including corrections and keyword actions."""
 
-    def __init__(self, keyboard_sim, action_confirm_q: queue.Queue, transcription_active_event):
+    # --- MODIFIED: Add config_manager ---
+    def __init__(self, keyboard_sim, action_confirm_q: queue.Queue, transcription_active_event, config_manager: 'ConfigManager'):
         """
         Args:
             keyboard_sim: Instance of KeyboardSimulator for typing actions.
             action_confirm_q: Queue for triggering the ActionConfirmManager UI.
-            transcription_active_event: Event signalling if transcription is active (for tooltip checks - REMOVE THIS? Not used anymore here).
+            transcription_active_event: Event signalling if transcription is active (REMOVED - No longer used here).
+            config_manager: Instance of ConfigManager to check settings.
         """
         self.keyboard_sim = keyboard_sim
         self.action_confirm_queue = action_confirm_q
-        self.transcription_active_event = transcription_active_event
+        # self.transcription_active_event = transcription_active_event # Removed
+        # --- Store ConfigManager ---
+        self.config_manager = config_manager
         logging.info("DictationProcessor initialized.")
 
+    # --- MODIFIED: Add config_manager parameter (redundant if passed in init) ---
+    # def handle_final(self, final_transcript: str, history: list, activation_id, config_manager: ConfigManager):
+    # Let's rely on the self.config_manager stored during init
     def handle_final(self, final_transcript: str, history: list, activation_id):
         """Handles the final dictation transcript segment based on history.
         Calculates target state, determines diff, executes typing, and updates history.
@@ -35,7 +47,7 @@ class DictationProcessor:
 
         Returns:
             tuple: (new_history_list, final_text_string_typed, action_to_confirm)
-                   action_to_confirm will be None if no action keyword was detected.
+                   action_to_confirm will be None if no action keyword was detected OR if confirmation module is disabled.
         """
         logging.debug(f"DictationProcessor handling final segment '{final_transcript}' for ID {activation_id}")
 
@@ -78,10 +90,12 @@ class DictationProcessor:
         if processed_transcript_for_match.endswith('.'): # Strip ONLY trailing period for matching
             processed_transcript_for_match = processed_transcript_for_match[:-1]
 
+        detected_action_value = None # Store the detected action temporarily
+
         for phrase in sorted_trigger_phrases:
             if phrase and (processed_transcript_for_match == phrase or processed_transcript_for_match.endswith(f" {phrase}")):
                 trigger_found = True
-                action_to_confirm = all_triggers[phrase] # STORE the detected action
+                detected_action_value = all_triggers[phrase] # STORE the detected action value
                 # --- Use simple approximation for trigger length --- >
                 if processed_transcript_for_match == phrase:
                      trigger_phrase_length = len(final_transcript)
@@ -89,29 +103,37 @@ class DictationProcessor:
                      trigger_phrase_length = len(phrase) + 1
                 # --- End simple approximation --- >
                 text_segment_to_process = final_transcript[:-trigger_phrase_length].rstrip()
-                logging.info(f"Detected trigger phrase: '{phrase}' -> Action: '{action_to_confirm}'. Text to process: '{text_segment_to_process}'")
+                logging.info(f"Detected trigger phrase: '{phrase}' -> Action: '{detected_action_value}'. Text to process: '{text_segment_to_process}'")
 
-                # --- Show confirmation UI --- >
-                try:
-                    pos = pyautogui.position()
-                    if self.action_confirm_queue:
-                        self.action_confirm_queue.put_nowait(("show", {"action": action_to_confirm, "pos": pos}))
-                        logging.debug(f"Sent '{action_to_confirm}' action to confirmation queue.")
-                        # g_pending_action = action_to_confirm # Managed by caller (vibe_app)
-                        # g_action_confirmed = False # Managed by caller (vibe_app)
-                    else:
-                        logging.warning("Action Confirm queue not available, cannot show confirmation.")
-                        # Don't reset action_to_confirm here, let vibe_app decide based on config
-                        # action_to_confirm = None
-                        # trigger_found = False # Keep trigger found, let vibe_app handle execution if needed
-                except queue.Full:
-                    logging.warning(f"Action confirmation queue full. Cannot show confirmation UI for '{action_to_confirm}'.")
-                    # Keep action, let vibe_app handle execution if needed and confirmation disabled
-                except Exception as e:
-                    logging.error(f"Error sending 'show' for '{action_to_confirm}' to ActionConfirmManager: {e}")
-                    # Keep action, maybe vibe_app can still execute if confirmation disabled
-                    # action_to_confirm = None
-                    # trigger_found = False
+                # --- >>> Check if action confirmation is enabled BEFORE queuing <<< ---
+                if self.config_manager and self.config_manager.get("modules.action_confirm_enabled", True):
+                    logging.debug("Action confirmation is enabled. Queuing confirmation UI.")
+                    # --- Show confirmation UI --- >
+                    try:
+                        pos = pyautogui.position()
+                        if self.action_confirm_queue:
+                            self.action_confirm_queue.put_nowait(("show", {"action": detected_action_value, "pos": pos}))
+                            logging.debug(f"Sent '{detected_action_value}' action to confirmation queue.")
+                            action_to_confirm = detected_action_value # Set the action to be returned ONLY if confirmation is queued
+                        else:
+                            logging.warning("Action Confirm queue not available, cannot show confirmation.")
+                            # Don't set action_to_confirm if queue is missing
+                    except queue.Full:
+                        logging.warning(f"Action confirmation queue full. Cannot show confirmation UI for '{detected_action_value}'.")
+                        # Don't set action_to_confirm if queue is full
+                    except Exception as e:
+                        logging.error(f"Error sending 'show' for '{detected_action_value}' to ActionConfirmManager: {e}")
+                        # Don't set action_to_confirm on error
+                else:
+                    # Confirmation module is DISABLED. Action is detected but NOT queued for confirmation.
+                    # vibe_app will need to decide if it should execute directly based on g_pending_action.
+                    # We should still return the *detected* action so vibe_app knows about it.
+                    # Let's modify the return logic slightly - return detected action regardless,
+                    # vibe_app handles confirmation flow based on queue messages / config check?
+                    # Alternative: Only set action_to_confirm if confirmation is enabled. If disabled, vibe_app won't know an action happened here.
+                    # Let's go with: Set action_to_confirm ONLY if confirmation enabled & queued.
+                    logging.info(f"Action confirmation is disabled. Action '{detected_action_value}' detected but not queued for UI confirmation.")
+                    action_to_confirm = None # Explicitly clear if disabled
 
                 break # Stop after finding the longest match
         # --- End trigger checking logic --- >
@@ -156,7 +178,7 @@ class DictationProcessor:
                     new_history.append(entry)
         # else: logging.debug("Processor history cleared.")
 
-        # Return updated history, the full text for this segment, and detected action
+        # Return updated history, the text typed in this segment, and the action confirmed (if any)
         return new_history, text_to_queue_for_typing, action_to_confirm
 
-    # Methods handle_interim and handle_final will be added next. 
+    # Methods handle_interim and handle_final will be added next.

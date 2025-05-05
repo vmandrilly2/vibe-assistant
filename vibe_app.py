@@ -599,6 +599,9 @@ async def _process_transcript_data(session_id: any, session_data: dict, transcri
     """
     # Removed redundant check for session_id existence as it's checked before calling
     global g_pending_action, g_action_confirmed # <<< ADD GLOBAL DECLARATION
+    # --- NEW: Need access to globals for translation ---
+    global config_manager, keyboard_sim, openai_manager
+    # --- END NEW ---
 
     processor = session_data.get('processor')
     history = session_data.get('history') # Operate on history within session_data
@@ -664,6 +667,32 @@ async def _process_transcript_data(session_id: any, session_data: dict, transcri
                     else:
                         logging.warning(f"DictationProcessor detected action '{detected_action}' for session {session_id}, but another action '{g_pending_action}' is already pending. Ignoring new action.")
                     # --- END MODIFIED ---
+
+                # --- NEW: Trigger Translation if needed (Only on Deepgram final) ---
+                if is_final_dg and config_manager.get("modules.translation_enabled", False) and openai_manager:
+                    # Construct the full source text from the updated history
+                    full_source_text = " ".join(word_info['text'] for word_info in session_data['history'])
+                    source_lang = config_manager.get("general.selected_language")
+                    target_lang = config_manager.get("general.target_language")
+                    # Check if translation is actually needed (valid languages, not the same)
+                    if full_source_text and source_lang and target_lang and source_lang != target_lang:
+                        logging.info(f"Creating translation task for session {session_id}")
+                        # Launch translation as a separate task so it doesn't block transcript processing
+                        asyncio.create_task(
+                            translate_and_type(
+                                text_to_translate=full_source_text,
+                                source_lang_code=source_lang,
+                                target_lang_code=target_lang,
+                                config_mgr=config_manager, # Pass global
+                                kb_sim=keyboard_sim,       # Pass global
+                                openai_mgr=openai_manager # Pass global
+                            ),
+                            name=f"Translate_{session_id}"
+                        )
+                    else:
+                        logging.debug(f"Skipping translation call for session {session_id}: Enabled={config_manager.get('modules.translation_enabled')}, Source Text='{bool(full_source_text)}', SourceLang='{source_lang}', TargetLang='{target_lang}', SameLang={source_lang == target_lang}")
+                # --- END NEW ---
+
 
                 # Hide tooltip after final dictation segment
                 # Use the passed tooltip_enabled flag
@@ -1051,10 +1080,12 @@ async def main():
         return
 
     # --- Initialize Dictation Processor (depends on kb_sim, queues, event) --- >
+    # --- MODIFIED: Pass config_manager ---
     dictation_processor = DictationProcessor(
         keyboard_sim=keyboard_sim,
         action_confirm_q=action_confirm_queue,
-        transcription_active_event=transcription_active_event
+        transcription_active_event=transcription_active_event,
+        config_manager=config_manager # Pass the instance
     )
 
     # --- Initialize Deepgram Client & STT Manager (Conditional) --- >
@@ -1220,10 +1251,12 @@ async def main():
                             background_recorder=buffered_audio_input,
                             options=current_dg_options
                         )
+                        # --- MODIFIED: Add config_manager here too ---
                         new_processor = DictationProcessor(
                             keyboard_sim=keyboard_sim,
                             action_confirm_q=action_confirm_queue,
-                            transcription_active_event=transcription_active_event # Is this event still needed by processor?
+                            transcription_active_event=transcription_active_event, # Is this event still needed by processor?
+                            config_manager=config_manager # <<< ADD THIS
                         )
                         new_history = [] # Create a new history list for this processor instance
 
@@ -1593,21 +1626,61 @@ async def main():
 
             # --- Check Config Reload --- >
             if systray_ui.config_reload_event.is_set():
-                logging.info("Detected config reload request.")
-                old_source_lang = config_manager.get("general.selected_language")
-                config_manager.reload() # Reload config using the manager
-                new_source_lang = config_manager.get("general.selected_language")
-                # Reload translations if language changed
-                if new_source_lang != old_source_lang:
-                    load_translations(new_source_lang)
-                    logging.info(f"Translations reloaded for {new_source_lang} due to config change.")
-                # --- Signal managers to potentially update their internal state ---
-                # (Currently they query config_manager when needed, but explicit reload hooks could be added)
-                if tooltip_mgr: tooltip_mgr.reload_config(config_manager) # Pass manager
-                if status_mgr: status_mgr.config_manager = config_manager # Update manager reference
-                # CommandProcessor accesses config_manager directly
-                logging.info("ConfigManager reloaded. Managers notified/updated.")
-                systray_ui.config_reload_event.clear() # Clear the event
+                try: # <<< ADD try block
+                    logging.info("Detected config reload request.")
+                    old_source_lang = config_manager.get("general.selected_language")
+                    # --- Store previous translation enabled state ---
+                    old_translation_enabled = config_manager.get("modules.translation_enabled", False)
+
+                    config_manager.reload() # Reload config using the manager
+
+                    # --- Get NEW translation enabled state ---
+                    new_translation_enabled = config_manager.get("modules.translation_enabled", False)
+                    new_source_lang = config_manager.get("general.selected_language")
+
+                    # Reload translations if language changed
+                    if new_source_lang != old_source_lang:
+                        load_translations(new_source_lang)
+                        logging.info(f"Translations reloaded for {new_source_lang} due to config change.")
+
+                    # --- NEW: Initialize OpenAI if translation was just enabled ---
+                    if new_translation_enabled and (openai_manager is None or openai_client is None):
+                        logging.info("Translation is enabled and OpenAI components are missing. Attempting initialization...")
+                        if OPENAI_API_KEY:
+                            try:
+                                # Use global variables declared at the start of main()
+                                # global openai_client, openai_manager # <<< REMOVED Redundant declaration
+                                openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+                                openai_manager = OpenAIManager(openai_client)
+                                logging.info("OpenAI client and manager initialized successfully during config reload.")
+                            except Exception as e_init: # <<< Catch specific init error
+                                logging.error(f"Failed to initialize OpenAI client/manager during config reload: {e_init}")
+                                # Reset globals on failure to avoid partial state
+                                openai_client = None
+                                openai_manager = None
+                        else:
+                            logging.warning("Cannot initialize OpenAI components during reload: OPENAI_API_KEY is missing.")
+                    elif not new_translation_enabled and openai_manager is not None:
+                        # Optional: Clear OpenAI manager if translation is disabled?
+                        # logging.info("Translation disabled during reload. Clearing OpenAI manager.")
+                        # openai_client = None # Client might be needed elsewhere?
+                        # openai_manager = None
+                        pass # For now, keep them loaded even if disabled mid-session
+
+                    # --- Signal managers to potentially update their internal state ---
+                    # (Currently they query config_manager when needed, but explicit reload hooks could be added)
+                    if tooltip_mgr: tooltip_mgr.reload_config(config_manager) # Pass manager
+                    if status_mgr: status_mgr.config_manager = config_manager # Update manager reference
+                    # --- NEW: Update DictationProcessor's config manager reference --- >
+                    if dictation_processor: dictation_processor.config_manager = config_manager
+                    # --- END NEW ---
+                    # CommandProcessor accesses config_manager directly
+                    logging.info("ConfigManager reloaded. Managers notified/updated.")
+
+                except Exception as e_reload: # <<< Catch any exception during reload
+                    logging.error(f"Error occurred during configuration reload: {e_reload}", exc_info=True)
+                finally: # <<< Ensure event is always cleared
+                    systray_ui.config_reload_event.clear() # Clear the event
 
             # --- Thread Health Checks --- >
             # Check manager threads only if they exist and their stop event isn't set

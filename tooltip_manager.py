@@ -36,6 +36,7 @@ class TooltipManager:
         self.last_known_pos = (0, 0) # Store the last position received
         self.config_manager = initial_config # Rename initial_config to config_manager for clarity
         self._apply_tooltip_config() # Apply initial config using the manager
+        self._logged_disabled = False # <<< ADDED: Flag to track if disabled state has been logged
 
     def _apply_tooltip_config(self):
         """Applies tooltip config from the ConfigManager to internal variables."""
@@ -61,6 +62,8 @@ class TooltipManager:
                 self.label.config(bg=self.bg_color, fg=self.fg_color,
                                   font=(self.font_family, self.font_size))
                 logging.info("Tooltip appearance updated from reloaded config.")
+                # Reset disabled log flag if config is reloaded and module might be enabled now
+                self._logged_disabled = False
             except tk.TclError as e:
                 logging.warning(f"Could not update tooltip appearance on reload: {e}")
 
@@ -121,25 +124,30 @@ class TooltipManager:
 
     def _check_queue(self):
         """Processes messages from the queue using root.after."""
-        try:
-            # Check stop event AND enabled status from config manager
-            module_enabled = self.config_manager.get("modules.tooltip_enabled", True)
-            if self._stop_event.is_set() or not module_enabled:
-                if not module_enabled and not self._stop_event.is_set():
+        # Check module enabled status first
+        module_enabled = self.config_manager.get("modules.tooltip_enabled", True)
+
+        # Handle stop event or disabled state
+        if self._stop_event.is_set() or not module_enabled:
+            if not module_enabled: # Module is disabled
+                # Log only once when transitioning to disabled
+                if not self._logged_disabled:
                     logging.debug("TooltipManager: Module disabled via config, stopping checks and hiding.")
-                    self._hide_tooltip() # Ensure tooltip is hidden if disabled
-                # No cleanup needed if just disabled, only if stopped
-                if self._stop_event.is_set():
-                    self._cleanup_tk()
-                # Schedule one last check in case it gets re-enabled or stopped
-                if self.root and not self._stop_event.is_set():
-                    self.root.after(500, self._check_queue) # Check less frequently when disabled
-                return # Stop processing queue if stopped or disabled
-        except Exception as e:
-            logging.error(f"Error checking stop/enabled status in TooltipManager: {e}")
-            self._stop_event.set() # Stop if error occurs here
-            self._cleanup_tk()
-            return
+                    self._logged_disabled = True
+                self._hide_tooltip() # Ensure tooltip is hidden if disabled
+            else: # Stop event is set
+                self._logged_disabled = False # Reset flag on stop
+                self._cleanup_tk()
+
+            # Reschedule the check only if not stopped (allows re-checking if config enables it later)
+            # Use the less frequent check interval when disabled.
+            if self.root and not self._stop_event.is_set():
+                self.root.after(500, self._check_queue)
+            return # Stop processing queue messages for this cycle
+
+        # If we reach here, module is enabled AND not stopped
+        # Reset the flag to ensure the "disabled" message logs again if it gets disabled later
+        self._logged_disabled = False
 
         # --- If enabled and not stopped, process queue ---
         needs_update = False
@@ -208,8 +216,9 @@ class TooltipManager:
                 logging.warning(f"Error updating tooltip position: {e}")
 
         # --- Reschedule Check --- >
-        if self.root and not self._stop_event.is_set(): # Reschedule even if disabled, but less frequently
-            check_interval_ms = 50 if module_enabled else 500
+        # Only reschedule if the function didn't return early (i.e., module is enabled and not stopped)
+        if self.root and not self._stop_event.is_set():
+            check_interval_ms = 50 # Always use the fast interval when enabled
             self.root.after(check_interval_ms, self._check_queue)
         # No else needed, loop stops if root gone or stop event set
 

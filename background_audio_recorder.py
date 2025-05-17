@@ -5,7 +5,6 @@ import sounddevice as sd
 import numpy as np
 import time
 from collections import deque
-import threading # Need lock
 
 # Assuming constants like sample rate, channels, chunk size are defined elsewhere
 from constants import AUDIO_SAMPLE_RATE, AUDIO_CHANNELS
@@ -24,7 +23,7 @@ class BackgroundAudioRecorder:
         self.stream = None
         # Buffer stores (timestamp, chunk_bytes) tuples
         self.audio_buffer = deque()
-        self._buffer_lock = threading.Lock() # Use threading Lock for buffer access
+        self._buffer_lock = asyncio.Lock() # Use asyncio.Lock for buffer access
         self.buffer_duration_seconds = BUFFER_DURATION_SECONDS
         self._recording_active = False
         self._stop_event = asyncio.Event() # Used locally within run_loop
@@ -49,7 +48,10 @@ class BackgroundAudioRecorder:
                 # The number of frames read might be less than chunk_size if not available
                 frames_available = self.stream.read_available
                 if frames_available >= self.chunk_size:
-                    indata, overflowed = self.stream.read(self.chunk_size)
+                    # Run the blocking read operation in a thread pool executor
+                    loop = asyncio.get_running_loop()
+                    indata, overflowed = await loop.run_in_executor(None, self.stream.read, self.chunk_size)
+
                     if overflowed:
                         logger.warning("Audio buffer overflow detected during read!")
                     
@@ -60,7 +62,7 @@ class BackgroundAudioRecorder:
                         timestamp = time.monotonic() 
                         chunk_bytes = indata.astype(np.int16).tobytes()
                         
-                        with self._buffer_lock:
+                        async with self._buffer_lock: # Use async with for asyncio.Lock
                             self.audio_buffer.append((timestamp, chunk_bytes))
                             # Prune buffer based on time duration
                             while self.audio_buffer:
@@ -100,7 +102,7 @@ class BackgroundAudioRecorder:
         try:
             logger.info("Starting audio recording stream...")
             # Clear buffer from previous runs
-            with self._buffer_lock:
+            async with self._buffer_lock:
                  self.audio_buffer.clear()
             
             self.stream = sd.InputStream(
@@ -171,7 +173,7 @@ class BackgroundAudioRecorder:
             
         cutoff_time = time.monotonic() - duration_seconds
         relevant_chunks = []
-        with self._buffer_lock:
+        async with self._buffer_lock: # Use async with for asyncio.Lock
             # Iterate chronologically from the oldest
             for timestamp, chunk_bytes in self.audio_buffer:
                 if timestamp >= cutoff_time:
@@ -180,7 +182,7 @@ class BackgroundAudioRecorder:
         # logger.debug(f"Retrieved {len(relevant_chunks)} chunks for the last {duration_seconds:.2f}s (cutoff: {cutoff_time:.2f}, ref: {time.monotonic():.2f})")
         return relevant_chunks
 
-    def get_live_chunks_since(self, timestamp_mono: float) -> list[tuple[float, bytes]]:
+    async def get_live_chunks_since(self, timestamp_mono: float) -> list[tuple[float, bytes]]:
         """Retrieves chunks from the buffer recorded since the given monotonic timestamp.
 
         Args:
@@ -190,7 +192,7 @@ class BackgroundAudioRecorder:
             A list of (timestamp, chunk_bytes) tuples recorded after the given time.
         """
         new_chunks = []
-        with self._buffer_lock:
+        async with self._buffer_lock: # Use async with for asyncio.Lock
             # Iterate chronologically through the deque
             for ts, chunk_bytes in self.audio_buffer:
                 if ts > timestamp_mono:
@@ -233,7 +235,7 @@ class BackgroundAudioRecorder:
         logger.info("BackgroundAudioRecorder cleaning up...")
         self._stop_event.set() # Signal run_loop to exit
         await self._stop_recording() # Ensure stream and read loop are stopped
-        with self._buffer_lock:
+        async with self._buffer_lock: # Use async with for asyncio.Lock
              self.audio_buffer.clear()
         logger.info("BackgroundAudioRecorder cleanup finished.")
 

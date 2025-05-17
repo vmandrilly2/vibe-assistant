@@ -232,9 +232,9 @@ class DictationTextManager:
 
 
                 if not session_id:
-                     logger.error("Failed to get a valid session ID after key press. Skipping monitoring.")
-                     # Wait for key release before trying again to avoid tight loop if something is wrong
-                     await self.gvm.wait_for_value("input.dictation_key_pressed", False)
+                     logger.error("Failed to get a valid session ID after key press. Skipping monitoring for this attempt.")
+                     await asyncio.sleep(0.1)
+                     current_session_id = None # Reset to re-trigger session ID fetching logic
                      continue
 
                 logger.info(f"DTM now monitoring session: {session_id}")

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 import uuid
+import os
 from typing import Optional, Dict, Any
 
 from deepgram import (
@@ -24,8 +25,13 @@ from constants import (
     STATE_APP_STATUS, STATE_ERROR_MESSAGE, # For potential error reporting
     STATE_INPUT_DICTATION_KEY_PRESSED,
     STATE_AUDIO_STATUS, STATE_AUDIO_LATEST_CHUNK_TIMESTAMP, # If needed for audio stream
-    AUDIO_SAMPLE_RATE, AUDIO_CHANNELS # Import constants
+    AUDIO_SAMPLE_RATE, AUDIO_CHANNELS, # Removed AUDIO_FORMAT
+    STATE_APP_CURRENT_STT_SESSION_ID, # GVM key for current session ID
+    STATE_SESSION_PREFIX, # Corrected: Changed from STATE_SESSIONS_PREFIX to STATE_SESSION_PREFIX
+    CONFIG_DEEPGRAM_PREFIX, # Prefix for Deepgram specific config
+    CONFIG_GENERAL_PREFIX # Added for language config
 )
+from i18n import _ # For potential translated log messages
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +65,10 @@ class STTManager:
         self._current_model = "nova-2" # Default, update from GVM/config
         self._retry_count = 0
         self._max_retries = 3
+        self._language_update_event = asyncio.Event() # To signal language change
+        self._active_dg_connection: Optional[LiveTranscriptionEvents] = None
+        self._current_session_id: Optional[str] = None
+        self._stop_event = asyncio.Event() # Event to stop the current session processing
 
     async def init(self):
         """(Re)Initializes the STTManager, potentially loading config."""
@@ -80,21 +90,47 @@ class STTManager:
         session_status_key = STATE_STT_SESSION_STATUS_TEMPLATE.format(session_id=self._session_id)
 
         try:
-            # Get language and model details from GVM state
-            self._language = await self.gvm.get("config.general.source_language", "en-US")
-            self._current_model = await self.gvm.get("config.deepgram.model", "nova-2")
+            # Determine language and model based on current GVM config
+            current_language_code = await self.gvm.get(f"{CONFIG_GENERAL_PREFIX}.language", "en")
+            self._language = await self._get_deepgram_language_code(current_language_code)
+            self._current_model = await self.gvm.get(f"{CONFIG_DEEPGRAM_PREFIX}.model", "nova-2")
+
+            logger.info(f"STTManager using Lang: {self._language}, Model: {self._current_model} for session {self._session_id}")
+
+            # Fetch other Deepgram options from GVM/config
+            punctuate = await self.gvm.get(f"{CONFIG_DEEPGRAM_PREFIX}.punctuate", True)
+            interim_results = await self.gvm.get(f"{CONFIG_DEEPGRAM_PREFIX}.interim_results", True)
+            try:
+                utterance_end_ms_conf = await self.gvm.get(f"{CONFIG_DEEPGRAM_PREFIX}.utterance_end_ms", "1000") # Default to string
+            except ValueError: # Should not happen if default is string
+                logger.warning(f"Could not get utterance_end_ms. Using default '1000'.")
+                utterance_end_ms_conf = "1000"
+            vad_events = await self.gvm.get(f"{CONFIG_DEEPGRAM_PREFIX}.vad_events", True)
+            smart_format = await self.gvm.get(f"{CONFIG_DEEPGRAM_PREFIX}.smart_format", True)
+            endpointing_conf = await self.gvm.get(f"{CONFIG_DEEPGRAM_PREFIX}.endpointing", 300)
+            numerals = await self.gvm.get(f"{CONFIG_DEEPGRAM_PREFIX}.numerals", True)
+
+            # Ensure numeric options are integers
+            try:
+                endpointing = int(endpointing_conf)
+            except ValueError:
+                logger.warning(f"Could not convert endpointing '{endpointing_conf}' to int. Using default 300.")
+                endpointing = 300
+
             options = LiveOptions(
                 model=self._current_model,
                 language=self._language,
                 encoding="linear16",
-                channels=AUDIO_CHANNELS, # Use constant
-                sample_rate=AUDIO_SAMPLE_RATE, # Use constant
-                punctuate=await self.gvm.get("config.deepgram.punctuate", True),
-                interim_results=True,
-                utterance_end_ms=str(await self.gvm.get("config.deepgram.utterance_end_ms", 1000)),
-                vad_events=await self.gvm.get("config.deepgram.vad_events", True),
-                smart_format=await self.gvm.get("config.deepgram.smart_format", True),
-                numerals=await self.gvm.get("config.deepgram.numerals", True),
+                sample_rate=AUDIO_SAMPLE_RATE,
+                channels=AUDIO_CHANNELS, # Should be 1
+                interim_results=interim_results,
+                punctuate=punctuate,
+                utterance_end_ms=utterance_end_ms_conf, # Pass as string
+                vad_events=vad_events,
+                smart_format=smart_format,
+                numerals=numerals,
+                endpointing=endpointing
+                # Removed multichannel=False
             )
 
             await self.gvm.set(session_status_key, "connecting")
@@ -180,7 +216,7 @@ class STTManager:
 
             while self._connection_open.is_set() and not self._stop_processing.is_set():
                 # Get new chunks since the last poll time using the dedicated method
-                new_chunks_with_ts = self.audio_recorder.get_live_chunks_since(last_polled_timestamp)
+                new_chunks_with_ts = await self.audio_recorder.get_live_chunks_since(last_polled_timestamp)
                 
                 if new_chunks_with_ts:
                     # new_chunks_with_ts is already sorted by timestamp because deque is ordered
@@ -253,6 +289,15 @@ class STTManager:
              logger.warning("Received DG message but session_id is not set.")
              return
         try:
+            # Log the raw result for debugging
+            try:
+                # Attempt to log as JSON if possible, otherwise plain string
+                import json
+                raw_result_str = json.dumps(result.model_dump(mode='json') if hasattr(result, 'model_dump') else vars(result))
+                logger.debug(f"Raw Deepgram result (Session: {self._session_id}): {raw_result_str}")
+            except Exception as log_exc:
+                logger.debug(f"Raw Deepgram result (Session: {self._session_id}, could not serialize to JSON): {result}")
+                
             if not result or not hasattr(result, 'channel') or not hasattr(result.channel, 'alternatives') or not result.channel.alternatives:
                 logger.debug(f"Received empty or invalid transcript structure: {result}")
                 return
@@ -375,51 +420,104 @@ class STTManager:
             # Clear session ID only after all processing and state updates are done
             self._session_id = None 
 
+    async def _get_deepgram_language_code(self, base_lang_code: str) -> str:
+        """Converts a base language code (e.g., 'en', 'fr') to a Deepgram-compatible one."""
+        if base_lang_code == "en":
+            return "en-US"
+        elif base_lang_code == "fr":
+            return "fr"
+        # Add other mappings as needed, e.g., es -> es, de -> de
+        else:
+            logger.warning(f"No specific Deepgram mapping for base language '{base_lang_code}'. Using as-is.")
+            return base_lang_code
+
+    async def _get_language_and_model(self):
+        """Updates self._language and self._current_model based on GVM configuration."""
+        base_lang_code = await self.gvm.get(f"{CONFIG_GENERAL_PREFIX}.language", "en")
+        self._language = await self._get_deepgram_language_code(base_lang_code)
+        self._current_model = await self.gvm.get(f"{CONFIG_DEEPGRAM_PREFIX}.model", "nova-2")
+        
+        logger.info(f"STT language updated to: {self._language}, model: {self._current_model}")
+        self._language_update_event.set() # Signal that language/model has been updated
 
     async def run_loop(self):
-        """Main loop watching GVM state to start STT sessions."""
         logger.info("STTManager run_loop starting.")
-        active_session_task: Optional[asyncio.Task] = None
+        self._stop_event.clear()
 
-        while True:
+        # Initial language and model setup
+        await self._get_language_and_model()
+
+        # Task to listen for language changes from GVM
+        async def language_change_listener():
+            while not self._stop_event.is_set():
+                try:
+                    await self.gvm.wait_for_change(f"{CONFIG_GENERAL_PREFIX}.language")
+                    logger.info("Detected language change in GVM. Updating STT language/model.")
+                    await self._get_language_and_model()
+                    # If a session is active, it will use the new lang on next connection.
+                    # Optionally, could force-close current session if immediate switch is needed.
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Error in language_change_listener: {e}", exc_info=True)
+                    await asyncio.sleep(5) # Avoid tight loop on error
+        
+        listener_task = asyncio.create_task(language_change_listener())
+
+        while not self._stop_event.is_set():
             try:
-                # Wait for the trigger key to be pressed
-                # Only proceed if no session is currently active
-                if active_session_task and not active_session_task.done():
-                     logger.debug("STT session already active. Waiting for it to complete...")
-                     # Wait for the current session to finish before checking trigger again
-                     await asyncio.wait([active_session_task]) 
-                     active_session_task = None # Reset task reference
-                     logger.debug("Previous STT session completed.")
-                     # Short sleep after session completes before checking trigger immediately
-                     await asyncio.sleep(0.1) 
-
                 logger.debug("STTManager waiting for dictation trigger (key press)...")
                 await self.gvm.wait_for_value(STATE_INPUT_DICTATION_KEY_PRESSED, True)
+                if self._stop_event.is_set(): break # Check after wait
+
                 logger.info("Dictation trigger detected by STTManager.")
+
+                # Ensure language/model are up-to-date before starting a new session
+                self._language_update_event.clear()
+                await self._get_language_and_model() # Re-fetch, could be more efficient
+                await self._language_update_event.wait() # Ensure _get_language_and_model completes
+
+                if self._active_dg_connection:
+                    logger.debug("STT session already active. Waiting for it to complete...")
+                    # This logic might need refinement: if a session is truly stuck,
+                    # waiting indefinitely might not be ideal.
+                    # However, _process_session should eventually complete or error out.
+                    # For now, assume _process_session cleans up properly.
+                    await asyncio.sleep(0.1) # Brief pause to allow existing session to clear if ending
+                    if self._active_dg_connection: # Re-check if it cleared up
+                        logger.warning("Previous STT session did not clear quickly. Skipping new trigger.")
+                        await self.gvm.wait_for_value(STATE_INPUT_DICTATION_KEY_PRESSED, False) # Wait for release
+                        continue 
+
+                session_id = str(uuid.uuid4())
+                await self.gvm.set(STATE_APP_CURRENT_STT_SESSION_ID, session_id)
+                self._current_session_id = session_id
+
+                # Launch the session handling in a new task
+                # This allows the run_loop to quickly return to waiting for the next trigger.
+                asyncio.create_task(self._process_session(), name="STT_SessionProcessor")
                 
-                # Start processing a session
-                active_session_task = asyncio.create_task(self._process_session(), name="STT_SessionProcessor")
-                
-                # Loop continues, will wait for task completion at the top if key pressed again quickly
+                # Wait for the dictation key to be released before looping again
+                # This prevents re-triggering immediately if key is held down.
+                await self.gvm.wait_for_value(STATE_INPUT_DICTATION_KEY_PRESSED, False)
+                logger.debug("STTManager detected key release after session start.")
 
             except asyncio.CancelledError:
                 logger.info("STTManager run_loop cancelled.")
-                if active_session_task and not active_session_task.done():
-                    logger.info("Cancelling active STT session task due to manager shutdown...")
-                    active_session_task.cancel()
-                    try:
-                        await active_session_task # Wait for cancellation to complete
-                    except asyncio.CancelledError:
-                        pass # Expected
-                    except Exception as e:
-                        logger.error(f"Error waiting for cancelled session task during cleanup: {e}")
                 break
             except Exception as e:
                 logger.error(f"Error in STTManager run_loop: {e}", exc_info=True)
-                # Avoid tight loop on error
-                await asyncio.sleep(2)
+                if self._current_session_id:
+                    await self._update_session_status(self._current_session_id, "error", f"Unhandled error: {e}")
+                await asyncio.sleep(1) # Avoid tight loop on error
+        
+        listener_task.cancel()
+        try:
+            await listener_task
+        except asyncio.CancelledError:
+            logger.debug("Language change listener task cancelled successfully.")
 
+        await self.cleanup()
         logger.info("STTManager run_loop finished.")
 
     async def cleanup(self):

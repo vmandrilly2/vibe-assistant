@@ -45,6 +45,7 @@ class MicUIManager:
         self.canvas: Optional[tk.Canvas] = None
         self._current_state = "idle" # internal state: idle, active, connecting, error
         self._active_session_id: Optional[str] = None # Track current session if needed
+        self._is_ui_visible = False # Track UI visibility
         self._last_update_time = 0
         self._update_interval = 0.1 # How often to check GVM state (seconds)
 
@@ -68,20 +69,21 @@ class MicUIManager:
             self.root = tk.Tk()
             self.root.title("Mic Status")
             self.root.attributes("-topmost", True)
-            self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}+50+50") # Position placeholder
+            # Initial position, will be updated
+            self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}+0+0") 
             self.root.overrideredirect(True)
             self.root.attributes("-alpha", 0.8)
             self.root.configure(background=self.COLOR_BG)
-            # Make background transparent (platform dependent)
             try: self.root.wm_attributes("-transparentcolor", self.COLOR_BG)
             except tk.TclError: logger.warning("Transparent color attribute not supported.")
 
             self.canvas = tk.Canvas(self.root, width=self.WIDTH, height=self.HEIGHT, bg=self.COLOR_BG, highlightthickness=0)
             self.canvas.pack()
             
-            self._draw_indicator() # Initial draw
+            self.root.withdraw() # Start hidden
+            self._is_ui_visible = False
+            # self._draw_indicator() # No initial draw if hidden
             
-            # Schedule periodic checks/updates from within the Tk thread
             self.root.after(int(self._update_interval * 1000), self._check_and_update_ui)
             
             logger.debug("Mic UI Tkinter root created.")
@@ -106,44 +108,85 @@ class MicUIManager:
         self.root.after(int(self._update_interval * 1000), self._check_and_update_ui)
 
     async def _async_update_state(self):
-        """Runs in asyncio loop to get state from GVM and schedule UI redraw."""
-        # Determine the state based on GVM
-        # This logic needs refinement based on exact state keys and desired behavior
-        new_state = "idle"
+        """Runs in asyncio loop to get state from GVM and schedule UI redraw/reposition."""
+        new_determined_state = "idle"
+        should_be_visible = False
+        current_pos = None
+
         try:
-             # Prioritize error state
-             # Check global audio error first
-             audio_status = await self.gvm.get(STATE_AUDIO_STATUS)
-             if audio_status and 'error' in audio_status.lower():
-                  new_state = "error"
-             else:
-                 # Check STT session status (need active session ID)
-                 session_id = await self.gvm.get("app.current_stt_session_id") # Assuming this exists
-                 if session_id:
-                      stt_status_key = STATE_STT_SESSION_STATUS_TEMPLATE.format(session_id=session_id)
-                      stt_status = await self.gvm.get(stt_status_key)
-                      if stt_status == "connecting": new_state = "connecting"
-                      elif stt_status == "connected": new_state = "active"
-                      elif stt_status and 'error' in stt_status.lower(): new_state = "error"
-                      # elif audio_status == "recording": new_state = "active" # Fallback if STT connected state isn't set quickly?
-                      else: 
-                           # If no STT status or idle/disconnected, check key press
-                           is_pressed = await self.gvm.get(STATE_INPUT_DICTATION_KEY_PRESSED, False)
-                           new_state = "active" if is_pressed else "idle" # Show active immediately on press?
-                 else:
-                      is_pressed = await self.gvm.get(STATE_INPUT_DICTATION_KEY_PRESSED, False)
-                      new_state = "active" if is_pressed else "idle"
+            is_pressed = await self.gvm.get(STATE_INPUT_DICTATION_KEY_PRESSED, False)
+            activation_pos = await self.gvm.get("input.initial_activation_pos", None)
+
+            if is_pressed:
+                should_be_visible = True
+                current_pos = activation_pos
+                # Determine color state based on audio/STT status
+                audio_status = await self.gvm.get(STATE_AUDIO_STATUS)
+                if audio_status and 'error' in audio_status.lower():
+                    new_determined_state = "error"
+                else:
+                    session_id = await self.gvm.get("app.current_stt_session_id")
+                    if session_id:
+                        stt_status_key = STATE_STT_SESSION_STATUS_TEMPLATE.format(session_id=session_id)
+                        stt_status = await self.gvm.get(stt_status_key)
+                        if stt_status == "connecting": new_determined_state = "connecting"
+                        elif stt_status == "connected": new_determined_state = "active"
+                        elif stt_status and 'error' in stt_status.lower(): new_determined_state = "error"
+                        elif audio_status == "recording": new_determined_state = "active" # If key pressed and recording
+                        else: new_determined_state = "active" # Default to active if pressed and no other state
+                    elif audio_status == "recording": # Key pressed, no session yet, but recording started
+                        new_determined_state = "active"
+                    else: # Key pressed, but no session and not actively recording (e.g. pre-session buffer) - show as connecting/pending?
+                        new_determined_state = "connecting" # Or "active" to indicate responsiveness
+            else: # Not pressed
+                should_be_visible = False
+                new_determined_state = "idle"
                       
         except Exception as e:
              logger.error(f"MicUI: Error getting state from GVM: {e}")
-             new_state = "error" # Default to error if state check fails
+             new_determined_state = "error" # Default to error if state check fails
+             should_be_visible = True # Show error state
 
-        if new_state != self._current_state:
-            self._current_state = new_state
-            # Schedule redraw in Tkinter thread
-            if self.root:
-                 try: self.root.after(0, self._draw_indicator)
-                 except tk.TclError: pass # Ignore if window closed
+        state_changed = new_determined_state != self._current_state
+        visibility_changed = should_be_visible != self._is_ui_visible
+
+        if state_changed:
+            self._current_state = new_determined_state
+        
+        if self.root:
+            if visibility_changed:
+                self._is_ui_visible = should_be_visible
+                try:
+                    if self._is_ui_visible:
+                        logger.debug(f"MicUI: Showing UI. State: {self._current_state}, Pos: {current_pos}")
+                        self.root.after(0, lambda: self._update_window_position_and_show(current_pos))
+                        if state_changed: # Redraw only if state also changed or first time visible
+                             self.root.after(10, self._draw_indicator) # Small delay for window to appear
+                    else:
+                        logger.debug("MicUI: Hiding UI.")
+                        self.root.after(0, self.root.withdraw)
+                except tk.TclError: pass # Ignore if window closed
+            elif self._is_ui_visible and state_changed: # Visible and state changed, redraw
+                logger.debug(f"MicUI: State changed while visible. New state: {self._current_state}. Redrawing.")
+                try: self.root.after(0, self._draw_indicator)
+                except tk.TclError: pass
+            elif self._is_ui_visible and current_pos: # Visible and position might need update (though only on initial press now)
+                # This part would be more relevant if mouse position was continuously updated
+                # For now, position is set on show. We could add a check here if pos changed.
+                pass 
+
+    def _update_window_position_and_show(self, pos):
+        """Updates window position and shows it. Runs in Tk thread."""
+        if not self.root: return
+        if pos and isinstance(pos, tuple) and len(pos) == 2:
+            # Adjust position slightly so cursor isn't exactly on the top-left corner
+            adj_x = pos[0] - self.WIDTH // 2
+            adj_y = pos[1] - self.HEIGHT // 2 
+            self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}+{adj_x}+{adj_y}")
+        else: # Default position if no pos given (e.g. for error state without activation_pos)
+            self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}+50+50") 
+        self.root.deiconify()
+        self._draw_indicator() # Ensure it's drawn when shown
                  
     def _draw_indicator(self):
         """Draws the indicator circle based on self._current_state. Runs in Tk thread."""

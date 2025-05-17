@@ -4,20 +4,22 @@ import logging
 import threading
 import time
 from typing import Optional, Any
+import functools # Import functools
 
 import pystray
 from pystray import MenuItem as item, Menu as menu
 from PIL import Image, ImageDraw
+import os # For path joining
 
 # Assuming GVM and constants are accessible
 # from global_variables_manager import GlobalVariablesManager
 from constants import (
     # Import necessary constants like STATE keys for config, APP_NAME etc.
     APP_NAME, MODE_DICTATION, MODE_COMMAND, # Example constants
-    CONFIG_MODULES_PREFIX, STATE_APP_STATUS,
+    CONFIG_MODULES_PREFIX, STATE_APP_STATUS, CONFIG_GENERAL_PREFIX, # Added CONFIG_GENERAL_PREFIX
 )
 # Assuming i18n is set up and provides _
-from i18n import _, set_language, CURRENT_LANGUAGE # Import variable, not function
+from i18n import _, set_language, CURRENT_LANGUAGE, SUPPORTED_LANGUAGES # Import SUPPORTED_LANGUAGES
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ class SystrayUIManager:
         self.thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event() # Use threading event for pystray thread
         self._current_menu = None # Store the current menu object
+        self._initial_menu_built_event = asyncio.Event() # Event to signal initial menu is ready
 
     async def init(self) -> bool:
         """Initializes the Systray manager."""
@@ -53,18 +56,42 @@ class SystrayUIManager:
         """Runs the pystray icon loop. To be executed in a separate thread."""
         logger.debug("Systray UI pystray thread started.")
         try:
-            # Create placeholder image
-            image = create_image(64, 64, 'black', 'white') # Replace with actual icon later
+            # Load actual icon from assets folder in workspace root
+            # Get the workspace root directory (assuming the script is run from within the workspace)
+            # For robustness, this might need to be passed in or determined more reliably.
+            # Assuming current working directory is workspace root for simplicity here.
+            icon_path = os.path.join("assets", "microphone-icon.png")
+            try:
+                image = Image.open(icon_path)
+                logger.info(f"Successfully loaded icon from {icon_path}")
+            except FileNotFoundError:
+                logger.error(f"Icon file not found at {icon_path}. Using placeholder.")
+                image = create_image(64, 64, 'black', 'red') # Placeholder on error
+            except Exception as e:
+                logger.error(f"Error loading icon {icon_path}: {e}. Using placeholder.")
+                image = create_image(64, 64, 'black', 'red')
 
             # Build initial menu (requires async access to GVM, run via threadsafe)
+            # Clear the event before starting the build
+            self._initial_menu_built_event.clear()
             asyncio.run_coroutine_threadsafe(self._build_and_set_initial_menu(), self.main_loop)
             
-            # Wait briefly for initial menu build if needed
-            # This might require a threading.Event to signal completion from _build_and_set_initial_menu
-            time.sleep(0.5)
+            # Wait for the initial menu to be built
+            # This wait happens in the pystray thread, so it's okay to block here.
+            # However, the asyncio event must be set from the main_loop.
+            # We need a way for this thread to wait for an asyncio event set in another loop.
+            # A simple time.sleep might be replaced by a threading.Event if direct asyncio event wait is tricky across threads.
+            # For now, let's use a timeout on a loop.
+            wait_start_time = time.monotonic()
+            menu_wait_timeout = 5.0 # seconds
+            while not self._initial_menu_built_event.is_set():
+                if time.monotonic() - wait_start_time > menu_wait_timeout:
+                    logger.warning(f"Timeout waiting for initial menu build after {menu_wait_timeout}s.")
+                    break
+                time.sleep(0.1) # Poll the event state
 
             if self._current_menu is None:
-                 logger.warning("Systray menu not built before starting icon. Using default exit.")
+                 logger.warning("Systray menu not built before starting icon (or timed out). Using default exit menu.")
                  self._current_menu = menu(item(_('Exit'), self._on_exit_clicked))
 
             self.icon = pystray.Icon(APP_NAME, image, APP_NAME, self._current_menu)
@@ -78,12 +105,21 @@ class SystrayUIManager:
 
     async def _build_and_set_initial_menu(self):
          """Builds the menu asynchronously and sets it."""
-         self._current_menu = await self._build_menu_async()
-         logger.debug("Initial systray menu built.")
-         # If icon is already running (unlikely here, but good practice), update it
-         if self.icon and hasattr(self.icon, 'update_menu'):
-              self.icon.menu = self._current_menu
-              self.icon.update_menu()
+         try:
+            self._current_menu = await self._build_menu_async()
+            logger.debug("Initial systray menu built.")
+            # If icon is already running (unlikely here, but good practice), update it
+            if self.icon and hasattr(self.icon, 'update_menu'):
+                 self.icon.menu = self._current_menu
+                 self.icon.update_menu()
+         except Exception as e:
+            logger.error(f"Error building initial menu: {e}", exc_info=True)
+            # Ensure a default menu exists if build fails
+            if self._current_menu is None:
+                 self._current_menu = menu(item(_('Exit (Build Failed)'), self._on_exit_clicked))
+         finally:
+            # Signal that the menu build attempt is complete, regardless of success
+            self.main_loop.call_soon_threadsafe(self._initial_menu_built_event.set)
 
     async def _rebuild_menu_async(self):
          """Rebuilds the menu and updates the running icon."""
@@ -102,8 +138,8 @@ class SystrayUIManager:
         """Builds the pystray menu by fetching current state from GVM."""
         # Fetch necessary states from GVM asynchronously
         current_app_status = await self.gvm.get(STATE_APP_STATUS, "loading")
-        # Example: Get module enable states
         modules_config = await self.gvm.get(CONFIG_MODULES_PREFIX, {})
+        current_lang_code = await self.gvm.get(f"{CONFIG_GENERAL_PREFIX}.language", "en")
 
         menu_items = []
         
@@ -124,18 +160,35 @@ class SystrayUIManager:
             
             module_sub_items.append(item(
                 f"{module_name}", # Use translated name if available
-                lambda icon, item, key=module_key: self._toggle_module_callback(key), # Pass key
-                checked=lambda item, key=module_key: modules_config.get(key, False), # Check current state
+                functools.partial(self._toggle_module_callback, module_config_key=module_key), # Use partial
+                checked=lambda item, key=module_key: modules_config.get(key, False),
             ))
         
         if module_sub_items:
             menu_items.append(item(_("Modules"), menu(*module_sub_items)))
             menu_items.append(menu.SEPARATOR)
 
-        # --- Language Selection (Simplified Example) ---
-        # Needs more complex logic similar to old version if recent/full list is needed
-        # current_lang = await self.gvm.get("config.general.source_language", "en-US")
-        # menu_items.append(item(f"Lang: {current_lang}", None, enabled=False)) # Placeholder
+        # --- Language Selection ---
+        lang_sub_items = []
+        for lc in SUPPORTED_LANGUAGES:
+            lang_name = _(lc, default_text=lc) # Get translated lang name if available, else use code
+            
+            # Define a factory function for the callback to ensure lc is captured correctly
+            def make_callback(lang_code_to_set):
+                def callback(): # pystray expects a callable with no args for the action, or icon & item
+                    self._on_language_selected(lang_code_to_set)
+                return callback
+
+            lang_sub_items.append(item(
+                lang_name,
+                make_callback(lc),
+                checked=lambda menu_item_arg, lang_code_for_check=lc: lang_code_for_check == current_lang_code,
+                radio=True 
+            ))
+
+        if lang_sub_items:
+            menu_items.append(item(_("Language"), menu(*lang_sub_items)))
+            menu_items.append(menu.SEPARATOR)
 
         # --- Exit Item ---
         menu_items.append(item(_('Exit'), self._on_exit_clicked))
@@ -148,12 +201,36 @@ class SystrayUIManager:
         logger.info("Exit requested from systray.")
         # Request shutdown via GVM
         asyncio.run_coroutine_threadsafe(self.gvm.request_shutdown(), self.main_loop)
-        # Stop the pystray icon itself (might need to be called from its own thread)
         if self.icon:
-             # pystray stop needs to be called from a different thread than the one running it
-             # Usually called from a callback handler which runs in a separate thread.
-             # If called from GVM shutdown, ensure it's handled correctly.
              self.icon.stop()
+
+    def _on_language_selected(self, lang_code: str):
+        """Callback when a language is selected from the menu."""
+        logger.info(f"Language selection triggered for: {lang_code}")
+        asyncio.run_coroutine_threadsafe(
+            self._async_set_language(lang_code),
+            self.main_loop
+        )
+
+    async def _async_set_language(self, lang_code: str):
+        """Async task to set language in GVM and i18n, then rebuild menu."""
+        current_gvm_lang = await self.gvm.get(f"{CONFIG_GENERAL_PREFIX}.language", CURRENT_LANGUAGE)
+        if current_gvm_lang == lang_code:
+            logger.debug(f"Language {lang_code} is already set. No change needed.")
+            return
+
+        logger.info(f"Setting application language to {lang_code} via systray.")
+        await self.gvm.set(f"{CONFIG_GENERAL_PREFIX}.language", lang_code)
+        
+        # Call i18n.set_language in the main event loop thread
+        # This assumes i18n.set_language is thread-safe or benign if called this way.
+        # If i18n.set_language has significant blocking I/O, it should be made async or run in an executor.
+        self.main_loop.call_soon_threadsafe(set_language, lang_code)
+        
+        # It might take a moment for set_language to apply and GVM to notify watchers
+        # of the config change. A small delay before rebuild, or rely on GVM notification.
+        await asyncio.sleep(0.1) # Small delay to allow GVM update to propagate if needed
+        await self._rebuild_menu_async()
 
     def _toggle_module_callback(self, module_config_key: str):
         """Handles toggling a module's enabled state via GVM."""

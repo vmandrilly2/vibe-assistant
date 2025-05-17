@@ -91,16 +91,32 @@ class SessionMonitorUI:
     async def _async_update_sessions(self):
         """Runs in asyncio loop to get session data from GVM and schedule UI updates."""
         try:
-            all_sessions_data = await self.gvm.get("sessions", {}) # Get the whole sessions dict
-            if not isinstance(all_sessions_data, dict):
+            all_sessions_data_from_gvm = await self.gvm.get("sessions", {}) # Get the whole sessions dict
+            if not isinstance(all_sessions_data_from_gvm, dict):
                  logger.warning("GVM state for 'sessions' is not a dictionary.")
-                 all_sessions_data = {}
-                 
-            # Schedule UI update in Tkinter thread, passing the data
+                 all_sessions_data_from_gvm = {}
+            
+            # Create a new dictionary to hold augmented session data
+            augmented_sessions_data = {}
+            for session_id, session_data_val in all_sessions_data_from_gvm.items():
+                if not isinstance(session_data_val, dict):
+                    logger.warning(f"Session data for {session_id} is not a dict, skipping.")
+                    continue
+                
+                new_session_data = session_data_val.copy() # Start with a copy
+                
+                # Fetch the status separately as STTManager stores it under a different key pattern
+                status_key = STATE_STT_SESSION_STATUS_TEMPLATE.format(session_id=session_id)
+                status_val = await self.gvm.get(status_key, "unknown")
+                new_session_data["status"] = status_val # Add it to the data for the UI
+                
+                augmented_sessions_data[session_id] = new_session_data
+
+            # Schedule UI update in Tkinter thread, passing the augmented data
             if self.root and self.main_frame:
                  # Pass a copy to avoid thread issues if GVM state changes during processing
-                 data_copy = dict(all_sessions_data) 
-                 try: self.root.after(0, lambda d=data_copy: self._update_ui_widgets(d))
+                 # data_copy = dict(augmented_sessions_data) # Already a new dict
+                 try: self.root.after(0, lambda d=augmented_sessions_data: self._update_ui_widgets(d))
                  except tk.TclError: pass # Window might be closing
 
         except Exception as e:

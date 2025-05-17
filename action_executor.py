@@ -177,8 +177,8 @@ class ActionExecutor:
     async def run_loop(self):
         """Monitors typing and action queues in GVM and executes tasks."""
         typing_queue_key = STATE_OUTPUT_TYPING_QUEUE
-        action_queue_key = STATE_OUTPUT_ACTION_QUEUE # Assuming this is the unified queue now
-        
+        action_queue_key = STATE_OUTPUT_ACTION_QUEUE
+
         logger.info(f"ActionExecutor run_loop starting. Watching keys: '{typing_queue_key}', '{action_queue_key}'")
         self._stop_event.clear()
 
@@ -187,8 +187,6 @@ class ActionExecutor:
         await self.gvm.set(action_queue_key, await self.gvm.get(action_queue_key, []))
 
         while not self._stop_event.is_set():
-            typing_queue_task = None
-            action_queue_task = None
             try:
                 # Check queues *before* waiting to process any backlog
                 typing_queue = await self.gvm.get(typing_queue_key, [])
@@ -299,9 +297,11 @@ class ActionExecutor:
                 logger.error(f"Error in ActionExecutor run_loop: {e}", exc_info=True)
                 await asyncio.sleep(1)
             finally:
-                 # Ensure tasks are cancelled if loop exits unexpectedly
-                 if typing_queue_task and not typing_queue_task.done(): typing_queue_task.cancel()
-                 if action_queue_task and not action_queue_task.done(): action_queue_task.cancel()
+                # Ensure any created tasks within the loop (like wait_typing_queue, wait_action_queue)
+                # are handled by the `pending` cancellation logic within the try block if an error occurs before that.
+                # The original pending task cancellation loop after asyncio.wait handles the normal case.
+                # No specific variables from the loop's direct scope (like typing_queue_task) need cleanup here.
+                pass
 
         logger.info("ActionExecutor run_loop finished.")
 
@@ -311,6 +311,6 @@ class ActionExecutor:
         self._stop_event.set()
         if self._active_task and not self._active_task.done():
              self._active_task.cancel()
-             try: await self._active_task
-             except asyncio.CancelledError: pass
-        logger.info("ActionExecutor cleanup finished.") 
+        #      try: await self._active_task
+        #      except asyncio.CancelledError: pass
+        # logger.info("ActionExecutor cleanup finished.") 

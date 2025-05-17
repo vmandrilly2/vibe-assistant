@@ -28,5 +28,14 @@
         "tooltip_alpha": 0.85,
         "tooltip_bg": "lightyellow",
         "tooltip_fg": "black"
+    },
+    "deepgram": {
+        "model": "nova-2",
+        "punctuate": true,
+        "utterance_end_ms": 1000,
+        "vad_events": true,
+        "smart_format": true,
+        "numerals": true,
+        "endpointing": 300
     }
 } 

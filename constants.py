@@ -12,6 +12,7 @@ VERSION = "2.0.0"
 # General State
 STATE_APP_STATUS = "app.status" # e.g., "initializing", "running", "stopping"
 STATE_ERROR_MESSAGE = "app.error_message"
+STATE_APP_CURRENT_STT_SESSION_ID = "app.current_stt_session_id" # Added for STTManager
 
 # Application Modes
 MODE_DICTATION = "Dictation"
@@ -20,6 +21,7 @@ MODE_COMMAND = "Command"
 # Config State (prefix defined in GVM, e.g., "config.")
 CONFIG_GENERAL_PREFIX = "config.general"
 CONFIG_MODULES_PREFIX = "config.modules"
+CONFIG_DEEPGRAM_PREFIX = "config.deepgram" # Added for Deepgram settings
 CONFIG_TRANSLATION_ENABLED = "config.translation.enabled"
 # ... other config keys ...
 

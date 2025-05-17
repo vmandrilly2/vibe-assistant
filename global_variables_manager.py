@@ -20,6 +20,12 @@ from systray_ui import SystrayUIManager
 # API Clients
 from deepgram import DeepgramClient, DeepgramClientOptions # Import Deepgram client
 from openai import AsyncOpenAI # Import OpenAI client
+from config_manager import ConfigManager
+# Import module types for isinstance checks if necessary, or use Any
+from constants import (
+    CONFIG_MODULES_PREFIX, # Used for identifying module enablement config
+    STATE_APP_STATUS # Added import
+)
 # -------------------------
 
 logger = logging.getLogger(__name__)
@@ -346,7 +352,8 @@ class GlobalVariablesManager:
         """Stops a module's run_loop and calls its cleanup."""
          # Needs lock acquired before calling
         logger.info(f"Stopping module: {module_name}")
-        task = self._module_tasks.pop(module_name, None)
+        task_key = f"module_{module_name}"
+        task = self._module_tasks.pop(task_key, None)
         if task and not task.done():
             task.cancel()
             try:
@@ -374,8 +381,9 @@ class GlobalVariablesManager:
                 logger.error(f"Module '{module_name}' task exited with exception: {exc}", exc_info=exc)
                 # Optionally try restarting the module or set an error state
                 # Ensure the task is removed from _module_tasks if it wasn't already
-                if module_name in self._module_tasks and self._module_tasks[module_name] is task:
-                    del self._module_tasks[module_name]
+                task_key_for_check = f"module_{module_name}" # Reconstruct key for checking
+                if task_key_for_check in self._module_tasks and self._module_tasks[task_key_for_check] is task:
+                    del self._module_tasks[task_key_for_check]
             elif task.cancelled():
                 logger.info(f"Module '{module_name}' task was cancelled.")
             else:
@@ -414,6 +422,7 @@ class GlobalVariablesManager:
         """Starts the GVM, including module management and reactive logic."""
         logger.info("Starting GlobalVariablesManager...")
         await self.load_initial_config()
+        await self.set(STATE_APP_STATUS, "running") # Set app status to running
         
         # --- Restore original task creation and wait --- 
         logger.debug("Creating GVM background tasks...")

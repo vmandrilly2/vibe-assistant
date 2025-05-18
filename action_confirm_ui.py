@@ -105,6 +105,7 @@ class ActionConfirmManager:
         try:
             while not self.command_queue.empty():
                 command, data = self.command_queue.get_nowait()
+                logging.debug(f"ActionConfirmManager: Received command: {command}, data: {data}")
 
                 if command == "show":
                     action = data.get("action")
@@ -159,6 +160,8 @@ class ActionConfirmManager:
                 self.confirmation_sent = False
                 self.show_time = 0
 
+            logging.debug(f"ActionConfirmManager: State change: {self.current_state} -> {target_state}, pending_action: {self.pending_action}, confirmation_sent: {self.confirmation_sent}")
+
         is_hovering = False
         last_confirmation_state = self.confirmation_sent
         if self.current_state == "visible" and self.pending_action and self.root and self.canvas:
@@ -211,6 +214,16 @@ class ActionConfirmManager:
              try: self.root.after(50, self._check_queue)
              except tk.TclError: logging.warning("ActionConfirm root destroyed before rescheduling.")
              except Exception as e: logging.error(f"Error rescheduling ActionConfirm check: {e}")
+
+        if state_actually_changed or needs_redraw or action_changed or hover_state_changed:
+            logging.debug(f"ActionConfirmManager: Redraw/hide. State: {self.current_state}, pending_action: {self.pending_action}, confirmation_sent: {self.confirmation_sent}")
+            if position_needs_update and self.initial_pos:
+                self._position_window(self.initial_pos)
+            self._draw_icon(self.confirmation_sent)
+            if self.current_state == "hidden":
+                if self.root.winfo_viewable(): self.root.withdraw()
+            else:
+                if not self.root.winfo_viewable(): self.root.deiconify()
 
     def _cleanup_tk(self):
         logging.debug("Executing ActionConfirm _cleanup_tk.")

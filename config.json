@@ -35,7 +35,7 @@
     "status_indicator_enabled": true,
     "action_confirm_enabled": true,
     "translation_enabled": true,
-    "command_interpretation_enabled": false,
+    "command_interpretation_enabled": true,
     "audio_buffer_enabled": true
   }
 }

@@ -1,10 +1,8 @@
 import tkinter as tk
-import tkinter.font as tkFont
 import threading
 import queue
 import logging
 import time # Keep time for logging/debugging if needed
-
 
 class ActionConfirmManager:
     """Shows a small UI element available for a short period of time for confirmation by hovering it. (e.g., "[Entrée]"), to perform an action such as typing or a executing acommand."""

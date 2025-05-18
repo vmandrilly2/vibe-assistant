@@ -1,6 +1,5 @@
 import logging
 import queue
-import time
 import pyautogui
 from pynput.keyboard import Key # For action execution check later
 

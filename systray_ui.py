@@ -3,9 +3,6 @@ from pystray import MenuItem as item, Menu as menu
 from PIL import Image, ImageDraw
 import threading
 import logging
-import json
-import os
-import sys
 from functools import partial # Import partial for cleaner callbacks
 
 # --- NEW: Import ConfigManager ---
@@ -30,8 +27,7 @@ except ImportError:
 try:
     from constants import (
         ALL_LANGUAGES, NATIVE_LANGUAGE_NAMES, ALL_LANGUAGES_TARGET,
-        MODE_DICTATION, MODE_COMMAND, AVAILABLE_MODES,
-        PYNPUT_BUTTON_MAP, PYNPUT_MODIFIER_MAP
+        MODE_DICTATION, MODE_COMMAND, AVAILABLE_MODES
     )
 except ImportError:
     logging.error("Systray failed to import constants. Using fallback definitions.")
@@ -42,9 +38,6 @@ except ImportError:
     MODE_DICTATION = "Dictation"
     MODE_COMMAND = "Command"
     AVAILABLE_MODES = {MODE_DICTATION: "Dictation Mode", MODE_COMMAND: "Command Mode"}
-    PYNPUT_BUTTON_MAP = {} # Simplified fallback
-    PYNPUT_MODIFIER_MAP = {} # Simplified fallback
-
 
 # --- Global State for UI ---
 config_reload_event = threading.Event() # Used to signal main app to reload

@@ -5,13 +5,10 @@ import logging
 import time
 from dotenv import load_dotenv
 import queue # Import queue for thread-safe communication
-import tkinter as tk # Import tkinter for the tooltip GUI
+import tkinter as tk # noqa: F401  # Import tkinter for the tooltip GUI
 import pyautogui # Import pyautogui to get mouse position
-import json # Import json module
 import sys # Import sys for exiting on critical config error
-import numpy as np # Import numpy
-import pyaudio     # Import PyAudio
-from openai import OpenAI, AsyncOpenAI # Use AsyncOpenAI for non-blocking calls
+from openai import AsyncOpenAI # Use AsyncOpenAI for non-blocking calls
 
 # --- NEW: Import ConfigManager ---
 from config_manager import ConfigManager
@@ -20,7 +17,7 @@ from config_manager import ConfigManager
 from action_confirm_ui import ActionConfirmManager
 import systray_ui # Import the run function and the reload event
 from background_audio_recorder import BackgroundAudioRecorder
-from mic_ui_manager import MicUIManager, DEFAULT_MODES # Import DEFAULT_MODES
+from mic_ui_manager import MicUIManager
 from tooltip_manager import TooltipManager
 # --- NEW: Import Session Monitor --- >
 from session_monitor_ui import SessionMonitor
@@ -65,9 +62,9 @@ from constants import (
 from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
-    LiveTranscriptionEvents,
+    # LiveTranscriptionEvents,
     LiveOptions,
-    Microphone, # Import Microphone class
+    # Microphone, # Import Microphone class
 )
 
 # --- NEW: State Variables for Dictation Flow ---
@@ -321,7 +318,6 @@ async def translate_and_type(text_to_translate, source_lang_code, target_lang_co
     target_lang_name = target_lang_code
 
     logging.info(f"Requesting translation from '{source_lang_name}' to '{target_lang_name}' for: '{text_to_translate}' using model '{openai_model_name}'")
-    kb_sim.simulate_typing("-> ") # Add space after arrow
 
     try:
         prompt = f"Translate the following text accurately from {source_lang_name} to {target_lang_name}. Output only the translated text:\n\n{text_to_translate}"
@@ -341,15 +337,12 @@ async def translate_and_type(text_to_translate, source_lang_code, target_lang_co
             return
 
         logging.info(f"Translation received: '{translated_text}'")
-        if translated_text:
-            kb_sim.simulate_typing(translated_text + " ")
-        else:
-            logging.warning("OpenAI returned an empty translation.")
-            kb_sim.simulate_typing("[Translation Empty] ")
+
     except Exception as e:
         logging.error(f"Error during OpenAI translation request: {e}", exc_info=True)
         kb_sim.simulate_typing(f"[Translation Error: {type(e).__name__}] ")
 
+    return translated_text
 
 # --- Pynput Listener Callbacks ---
 # Keep global config_manager accessible to callbacks
@@ -642,58 +635,65 @@ async def _process_transcript_data(session_id: any, session_data: dict, transcri
                     activation_id=session_id
                 )
                 # Update the session's history IN PLACE (since history is a list)
-                # This relies on handle_final potentially modifying the list or returning a new one
-                # Let's assume handle_final returns the potentially modified list
                 session_data['history'][:] = new_history # Replace contents
 
                 # Queue typing job
                 if text_typed:
                     try:
-                        await typing_queue.put(text_typed)
-                        logging.debug(f"Queued text for typing from session {session_id}: '{text_typed}'")
+                        target_lang = config_manager.get("general.target_language")
+                        if target_lang and config_manager.get("modules.translation_enabled", True):
+                            source_lang = config_manager.get("general.selected_language")
+                            translated_text = await translate_and_type(
+                                text_to_translate=text_typed,
+                                source_lang_code=source_lang,
+                                target_lang_code=target_lang,
+                                config_mgr=config_manager,
+                                kb_sim=keyboard_sim,
+                                openai_mgr=openai_manager
+                            )
+                            if translated_text:
+                                x, y = pyautogui.position()
+                                # Only show the original text in the tooltip
+                                tooltip_queue.put_nowait(("update", (text_typed.strip(), x, y, session_id)))
+                                tooltip_queue.put_nowait(("show", session_id))
+                                # Only type the translation once
+                                await typing_queue.put(translated_text + " ")
+                        else:
+                            # If no translation, show original in tooltip BEFORE typing
+                            x, y = pyautogui.position()
+                            final_text = text_typed.strip()
+                            logging.debug(f"Updating tooltip with final text for session {session_id}: {final_text}")
+                            tooltip_queue.put_nowait(("update", (final_text, x, y, session_id)))
+                            tooltip_queue.put_nowait(("show", session_id))
+                            # Type original AFTER showing tooltip
+                            await typing_queue.put(text_typed)
                     except Exception as q_err:
                         logging.error(f"Error queuing text '{text_typed}' for typing: {q_err}")
 
                 # Handle detected action (pending action state is still global - needs review)
                 if detected_action:
-                    # --- MODIFIED: Only set global pending action if none is already pending ---
                     if g_pending_action is None:
                         logging.info(f"DictationProcessor detected action for {session_id}: '{detected_action}'. Setting as pending.")
                         g_pending_action = detected_action
                         g_action_confirmed = False
                     else:
                         logging.warning(f"DictationProcessor detected action '{detected_action}' for session {session_id}, but another action '{g_pending_action}' is already pending. Ignoring new action.")
-                    # --- END MODIFIED ---
 
-                # Hide tooltip after final dictation segment
-                # Use the passed tooltip_enabled flag
-                if tooltip_mgr and tooltip_enabled and is_final_dg: # Only hide on actual DG final?
-                    try:
-                        # --- NEW: Mark final transcript as received --- >
-                        session_data['final_transcript_received'] = True
-                        # --- END NEW ---
-                        # --- NEW: Record final result time on actual Deepgram final --- >
-                        if 'final_result_time' not in session_data or session_data['final_result_time'] is None:
-                           session_data['final_result_time'] = time.monotonic()
-                           logging.debug(f"Recorded final result time (Deepgram Final) {session_data['final_result_time']:.3f} for session {session_id}")
-                        # --- END NEW ---
-                        tooltip_queue.put_nowait(("hide", session_id))
-                    except queue.Full:
-                        logging.warning(f"Tooltip queue full sending hide on final for ID {session_id}.")
-                    except Exception as e:
-                        logging.error(f"Error sending hide on final to tooltip queue: {e}")
+                # --- NEW: Mark final transcript as received --- >
+                session_data['final_transcript_received'] = True
+                # --- NEW: Record final result time on actual Deepgram final --- >
+                if 'final_result_time' not in session_data or session_data['final_result_time'] is None:
+                   session_data['final_result_time'] = time.monotonic()
+                   logging.debug(f"Recorded final result time (Deepgram Final) {session_data['final_result_time']:.3f} for session {session_id}")
+                # --- END NEW ---
 
                 # --- NEW: Signal processing finished on final DG message --- >
                 if is_final_dg:
                     finish_event = session_data.get('processing_finished_event')
-                    # --- NEW: Set flag along with event --- >
                     session_data['final_processing_complete'] = True
-                    # --- END NEW ---
                     if finish_event and not finish_event.is_set():
                         finish_event.set()
                         logging.debug(f"Signaled processing_finished_event for session {session_id}")
-                # --- END NEW ---
-
             except Exception as e:
                 logging.error(f"Error calling handle_final for session {session_id}: {e}", exc_info=True)
 
@@ -1849,19 +1849,6 @@ async def main():
                 except Exception as e:
                     logging.error(f"Error signaling stop for {type(manager).__name__}: {e}")
 
-            # 3. Stop Input Listeners (Redundant with EARLY stop? Keep for now, ensure idempotency or remove EARLY)
-            # listeners_to_stop = [] # Defined in EARLY block
-            # if 'mouse_listener' in locals() and mouse_listener.is_alive(): listeners_to_stop.append(mouse_listener)
-            # if 'keyboard_listener' in locals() and keyboard_listener.is_alive(): listeners_to_stop.append(keyboard_listener)
-
-            # logging.info("Signaling input listeners to stop (second time?)...") # Adjust log message if needed
-            # listener_stop_start_time = time.monotonic() # Track listener stop time
-            # for listener in listeners_to_stop:
-            #     try:
-            #         listener.stop()
-            #     except Exception as e:
-            #         logging.error(f"Error signaling stop for listener {listener}: {e}")
-
             # 4. Explicitly Cancel Remaining Asyncio Tasks (Replaces Stop/Close)
             # Moved BEFORE waiting for threads/listeners to potentially free up loop
             logging.info("Cancelling any remaining asyncio tasks...")
@@ -1956,9 +1943,6 @@ systray_ui.exit_app_event = threading.Event() # Create event in main module
 if 'config_manager' not in globals():
      config_manager = ConfigManager() # Ensure instance exists
 
-# --- Copy Preferred Languages (REMOVED - Defined in constants.py) ---
-# --- Define Available Modes (REMOVED - Defined in constants.py) ---
-
 if __name__ == "__main__":
     # API Key check moved earlier
     try:
@@ -1976,6 +1960,3 @@ if __name__ == "__main__":
          logging.critical("PyAutoGUI FAILSAFE triggered! Exiting.")
     except Exception as e:
         logging.error(f"An unexpected error occurred in main run: {e}", exc_info=True)
-
-# --- NEW: Typing Queue Processor Task --- >
-

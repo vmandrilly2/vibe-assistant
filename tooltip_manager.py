@@ -2,7 +2,6 @@ import tkinter as tk
 import threading
 import queue
 import logging
-import pyautogui # Needed for FailSafeException
 
 # --- Global Configurable Variables (Copied from vibe_app.py - TODO: Refactor to avoid duplication) ---
 # These should ideally be passed during init or read from a shared config object/module
@@ -237,15 +236,6 @@ class TooltipManager:
                 self.root.update_idletasks()
                 new_x = x + offset_x
                 new_y = y + offset_y
-                # Add boundary checks if necessary (optional)
-                # screen_width = self.root.winfo_screenwidth()
-                # screen_height = self.root.winfo_screenheight()
-                # tooltip_width = self.root.winfo_width()
-                # tooltip_height = self.root.winfo_height()
-                # if new_x + tooltip_width > screen_width: new_x = screen_width - tooltip_width
-                # if new_y + tooltip_height > screen_height: new_y = screen_height - tooltip_height
-                # if new_x < 0: new_x = 0
-                # if new_y < 0: new_y = 0
                 self.root.geometry(f"+{new_x}+{new_y}")
             except tk.TclError as e:
                 logging.warning(f"Failed to update tooltip position (window likely closed): {e}")

@@ -1,6 +1,6 @@
 import logging
 from openai import AsyncOpenAI
-import json # For potential error details
+import json
 
 class OpenAIManager:
     """Manages interactions with the OpenAI API."""

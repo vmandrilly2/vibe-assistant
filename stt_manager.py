@@ -5,40 +5,10 @@ import time
 import json
 from deepgram import (
     DeepgramClient,
-    DeepgramClientOptions,
     LiveTranscriptionEvents,
     LiveOptions,
     Microphone,
-    # StreamSources, # Removed
-    # --- MODIFIED: Import response types from specific client path ---
-    # LiveTranscriptionResponse, # Added for type hinting
-    # MetadataResponse, # Added for type hinting
-    # SpeechStartedResponse, # Added for type hinting
-    # UtteranceEndResponse, # Added for type hinting
-    # ErrorResponse, # Added for type hinting
-    # CloseResponse # Added for type hinting
-    # Attempting specific imports based on likely structure
 )
-# --- MODIFIED: Import response types directly from v1 package as indicated by its __init__.py ---
-# from deepgram.clients.live.v1.async_client import (
-#    LiveTranscriptionResponse,
-#    MetadataResponse,
-#    SpeechStartedResponse,
-#    UtteranceEndResponse,
-#    ErrorResponse,
-#    CloseResponse
-# )
-# --- REMOVED Imports for Response Types (causing errors) ---
-# from deepgram.clients.live.v1.client import (
-#     LiveTranscriptionResponse,
-#     MetadataResponse,
-#     SpeechStartedResponse,
-#     UtteranceEndResponse,
-#     ErrorResponse,
-#     CloseResponse,
-#     OpenResponse # Also import OpenResponse used in _on_open type hint
-# )
-# --- END REMOVED ---
 from background_audio_recorder import BackgroundAudioRecorder
 
 # --- Constants (Consider moving to a shared config or passing via options) --- >
@@ -522,27 +492,11 @@ class STTConnectionHandler:
             # Don't send error status here, let the connection loop handle retries/final error
             return False
 
-# --- Remove the old stt_manager class definition ---
-# class stt_manager: ... (Delete or comment out this old class)
-
 # --- Example Usage (for testing the new class directly, needs adjustment) ---
 async def example_main():
      # Needs full setup with queues, recorder, DG client etc.
      logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(filename)s:%(lineno)d - %(message)s')
      print("Testing STTConnectionHandler...")
-     # Replace with actual initialization
-     # dg_client = DeepgramClient(...)
-     # status_q = queue.Queue()
-     # transcript_q = queue.Queue()
-     # recorder = BackgroundAudioRecorder(...)
-     # recorder.start()
-     # options = LiveOptions(...)
-
-     # handler1 = STTConnectionHandler("test-1", dg_client, status_q, transcript_q, recorder, options)
-     # await handler1.start_listening()
-     # await asyncio.sleep(10)
-     # await handler1.stop_listening()
-     # recorder.stop()
      pass
 
 if __name__ == '__main__':

@@ -23,6 +23,7 @@ DICTATION_REPLACEMENTS_FR = {
     "deux points": ":", # Adjusted from "2 points" for likely spoken form
     "2 points": ":",  # Added for Deepgram output with numerals=True
     "point d'interrogation": "?",
+    "Point d'interrogation,": "?",
     "point d'exclamation": "!",
     # Symbols
     "arobase": "@",

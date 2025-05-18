@@ -15,6 +15,6 @@ What this really is: a Speech to text assistant (not just for coding)
 
 I didn't write the code, the AIs did, I just provided instructions, tested, and kept getting frustrated at the AI stupid mistakes next to the genius superhuman code writing abilities.
 
-Just do whatever you want with the code, just don't be evil. Remember to give a little bit to others some day, and remember to appreciate other beings have been giving us so much, which is the reason this app can work in the first place.
+**Do whatever you want with the code**, just **don't be evil**. Remember to give a little bit to others some day, and remember to appreciate other beings have been giving us so much, which is the reason this app can work in the first place.
 
 Hopefully some capable people will take in charge to make this project theirs and improve the tool, there is so much possibilities about what it could do! If you do, and if is open (like in Open Source, not like in OpenAI), then let me know, so I can benefit in my day to day use of the computer.

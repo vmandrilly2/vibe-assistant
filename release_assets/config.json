@@ -1,0 +1,42 @@
+{
+  "general": {
+    "min_duration_sec": 0.5,
+    "selected_language": "fr-FR",
+    "target_language": "en-US",
+    "openai_model": "gpt-4.1-nano",
+    "active_mode": "Dictation",
+    "recent_source_languages": [
+      "fr-FR",
+      "en-US",
+      "zh"
+    ],
+    "recent_target_languages": [
+      "en-US",
+      null,
+      "zh",
+      "ja-JP",
+      "ko-KR"
+    ]
+  },
+  "triggers": {
+    "dictation_button": "middle",
+    "command_button": null,
+    "command_modifier": null
+  },
+  "tooltip": {
+    "alpha": 0.85,
+    "bg_color": "lightyellow",
+    "fg_color": "black",
+    "font_family": "Arial",
+    "font_size": 10
+  },
+  "modules": {
+    "tooltip_enabled": true,
+    "status_indicator_enabled": true,
+    "action_confirm_enabled": true,
+    "translation_enabled": true,
+    "command_interpretation_enabled": false,
+    "audio_buffer_enabled": true,
+    "session_monitor_enabled": false
+  }
+}

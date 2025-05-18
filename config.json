@@ -35,7 +35,8 @@
     "status_indicator_enabled": true,
     "action_confirm_enabled": true,
     "translation_enabled": true,
-    "command_interpretation_enabled": true,
-    "audio_buffer_enabled": true
+    "command_interpretation_enabled": false,
+    "audio_buffer_enabled": true,
+    "session_monitor_enabled": false
   }
 }

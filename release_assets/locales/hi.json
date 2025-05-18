@@ -1,0 +1,52 @@
+{
+  "language_names": {
+    "en-US": "अंग्रे़ी (यूएस)",
+    "en-GB": "अंग्रे़ी (यूके)",
+    "fr-FR": "फ़्रेंच",
+    "es-ES": "स्पेनिश",
+    "de-DE": "जर्मन",
+    "it-IT": "इटैलियन",
+    "pt-PT": "पुर्तगाली",
+    "pt-BR": "पुर्तगाली (ब्राज़ील)",
+    "ru-RU": "रूसी",
+    "zh": "चीनी (मंदारिन)",
+    "ko-KR": "कोरियाई",
+    "ja-JP": "जापानी",
+    "hi-IN": "हिन्दी",
+    "ar": "अरबी",
+    "nl-NL": "डच",
+    "none": "कोई नहीं (केवल श्रुतलेख)"
+  },
+  "mode_names": {
+    "Dictation": "श्रुतलेख मोड",
+    "Keyboard": "कीबोर्ड मोड"
+  },
+  "systray": {
+    "title": "वाइब सहायक",
+    "menu": {
+      "mode": "मोड",
+      "source_language": "स्रोत भाषा",
+      "target_language": "लक्ष्य भाषा",
+      "customization": "अनुकूलन",
+      "triggers": "ट्रिगर",
+      "tooltip": "टूलटिप",
+      "min_duration": "न्यूनतम अवधि (सेकंड): {value}",
+      "translation_model": "अनुवाद मॉडल: {value}",
+      "dictation_button": "श्रुतलेख बटन",
+      "command_button": "कमांड बटन",
+      "command_modifier": "कमांड संशोधक",
+      "tooltip_transparency": "पारदर्शिता: {value}",
+      "tooltip_background": "पृष्ठभूमि: {value}",
+      "tooltip_text_color": "पाठ रंग: {value}",
+      "tooltip_font": "फ़ॉन्ट: {value}",
+      "tooltip_font_size": "फ़ॉन्ट आकार: {value}",
+      "other_languages": "अन्य भाषाएँ",
+      "no_other_languages": "कोई अन्य भाषा उपलब्ध नहीं है",
+      "reload_config": "कॉन्फ़िगरेशन पुनः लोड करें",
+      "exit": "बाहर निकलें"
+    }
+  },
+  "mic_ui_manager": {
+      "none_target": "कोई नहीं"
+  }
+} 

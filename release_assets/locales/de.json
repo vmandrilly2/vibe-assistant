@@ -1,0 +1,52 @@
+{
+  "language_names": {
+    "en-US": "Englisch (US)",
+    "en-GB": "Englisch (UK)",
+    "fr-FR": "Französisch",
+    "es-ES": "Spanisch",
+    "de-DE": "Deutsch",
+    "it-IT": "Italienisch",
+    "pt-PT": "Portugiesisch",
+    "pt-BR": "Portugiesisch (Brasilien)",
+    "ru-RU": "Russisch",
+    "zh": "Chinesisch (Mandarin)",
+    "ko-KR": "Koreanisch",
+    "ja-JP": "Japanisch",
+    "hi-IN": "Hindi",
+    "ar": "Arabisch",
+    "nl-NL": "Niederländisch",
+    "none": "Keine (Nur Diktat)"
+  },
+  "mode_names": {
+    "Dictation": "Diktiermodus",
+    "Keyboard": "Tastaturmodus"
+  },
+  "systray": {
+    "title": "Vibe Assistent",
+    "menu": {
+      "mode": "Modus",
+      "source_language": "Quellsprache",
+      "target_language": "Zielsprache",
+      "customization": "Anpassung",
+      "triggers": "Auslöser",
+      "tooltip": "Tooltip",
+      "min_duration": "Min. Dauer (s): {value}",
+      "translation_model": "Übersetzungsmodell: {value}",
+      "dictation_button": "Diktier-Taste",
+      "command_button": "Befehlstaste",
+      "command_modifier": "Befehlsmodifikator",
+      "tooltip_transparency": "Transparenz: {value}",
+      "tooltip_background": "Hintergrund: {value}",
+      "tooltip_text_color": "Textfarbe: {value}",
+      "tooltip_font": "Schriftart: {value}",
+      "tooltip_font_size": "Schriftgröße: {value}",
+      "other_languages": "Andere Sprachen",
+      "no_other_languages": "Keine anderen Sprachen verfügbar",
+      "reload_config": "Konfig neu laden",
+      "exit": "Beenden"
+    }
+  },
+  "mic_ui_manager": {
+      "none_target": "Keine"
+  }
+} 

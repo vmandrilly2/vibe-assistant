@@ -1,0 +1,52 @@
+{
+  "language_names": {
+    "en-US": "영어 (미국)",
+    "en-GB": "영어 (영국)",
+    "fr-FR": "프랑스어",
+    "es-ES": "스페인어",
+    "de-DE": "독일어",
+    "it-IT": "이탈리아어",
+    "pt-PT": "포르투갈어",
+    "pt-BR": "포르투갈어 (브라질)",
+    "ru-RU": "러시아어",
+    "zh": "중국어 (북경어)",
+    "ko-KR": "한국어",
+    "ja-JP": "일본어",
+    "hi-IN": "힌디어",
+    "ar": "아랍어",
+    "nl-NL": "네덜란드어",
+    "none": "없음 (받아쓰기 전용)"
+  },
+  "mode_names": {
+    "Dictation": "받아쓰기 모드",
+    "Keyboard": "키보드 모드"
+  },
+  "systray": {
+    "title": "Vibe 어시스턴트",
+    "menu": {
+      "mode": "모드",
+      "source_language": "소스 언어",
+      "target_language": "대상 언어",
+      "customization": "사용자 정의",
+      "triggers": "트리거",
+      "tooltip": "툴팁",
+      "min_duration": "최소 지속 시간 (초): {value}",
+      "translation_model": "번역 모델: {value}",
+      "dictation_button": "받아쓰기 버튼",
+      "command_button": "명령 버튼",
+      "command_modifier": "명령 수정자",
+      "tooltip_transparency": "투명도: {value}",
+      "tooltip_background": "배경: {value}",
+      "tooltip_text_color": "텍스트 색상: {value}",
+      "tooltip_font": "글꼴: {value}",
+      "tooltip_font_size": "글꼴 크기: {value}",
+      "other_languages": "다른 언어",
+      "no_other_languages": "사용 가능한 다른 언어 없음",
+      "reload_config": "구성 다시 로드",
+      "exit": "종료"
+    }
+  },
+  "mic_ui_manager": {
+      "none_target": "없음"
+  }
+} 

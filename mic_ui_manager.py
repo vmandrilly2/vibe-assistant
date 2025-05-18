@@ -4,8 +4,8 @@ import threading
 import queue
 import logging
 from functools import partial # Import partial for callbacks
-import time # Need time for precise timestamps
-import i18n # Import the module
+# import time # Need time for precise timestamps
+# import i18n # Import the module
 from i18n import _ # Import the get_translation alias
 
 # --- Constants Import --- (Assuming constants.py exists)
@@ -321,9 +321,13 @@ class MicUIManager:
                 command, data = self.queue.get_nowait()
                 if command == "volume":
                     new_volume = data
-                    if abs(new_volume - self.current_volume) > 0.02:
-                        self.current_volume = new_volume
-                        if self.current_state == "active":
+                    if self.current_state == "active":
+                        # Calculate the new bar height in pixels
+                        body_h = self.icon_height * 0.6  # or however it's calculated in _draw_icon
+                        old_bar_height = int(body_h * self.current_volume)
+                        new_bar_height = int(body_h * new_volume)
+                        if old_bar_height != new_bar_height:
+                            self.current_volume = new_volume
                             needs_redraw = True
                 elif command == "state":
                     target_state = data.get("state", "hidden")

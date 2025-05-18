@@ -120,14 +120,6 @@ else:
     logging.info("OpenAI client not initialized as Translation module is disabled in config.")
 
 # --- Logging Setup ---
-LOG_DIR = "logs" # Define log directory
-# Ensure logs directory exists
-if not os.path.exists(LOG_DIR):
-    try:
-        os.makedirs(LOG_DIR)
-    except OSError as e:
-        print(f"Error creating log directory {LOG_DIR}: {e}")
-
 # Include milliseconds in timestamp
 log_formatter = logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s: %(message)s', datefmt='%H:%M:%S')
 log_level = logging.DEBUG
@@ -1037,10 +1029,13 @@ async def main():
         logging.info("Background Audio Recorder désactivé par la configuration.")
 
     # --- NEW: Start Session Monitor --- >
-    session_monitor = SessionMonitor(monitor_queue, MAX_CONCURRENT_SESSIONS)
-    session_monitor.start()
-    logging.info("Session Monitor started.")
-    # --- END NEW ---
+    session_monitor_enabled = config_manager.get("modules.session_monitor_enabled", True)
+    if session_monitor_enabled:
+        session_monitor = SessionMonitor(monitor_queue, MAX_CONCURRENT_SESSIONS)
+        session_monitor.start()
+        logging.info("Session Monitor started.")
+    else:
+        logging.info("Session Monitor disabled by configuration.")
 
     # --- Initialize Keyboard Simulator --- >
     keyboard_sim = KeyboardSimulator()

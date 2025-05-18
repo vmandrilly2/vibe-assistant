@@ -12,9 +12,9 @@ What this really is: a Speech to text assistant (not just for coding)
 - **Instant translation**: hover the mic icon while pressing, select target language, now when you talk, what you say is in the tooltip, but what gets written down is the translation. Now I can talk in my native language (the only way to have good accuracy), but still get my stuff to the AI in English.
 
 ## Set up
-You need to add a .env file at the roor and provide deepgramm API key. eg
+You need to add to the .env file at the root your deepgramm API key. eg
 DEEPGRAM_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-Add also an Openai Api Key for the translation (it's currently set to use nano model for fast and cheap translation)
+Add also an Openai Api Key for the translation if you use the translation. (it's currently set to use nano model for fast and cheap translation)
 OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 (Would be great to add more API supports in the future. It would be great to use local models although local models I tested are using way too much ressource for a worse accuracy and therefore impractical.)

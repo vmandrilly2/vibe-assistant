@@ -1,0 +1,52 @@
+{
+  "language_names": {
+    "en-US": "英語（米国）",
+    "en-GB": "英語（英国）",
+    "fr-FR": "フランス語",
+    "es-ES": "スペイン語",
+    "de-DE": "ドイツ語",
+    "it-IT": "イタリア語",
+    "pt-PT": "ポルトガル語",
+    "pt-BR": "ポルトガル語（ブラジル）",
+    "ru-RU": "ロシア語",
+    "zh": "中国語（標準）",
+    "ko-KR": "韓国語",
+    "ja-JP": "日本語",
+    "hi-IN": "ヒンディー語",
+    "ar": "アラビア語",
+    "nl-NL": "オランダ語",
+    "none": "なし（ディクテーションのみ）"
+  },
+  "mode_names": {
+    "Dictation": "ディクテーションモード",
+    "Keyboard": "キーボードモード"
+  },
+  "systray": {
+    "title": "Vibe アシスタント",
+    "menu": {
+      "mode": "モード",
+      "source_language": "ソース言語",
+      "target_language": "ターゲット言語",
+      "customization": "カスタマイズ",
+      "triggers": "トリガー",
+      "tooltip": "ツールチップ",
+      "min_duration": "最小時間（秒）：{value}",
+      "translation_model": "翻訳モデル：{value}",
+      "dictation_button": "ディクテーションボタン",
+      "command_button": "コマンドボタン",
+      "command_modifier": "コマンド修飾キー",
+      "tooltip_transparency": "透明度：{value}",
+      "tooltip_background": "背景：{value}",
+      "tooltip_text_color": "テキスト色：{value}",
+      "tooltip_font": "フォント：{value}",
+      "tooltip_font_size": "フォントサイズ：{value}",
+      "other_languages": "他の言語",
+      "no_other_languages": "利用可能な他の言語はありません",
+      "reload_config": "設定を再読み込み",
+      "exit": "終了"
+    }
+  },
+  "mic_ui_manager": {
+      "none_target": "なし"
+  }
+} 

@@ -1,0 +1,60 @@
+{
+  "language_names": {
+    "en-US": "English (US)",
+    "en-GB": "English (UK)",
+    "fr-FR": "French",
+    "es-ES": "Spanish",
+    "de-DE": "German",
+    "it-IT": "Italian",
+    "pt-PT": "Portuguese",
+    "pt-BR": "Portuguese (Brazil)",
+    "ru-RU": "Russian",
+    "zh": "Chinese (Mandarin)",
+    "ko-KR": "Korean",
+    "ja-JP": "Japanese",
+    "hi-IN": "Hindi",
+    "ar": "Arabic",
+    "nl-NL": "Dutch",
+    "none": "None (Dictation Only)"
+  },
+  "mode_names": {
+    "Dictation": "Dictation Mode",
+    "Keyboard": "Keyboard Input Mode"
+  },
+  "systray": {
+    "title": "Vibe Assistant",
+    "menu": {
+      "mode": "Mode",
+      "source_language": "Source Language",
+      "target_language": "Target Language",
+      "customization": "Customization",
+      "triggers": "Triggers",
+      "tooltip": "Tooltip",
+      "min_duration": "Min Duration (s): {value}",
+      "translation_model": "Translation Model: {value}",
+      "dictation_button": "Dictation Button",
+      "command_button": "Command Button",
+      "command_modifier": "Command Modifier",
+      "tooltip_transparency": "Transparency: {value}",
+      "tooltip_background": "Background: {value}",
+      "tooltip_text_color": "Text Color: {value}",
+      "tooltip_font": "Font: {value}",
+      "tooltip_font_size": "Font Size: {value}",
+      "other_languages": "Other languages",
+      "no_other_languages": "No other languages available",
+      "reload_config": "Reload Config",
+      "exit": "Exit"
+    },
+    "modules": {
+      "tooltip": "Show Tooltip",
+      "mic_ui_manager": "Show Indicator",
+      "action_confirm": "Confirm Actions",
+      "translation": "Enable Translation",
+      "command_interpretation": "Interpret Commands",
+      "audio_buffer": "Enable Audio Buffer"
+    }
+  },
+  "mic_ui_manager": {
+      "none_target": "None"
+  }
+} 

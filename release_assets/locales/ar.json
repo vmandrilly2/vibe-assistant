@@ -1,0 +1,52 @@
+{
+  "language_names": {
+    "en-US": "الإنجليزية (الولايات المتحدة)",
+    "en-GB": "الإنجليزية (المملكة المتحدة)",
+    "fr-FR": "الفرنسية",
+    "es-ES": "الإسبانية",
+    "de-DE": "الألمانية",
+    "it-IT": "الإيطالية",
+    "pt-PT": "البرتغالية",
+    "pt-BR": "البرتغالية (البرازيل)",
+    "ru-RU": "الروسية",
+    "zh": "الصينية (الماندرين)",
+    "ko-KR": "الكورية",
+    "ja-JP": "اليابانية",
+    "hi-IN": "الهندية",
+    "ar": "العربية",
+    "nl-NL": "الهولندية",
+    "none": "لا شيء (إملاء فقط)"
+  },
+  "mode_names": {
+    "Dictation": "وضع الإملاء",
+    "Keyboard": "وضع لوحة المفاتيح"
+  },
+  "systray": {
+    "title": "مساعد Vibe",
+    "menu": {
+      "mode": "الوضع",
+      "source_language": "لغة المصدر",
+      "target_language": "اللغة الهدف",
+      "customization": "تخصيص",
+      "triggers": "المشغلات",
+      "tooltip": "تلميح",
+      "min_duration": "الحد الأدنى للمدة (ثانية): {value}",
+      "translation_model": "نموذج الترجمة: {value}",
+      "dictation_button": "زر الإملاء",
+      "command_button": "زر الأمر",
+      "command_modifier": "معدل الأمر",
+      "tooltip_transparency": "الشفافية: {value}",
+      "tooltip_background": "الخلفية: {value}",
+      "tooltip_text_color": "لون النص: {value}",
+      "tooltip_font": "الخط: {value}",
+      "tooltip_font_size": "حجم الخط: {value}",
+      "other_languages": "لغات أخرى",
+      "no_other_languages": "لا توجد لغات أخرى متاحة",
+      "reload_config": "إعادة تحميل الإعدادات",
+      "exit": "خروج"
+    }
+  },
+  "mic_ui_manager": {
+      "none_target": "لا شيء"
+  }
+} 
